@@ -257,7 +257,7 @@ async function refresh() {
       ["Update", s.update ?? "–"], ["Decisions", s.global_step ?? "–"],
       ["Decisions / s", fmt(m["perf/decisions_per_s"], 0)],
       ["Win rate (last 200 games)", fmt(m["episodes/win_rate"])], ["Mean reward", fmt(m["episodes/mean_reward"])],
-      ["Mean rank", fmt(m["episodes/mean_rank"])], ["Value accuracy, late game", fmt(m["value/outcome_acc_late"])],
+      ["Mean rank", fmt(m["episodes/mean_rank"])], ["Value vs outcome correlation, late game", fmt(m["value/outcome_corr_late"])],
       ["Entropy", fmt(m["loss/entropy"], 3)], ["Invalid actions", fmt(m["actions/invalid_rate"], 3)]]);
     rows("system", [
       ["CPU load", fmt(sys.cpu_percent, 0) + " %"],

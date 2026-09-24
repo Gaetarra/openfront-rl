@@ -4,7 +4,28 @@ import unittest
 import torch
 
 from trainer.env import ROOT
-from trainer.ppo import gae, main
+from trainer.ppo import Outcomes, gae, main
+
+
+class OutcomesTest(unittest.TestCase):
+    def test_value_outcome_correlation_by_phase(self):
+        o = Outcomes(rows=4)
+        rewards = [1.0, -1.0, -2 / 3, -5 / 6]
+        o.record([0.1] * 4, [0.3, 0.3, -0.2, -0.2])  # early: only loosely related to the outcome
+        o.record([0.9] * 4, [0.9 * r for r in rewards])  # late: tracks it
+        o.finish([{"env": i, "seat": 0, "reward": r, "rank": 1, "ticks": 1} for i, r in enumerate(rewards)], seats=1)
+        s = o.summary()
+        self.assertAlmostEqual(s["value/outcome_corr_late"], 1.0, places=5)
+        self.assertLess(s["value/outcome_corr_early"], 0.9)
+        self.assertNotIn("value/outcome_corr_mid", s)
+
+    def test_no_correlation_when_every_game_ends_the_same(self):
+        o = Outcomes(rows=2)
+        o.record([0.9, 0.9], [-0.5, -0.8])
+        o.finish([{"env": i, "seat": 0, "reward": -1.0, "rank": 4, "ticks": 1} for i in range(2)], seats=1)
+        s = o.summary()
+        self.assertEqual(s["value/outcome_acc_late"], 1.0)  # trivially right: why the gate uses the correlation
+        self.assertNotIn("value/outcome_corr_late", s)
 
 
 class GaeTest(unittest.TestCase):

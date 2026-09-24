@@ -3595,8 +3595,9 @@ Stop with `python -m trainer.ctl stop` once the win rate has plateaued or after 
 
 Run: `.venv/Scripts/python -m trainer.eval --policy checkpoints/onion-gate/latest.pt --episodes 256`
 Gate (PLAN Phase 1): PPO's win rate and mean reward exceed the random baseline's by more than 3 combined standard
-errors, and `value/outcome_acc_late` ≥ 0.8 with mid ≥ early (the value head predicts outcomes, better as games
-progress).
+errors, and `value/outcome_corr_late` ≥ 0.5 with mid ≥ early (the value head predicts outcomes, better as games
+progress). The correlation between value and final reward replaced the sign accuracy `value/outcome_acc_*` (still
+logged): the random baseline never wins, so an agent that rarely wins scores ~95% accuracy by always predicting a loss.
 
 - [ ] **Step 5: Record the results and update the docs**
 

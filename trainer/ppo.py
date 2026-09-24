@@ -87,12 +87,14 @@ def game_commit():
 
 
 class Outcomes:
-    """Rolling episode results, and how often the value head's sign predicted the outcome, by game phase."""
+    """Rolling episode results, and how well the value head predicted each finished game's reward, by game phase:
+    sign accuracy (trivially high while one outcome dominates, e.g. an agent that rarely wins) and the correlation
+    between value and final reward (the gate's measure; rank-based rewards keep it defined without wins)."""
 
     def __init__(self, rows, window=200):
         self.episodes = collections.deque(maxlen=window)
         self.pending = [[] for _ in range(rows)]
-        self.hits = collections.deque(maxlen=50_000)
+        self.samples = collections.deque(maxlen=50_000)  # (phase bucket, value, final reward)
 
     def record(self, progress, values):
         for row, (p, v) in enumerate(zip(progress, values)):
@@ -101,8 +103,7 @@ class Outcomes:
     def finish(self, infos, seats):
         for info in infos:
             row = info["env"] * seats + info["seat"]
-            won = info["reward"] > 0
-            self.hits.extend((min(int(p * 3), 2), (v > 0) == won) for p, v in self.pending[row])
+            self.samples.extend((min(int(p * 3), 2), v, info["reward"]) for p, v in self.pending[row])
             self.pending[row] = []
             self.episodes.append(info)
 
@@ -114,10 +115,13 @@ class Outcomes:
                "episodes/mean_reward": float(np.mean([e["reward"] for e in ep])),
                "episodes/mean_rank": float(np.mean([e["rank"] for e in ep])),
                "episodes/ticks": float(np.mean([e["ticks"] for e in ep]))}
+        s = np.array(self.samples, float).reshape(-1, 3)
         for bucket, name in enumerate(("early", "mid", "late")):
-            hits = [ok for b, ok in self.hits if b == bucket]
-            if hits:
-                out[f"value/outcome_acc_{name}"] = float(np.mean(hits))
+            v, r = s[s[:, 0] == bucket, 1], s[s[:, 0] == bucket, 2]
+            if len(v) > 0:
+                out[f"value/outcome_acc_{name}"] = float(np.mean((v > 0) == (r > 0)))
+            if len(v) > 1 and v.std() > 0 and r.std() > 0:
+                out[f"value/outcome_corr_{name}"] = float(np.corrcoef(v, r)[0, 1])
         return out
 
 
