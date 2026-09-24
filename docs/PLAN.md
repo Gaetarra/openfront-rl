@@ -227,6 +227,9 @@ The game's own deps are installed inside the submodule (`npm run inst`); bridge 
   LayerNorm, layout conversions; no Triton on Windows, so no `torch.compile` fusion): 3.8k inference / 1.5k training
   samples/s even with channels-last. IMPALA-style ResNet, channels-last bf16:
   S 64/128/192 (2.3M) 11.4k / 3.8k, **M 96/192/256 (4.4M) 7.1k / 2.4k (chosen)**, L 128/256/384 (9.0M) 4.9k / 1.7k.
+  The card measures 68 TFLOP/s (bf16 matmul) and 348 GB/s (copy); forward cost S/M/L = 1.9/3.9/7.0 GFLOP per
+  decision, so the ResNet runs at 31/41/51% of peak: mostly compute-bound, the rest is memory-bound small ops at full
+  resolution (a Linux/WSL2 `torch.compile` could fuse some of them; untested).
   VRAM ≤ 2 GB at batch 128. PPO with 2–3 epochs → ~0.7–1k decisions/s, GPU-bound; CPU has 2–3× headroom, so fewer
   workers (6–8) can leave cores free for daily use.
 
