@@ -35,6 +35,14 @@ npx vitest tests/SomeTest.test.ts --run        # one game test file
 
 The game has its own `CLAUDE.md` with details on its architecture.
 
+## Bridge commands (run inside `OpenFront_Source_Code/openfrontio/`, which provides `tsx` and the tsconfig paths)
+
+```bash
+node --import tsx --test "../../bridge/*.test.ts"              # all bridge tests (node:test)
+node --import tsx --test ../../bridge/game.test.ts             # one test file
+node node_modules/typescript/bin/tsc -p ../../tsconfig.json    # typecheck bridge/ (tsx does not typecheck)
+```
+
 ## Benchmarks (Phase 0 results are in `docs/PLAN.md`)
 
 ```bash
@@ -59,5 +67,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - The game logs with `console.log`: a process whose stdout carries frames must redirect it to stderr.
 - Replays: archived records contain only human intents; nations and bots re-simulate from the game seed. A record
   only replays in sync at its exact `gitCommit`.
-- v0.34.x has no game snapshots, and `loadTerrainMap` caches one mutable map per map and size per process, so run
-  one game per Node process until a release ships per-game fresh maps.
+- v0.34.x has no game snapshots. `loadTerrainMap` caches one mutable map per map and size per process, so the bridge
+  builds a fresh map for every game (`bridge/maps.ts: loadFreshTerrain`) and resets the game's cross-game static
+  fields before each game (`resetGameStatics`); several games can then share a worker process. On every upgrade, grep
+  `src/core` for non-readonly `private static` fields and add new ones to `resetGameStatics`.
+- Code that only builds observations may use `Math.*`; code whose output reaches the simulation (intents, latency)
+  must use seeded `PseudoRandom`.

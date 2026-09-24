@@ -1,0 +1,13 @@
+{
+  "extends": "./OpenFront_Source_Code/openfrontio/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "typeRoots": ["./OpenFront_Source_Code/openfrontio/node_modules/@types"]
+  },
+  "include": [
+    "bridge/**/*.ts",
+    "OpenFront_Source_Code/openfrontio/src/**/*.d.ts",
+    "OpenFront_Source_Code/openfrontio/src/client/Main.ts"
+  ]
+}

@@ -296,7 +296,7 @@ provide (never by bypassing Turnstile).
 - Replay data is public (docs/API.md); contacting the maintainers is courtesy, not a blocker.
 
 ## Verification
-- `npx vitest bridge --run`: decoder rules, masks, ranking, latency queue, frame deltas == full recompute,
+- `node --import tsx --test "../../bridge/*.test.ts"` (node:test, run from the game dir): decoder rules, masks, ranking, latency queue, frame deltas == full recompute,
   determinism, map augmentation (flip twice = identity; sim runs), procedural port byte-for-byte vs official map.bin,
   predictor Gate A.
 - Smoke: random-agent games to completion in every mode; replay extraction hashes match recorded hashes.
