@@ -6,7 +6,7 @@ Work in progress.
 The goal is a bot that plays every mode (Ranked 1v1/2v2, FFA, Team) well: first learning from human replays,
 then improving through self-play. The full design, phases and decisions are in [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** Phase 0 (setup and benchmarks).
+**Status:** Phase 0 (setup and benchmarks) done; Phase 1 (first playable training loop) next.
 
 ## Layout
 
@@ -24,6 +24,9 @@ then improving through self-play. The full design, phases and decisions are in [
 git clone --recursive https://github.com/Gaetarra/openfront-rl
 cd openfront-rl/OpenFront_Source_Code/openfrontio
 npm run inst
+cd ../..
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt
 ```
 
 ## Credits

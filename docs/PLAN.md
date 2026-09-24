@@ -3,8 +3,8 @@
 ## Context
 Goal: train the strongest possible deep-RL bot for OpenFront — Ranked 1v1/2v2, public FFA and Team, with modifiers and
 unseen maps — on a student budget: one PC (i5-13600KF 14C/20T, 32 GB RAM, RTX 4070 Ti 12 GB, Windows 11 without WSL,
-Node 24, Python 3.11, no PyTorch yet). User decisions: bootstrap from human replays; reward = terminal rank-based only
-(shaping only if learning stalls); final use = private lobbies with consenting humans, maybe AI-tagged official matches
+Node 24, Python 3.11 with PyTorch 2.14 cu130). User decisions: bootstrap from human replays; reward = terminal
+rank-based only (shaping only if learning stalls); final use = private lobbies with consenting humans, maybe AI-tagged official matches
 if the maintainers allow it. Upstream moves fast (~9 commits/day), so the game is pinned to the current production
 release and the base model follows each new release.
 
@@ -48,8 +48,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
 - Stats give each clientID player a `deathPosition` (StatsImpl.ts:463-467) → agent rank is built in.
 
 ## Key decisions
-1. **No C++ port.** Learner ≈1–2k decisions/s (~4M-param net, to be measured); sim needs ≤5–10k ticks/s, far less with
-   multi-seat games. A port would break BC (replays need the exact TS sim) and can't track upstream.
+1. **No C++ port.** Measured in Phase 0: PPO learner ≈0.7–1k decisions/s (~6M-param net), while ~10 cores of TS sim
+   give ≈2k (Normal) to ≈7k (Compact) ranked 1v1 decisions/s, so the GPU is the bottleneck. A port would break BC
+   (replays need the exact TS sim) and can't track upstream.
 2. **CNN on the whole map**, fixed cell grid: 1 cell = 8×8 tiles Normal = 4×4 Compact (same geography → same grid;
    World = 250×125). Plus a player-entity transformer and a scalar MLP. Fully convolutional with padding masks,
    batches grouped by map, tiles-per-cell input, range channels in tile units. Start with maps ≤ ~100k cells.
@@ -66,13 +67,13 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
       (e.g. a ranked-1v1 fine-tune) picked at deployment by lobby type;
    c. learned MoE: placed after the encoders (the router needs the CNN/player/scalar features), over the fused vector or
       the 1/16-res spatial + player tokens; swappable dense ↔ Soft-MoE (4–8 experts, the variant that helped deep-RL
-      scaling in 2024 work). It adds capacity at ~zero extra compute (the CNN, which always runs, is ~75–90% of the
+      scaling in 2024 work). It adds capacity at ~zero extra compute (the CNN, which always runs, is ~95% of the
       FLOPs); it does not reduce compute. A/B during BC on held-out accuracy per situation bucket, confirmed in RL.
 6. **Model size: spend parameters where they are cheap.** Compute ≈ CNN width² × map cells, so the CNN ("eyes") stays
    modest and is sized by the GPU benchmark (doubling its width ≈ 4× compute ≈ 4× less experience per day). The
    "brain" (core, player transformer, heads, MoE experts) costs ~1 MAC per parameter per decision, so it can grow from
-   ~1.5M to ~10–30M params almost free. Start ~4M total; pick the final size from BC scaling curves (S/M/L on the same
-   human data), since more experience usually beats a bigger net on one GPU.
+   ~1.5M to ~10–30M params almost free. Start ~6M total (M width, Phase 0); pick the final size from BC scaling curves
+   (S/M/L on the same human data), since more experience usually beats a bigger net on one GPU.
 7. **Maps & generalisation:** official maps weighted like the real playlist + dihedral augmentation (mirror/rotate the
    bins and nation coordinates; the sim stays self-consistent) + procedural maps (TS port of the map-generator pipeline,
    validated byte-for-byte on official maps; noise continents/islands/rivers/mountains, random sizes/aspects, random
@@ -125,12 +126,12 @@ Python trainer (GPU)                                    Node env workers (CPU, ~
 
 | Model part | Design | Params |
 |---|---|---|
-| CNN encoder | ~48 ch × cell grid; 4×4 stride-4 stem; 3 ConvNeXt-style stages 96/192/256 ch to 1/16 res; avg+max pool | ~2.6M |
-| Heat-map decoder | U-Net-lite back to cell res, FiLM on action/unit type; separate spawn head | ~0.2M |
+| CNN encoder | ~48 ch × cell grid; 4×4 stride-4 stem; 3 IMPALA-style ResNet stages (2 blocks of 3×3 convs, no norm, zero-init residual) 96/192/256 ch to 1/16 res; avg+max pool | ~4.3M |
+| Heat-map decoder | U-Net-lite back to 1/4 res, pixel shuffle to cell res + 1×1 skip from the input, FiLM on action/unit type; separate spawn head | ~0.3M |
 | Player encoder | 2-layer transformer d=128 over ≤64 players (features + spatial features pooled over their cells) | ~0.4M |
 | Scalars + core | MLPs → 512-d (dense or Soft-MoE) | ~0.8M |
 | Heads | action type, player pointer, bins, arc, value | ~0.3M |
-| Total (v1) | ≈1.5 GMAC per decision on a 31k-cell grid, ~75–90% of it in the CNN; width set by the Phase 0 benchmark | ~4M |
+| Total (v1) | ≈2 GMAC per decision on a 32k-cell grid, ~95% of it in the CNN; measured ~6.5k decisions/s inference, ~2.3k/s training (4070 Ti, bf16) | ~6M |
 | Scale-up path | wider core / transformer / Soft-MoE experts, chosen from BC scaling curves; CNN widened only if it underfits | ~10–30M |
 
 **Parallelism (this PC):** ~12 Node workers × 2–4 games (round-robin); one Python process batches GPU inference for all
@@ -210,6 +211,25 @@ The game's own deps are installed inside the submodule (`npm run inst`); bridge 
 - Message the maintainers about bulk replay downloads (courtesy, avoids throttling, maybe a dump).
 - Gate: pin chosen; throughput numbers recorded.
 
+**Phase 0 results (2026-09-24, gate passed; scripts: `scripts/bench_env.ts`, `scripts/bench_gpu.py`)**
+- S1: 100/100 sampled public records ran v0.34.17 (`59da4bc1`), so the pin is right. Last 24 h: 10,460 unranked,
+  2,439 ranked 1v1 and 667 ranked 2v2 public games. 20/20 replays (ranked 1v1/2v2, FFA, Team, up to 85 players) stayed
+  in sync at every hash checkpoint. Some ranked records are void (1 player, ~210 ticks): the crawler must drop records
+  with fewer than 2 (1v1) or 4 (2v2) spawned players.
+- S2, one core, real records, 5-tick steps: sim 2.7 ms (Compact Asia 2v2), 9 ms (Australia 2v2, 400 bots), 18 ms
+  (Giant World FFA, 85 players). Per-cell frame updated only for cells in the tick's `packedTileUpdates`: 0.7–2.2% of
+  sim time (a full rebuild would cost 53–73%). Delta per step (11 B per changed cell): mean 3–6 KB, p95 11–17 KB,
+  max 60 KB; full frame 256–857 KB. Pipe write 0.03 ms/step. The game logs with `console.log`, so the bridge must route
+  it to stderr when stdout carries frames. `perf:game` Australia, first 3,000 ticks: 100 bots 1,063 ticks/s, 400 bots
+  452 ticks/s: bots are most of the CPU cost. Up to 404 (ranked) / 584 (Giant FFA) players are alive at once, so the
+  player transformer's ≤64 slots need a selection rule (Phase 2).
+- S3 (RTX 4070 Ti, torch 2.14 cu130, 32k-cell grid, batch 64): the ConvNeXt encoder was memory-bound (depthwise 7×7,
+  LayerNorm, layout conversions; no Triton on Windows, so no `torch.compile` fusion): 3.8k inference / 1.5k training
+  samples/s even with channels-last. IMPALA-style ResNet, channels-last bf16:
+  S 64/128/192 (2.3M) 11.4k / 3.8k, **M 96/192/256 (4.4M) 7.1k / 2.4k (chosen)**, L 128/256/384 (9.0M) 4.9k / 1.7k.
+  VRAM ≤ 2 GB at batch 128. PPO with 2–3 epochs → ~0.7–1k decisions/s, GPU-bound; CPU has 2–3× headroom, so fewer
+  workers (6–8) can leave cores free for daily use.
+
 **Phase 1 — Vertical slice (≈2–3 weeks)**
 - Minimal bridge + Python vec env, GPU ego builder, small model, PPO; reduced actions (no-op, spawn, attack, boat, build
   city); `Ranking.ts`; latency queue; determinism test (same seed + actions → same hash, fresh process and after other games).
@@ -226,7 +246,8 @@ The game's own deps are installed inside the submodule (`npm run inst`); bridge 
 
 **Phase 3 — Human replays + behaviour cloning (≈3–5 weeks)**
 - `crawl.py`: ≈1 req/s, cached, usernames blanked (clan tags/friends/teamIndex kept: sim inputs), deleted players
-  purged; priority: all ranked 1v1/2v2 records, then top public FFA/Team games.
+  purged; void records dropped (see Phase 0 results); priority: all ranked 1v1/2v2 records, then top public FFA/Team
+  games.
 - Replay at the pinned commit; keep records (or prefixes) whose hashes stay in sync. Frames + labels generated on the fly.
 - Labels: troops → bins, tiles → cells, unit ids → cells, extra intents queued; imitate top finishers; measure APM.
 - Model experiments on the same data (cheap, supervised): dense vs Soft-MoE and S/M/L sizes; held-out accuracy per

@@ -35,6 +35,15 @@ npx vitest tests/SomeTest.test.ts --run        # one game test file
 
 The game has its own `CLAUDE.md` with details on its architecture.
 
+## Benchmarks (Phase 0 results are in `docs/PLAN.md`)
+
+```bash
+npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a real record (run from the game dir)
+.venv/Scripts/python scripts/bench_gpu.py                   # GPU encoder throughput (run from the repo root)
+```
+
+Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUDA 13.0 wheels).
+
 ## Simulation facts the bridge relies on
 
 - 10 ticks = 1 s of game time. One turn is executed per tick.
@@ -45,7 +54,9 @@ The game has its own `CLAUDE.md` with details on its architecture.
 - Determinism: the core uses `PseudoRandom` (never `Math.random`) and `src/core/DetMath.ts` instead of
   `Math.exp/log/pow/atan2`. Anything we add that feeds the simulation must follow the same rules.
 - Ownership: `game.map().tileStateBuffer()` is a live `Uint16Array` (owner = `v & 0xFFF`, fallout = bit 13).
-  Read it only between ticks.
+  Read it only between ticks. Each tick's changed tiles arrive as `[tileRef, state]` pairs in the runner callback's
+  `packedTileUpdates`; update only the cells they touch (a full rebuild costs over half of the sim time).
+- The game logs with `console.log`: a process whose stdout carries frames must redirect it to stderr.
 - Replays: archived records contain only human intents; nations and bots re-simulate from the game seed. A record
   only replays in sync at its exact `gitCommit`.
 - v0.34.x has no game snapshots, and `loadTerrainMap` caches one mutable map per map and size per process, so run
