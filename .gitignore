@@ -1,0 +1,14 @@
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Training outputs and downloaded replays: large, and replays contain player names
+runs/
+checkpoints/
+data/
+
+# Profiler output
+*.cpuprofile
+*.heapprofile
