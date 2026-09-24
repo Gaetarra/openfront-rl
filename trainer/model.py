@@ -1,0 +1,135 @@
+"""Policy network (PLAN "Architecture"): ResNet map encoder, U-Net-lite heat maps, player and scalar encoders, heads."""
+import math
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Categorical
+
+ACT_NAMES = ["noop", "spawn", "attack", "boat", "build_city"]
+SPAWN, ATTACK, BOAT, BUILD = 1, 2, 3, 4
+N_MAPS = 3  # heat maps: spawn, boat landing, city
+MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
+
+
+class Res(nn.Module):
+    """IMPALA-style residual block: two 3x3 convs, no norm, zero-init residual branch."""
+
+    def __init__(self, c):
+        super().__init__()
+        self.c1, self.c2 = nn.Conv2d(c, c, 3, padding=1), nn.Conv2d(c, c, 3, padding=1)
+        nn.init.zeros_(self.c2.weight)
+        nn.init.zeros_(self.c2.bias)
+
+    def forward(self, x):
+        return x + self.c2(F.relu(self.c1(F.relu(x))))
+
+
+class Policy(nn.Module):
+    def __init__(self, dims, widths=(64, 128, 192)):
+        super().__init__()
+        c_in, n_feat, n_scal = dims["channels"], dims["playerFeatures"], dims["scalars"]
+        self.n_bins = len(dims["troopBins"])
+        c1, c2, c3 = widths
+        self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
+        self.s1 = nn.Sequential(Res(c1), Res(c1))
+        self.d2, self.s2 = nn.Conv2d(c1, c2, 2, stride=2), nn.Sequential(Res(c2), Res(c2))
+        self.d3, self.s3 = nn.Conv2d(c2, c3, 2, stride=2), nn.Sequential(Res(c3), Res(c3))
+        self.players = nn.Sequential(nn.Linear(n_feat, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU())
+        self.scalars = nn.Sequential(nn.Linear(n_scal, 128), nn.ReLU())
+        self.core = nn.Sequential(nn.Linear(2 * c3 + 256, 512), nn.ReLU(), nn.Linear(512, 512), nn.ReLU())
+        self.film = nn.Linear(512, 2 * c1)
+        self.u3, self.u2 = nn.Conv2d(c3, c2, 1), nn.Conv2d(c2, c1, 1)
+        self.shuffle = nn.Conv2d(c1, N_MAPS * 16, 1)
+        self.skip = nn.Conv2d(c_in, N_MAPS, 1)
+        self.type_head = nn.Linear(512, dims["acts"])
+        self.bin_head = nn.Linear(512, 2 * self.n_bins)
+        self.query, self.key = nn.Linear(512, 128), nn.Linear(128, 128)
+        self.value_head = nn.Linear(512, 1)
+        # Policy outputs start at zero: a uniform policy over legal actions.
+        for layer in (self.type_head, self.bin_head, self.shuffle, self.skip, self.query):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, obs):
+        x = obs["spatial"].contiguous(memory_format=torch.channels_last)
+        f1 = self.s1(self.stem(x))
+        f2 = self.s2(self.d2(F.relu(f1)))
+        f3 = self.s3(self.d3(F.relu(f2)))
+        pooled = torch.cat([f3.mean((2, 3)), f3.amax((2, 3))], 1)
+        emb = self.players(obs["players"])
+        exists = obs["players"][..., :1]
+        p_pool = (emb * exists).sum(1) / exists.sum(1).clamp(min=1)
+        h = self.core(torch.cat([pooled, p_pool, self.scalars(obs["scalars"])], 1))
+        g = f2 + F.interpolate(self.u3(F.relu(f3)), scale_factor=2)
+        g = f1 + F.interpolate(self.u2(F.relu(g)), scale_factor=2)
+        gamma, beta = self.film(h).chunk(2, 1)
+        g = g * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]
+        maps = F.pixel_shuffle(self.shuffle(F.relu(g)), 4) + self.skip(x)
+        ptr = torch.einsum("nd,npd->np", self.query(h), self.key(emb)) / math.sqrt(128)
+        return {"type": self.type_head(h), "maps": maps.flatten(2), "bins": self.bin_head(h).view(-1, 2, self.n_bins),
+                "ptr": ptr, "value": self.value_head(h).squeeze(1)}
+
+
+class RandomPolicy(nn.Module):
+    """Uniform over legal actions: zero logits everywhere, the masks do the rest (the Phase 1 baseline)."""
+
+    def __init__(self, dims):
+        super().__init__()
+        self.n_bins = len(dims["troopBins"])
+
+    def forward(self, obs):
+        n, dev = obs["type_mask"].shape[0], obs["type_mask"].device
+        return {"type": torch.zeros(obs["type_mask"].shape, device=dev),
+                "maps": torch.zeros(obs["cell_mask"].shape, device=dev),
+                "bins": torch.zeros(n, 2, self.n_bins, device=dev),
+                "ptr": torch.zeros(obs["attack_mask"].shape, device=dev),
+                "value": torch.zeros(n, device=dev)}
+
+
+def _masked(logits, mask):
+    mask = mask.clone()
+    mask[..., 0] |= ~mask.any(-1)  # rows without a legal entry get a dummy one; their head is never used
+    return Categorical(logits=torch.where(mask, logits, MASK_VALUE))
+
+
+class ActionDist:
+    """The joint action [type, cell, target, bin]: the type picks which argument heads are used.
+
+    spawn: spawn map cell; attack: player pointer + attack troops; boat: boat map cell + boat troops;
+    build city: city map cell."""
+
+    def __init__(self, out, obs):
+        self.type = _masked(out["type"].float(), obs["type_mask"])
+        self.cells = _masked(out["maps"].float(), obs["cell_mask"])  # batch [N, 3]
+        self.ptr = _masked(out["ptr"].float(), obs["attack_mask"])
+        self.bins = Categorical(logits=out["bins"].float())  # batch [N, 2]: attack, boat
+
+    def sample(self):
+        t, c, p, b = self.type.sample(), self.cells.sample(), self.ptr.sample(), self.bins.sample()
+        zero = torch.zeros_like(t)
+        cell = torch.where(t == SPAWN, c[:, 0], torch.where(t == BOAT, c[:, 1], torch.where(t == BUILD, c[:, 2], zero)))
+        target = torch.where(t == ATTACK, p, zero)
+        troops = torch.where(t == ATTACK, b[:, 0], torch.where(t == BOAT, b[:, 1], zero))
+        return torch.stack([t, cell, target, troops], 1)
+
+    def log_prob(self, actions):
+        t, cell, target, troops = actions.unbind(1)
+        lc = self.cells.log_prob(cell[:, None].expand(-1, N_MAPS))
+        lb = self.bins.log_prob(troops[:, None].expand(-1, 2))
+        zero = torch.zeros_like(lc[:, 0])
+        return (self.type.log_prob(t)
+                + torch.where(t == SPAWN, lc[:, 0], zero)
+                + torch.where(t == ATTACK, self.ptr.log_prob(target) + lb[:, 0], zero)
+                + torch.where(t == BOAT, lc[:, 1] + lb[:, 1], zero)
+                + torch.where(t == BUILD, lc[:, 2], zero))
+
+    def entropy(self):
+        """Exact joint entropy, H(type) + sum_k p(k) H(args | k), with every head divided by the log of its size so
+        the 4k-cell maps do not drown out the type head."""
+        hc = self.cells.entropy() / math.log(self.cells.logits.shape[-1])
+        hb = self.bins.entropy() / math.log(self.bins.logits.shape[-1])
+        hp = self.ptr.entropy() / math.log(max(self.ptr.logits.shape[-1], 2))
+        pt = self.type.probs
+        return (self.type.entropy() / math.log(pt.shape[-1]) + pt[:, SPAWN] * hc[:, 0]
+                + pt[:, ATTACK] * (hp + hb[:, 0]) + pt[:, BOAT] * (hc[:, 1] + hb[:, 1]) + pt[:, BUILD] * hc[:, 2])
