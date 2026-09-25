@@ -6,7 +6,10 @@ Work in progress.
 The goal is a bot that plays every mode (Ranked 1v1/2v2, FFA, Team) well: first learning from human replays,
 then improving through self-play. The full design, phases and decisions are in [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** Phase 0 (setup and benchmarks) done; Phase 1 (first playable training loop) next.
+**Status:** Phase 1 (training pipeline: headless games, observations, model, PPO, pause/resume control) is built. Its
+learning test stalled without behaviour cloning, as a from-scratch agent rarely beats even the easiest opponents, and a
+re-plan that moves behaviour cloning earlier is under review (see [docs/PLAN.md](docs/PLAN.md)).
+Training: `.venv/Scripts/python -m trainer.ppo --run <name>`, then open the control page at http://127.0.0.1:8787.
 
 ## Layout
 

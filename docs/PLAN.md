@@ -241,6 +241,68 @@ The game's own deps are installed inside the submodule (`npm run inst`); bridge 
 - Gate: tiny Compact map (Onion/Pangaea), 1 agent vs 2–3 Easy nations, 5-min timer, terminal reward → PPO clearly beats
   the random-legal agent within hours; value head predicts outcomes.
 
+**Phase 1 results (2026-09-25): pipeline done, learning gate NOT met** (branch `phase1`, not merged or pushed;
+implementation plan `docs/superpowers/plans/2026-09-24-phase1-vertical-slice.md`)
+- Built as planned. Bridge: fresh per-game maps + `resetGameStatics` (K games per worker process), incremental cell frame,
+  seeded latency queue, rank reward, masks + decoding (exact checks in the worker, failures = counted no-ops), per-seat
+  observation, stdin/stdout worker protocol. Trainer: `VecEnv` with the GPU observation builder, ResNet 64/128/192
+  policy with a masked joint action distribution (entropy per head divided by log of its size), control API + page +
+  CLI (`X-Control` header), PPO with checkpoints/resume, fixed-seed eval. Tests: 22 bridge (node:test instead of
+  vitest), 22 trainer (unittest); determinism holds in a fresh worker and after other games. Pause, resume, throttle,
+  stop and resume-from-checkpoint verified live.
+- Speed: Onion Compact sim ≈0.06 ms/tick. The trainer's single Python thread is the bottleneck (82% of a core; workers
+  11–17%; GPU mostly idle, 40–55 °C). 8 workers × 4 games: 1.1–1.9k decisions/s; × 8 games: 1.8–2.4k (27M decisions in
+  4 h). Later fixes: overlap two worker groups (planned above), bigger batches, profile and trim per-step Python work.
+- Gate: random-legal baseline 0/256 wins, mean rank 3.98/4, mean reward −0.997. PPO run `onion-gate` (27M decisions,
+  3,300 updates): mean rank flat at 3.93–3.97 throughout, no wins after the first minutes, value/outcome correlation
+  0.1–0.2. Eval on the same 256 seeds: rank 3.99, reward −0.998, i.e. no better than random.
+- Diagnosis (64 games each): a scripted "attack unowned land with 25% of troops every 2 s, no boats" ranks 2.77 at the
+  5-min timer (8% wins, 44% top-2) and 2.41 at 2 min (38% wins); random ranks 3.97 / 3.78 (`scripts/diag_baselines.py`).
+  The task is learnable, but uniform-random exploration (≈1/3 boats, random attacks on nations, random amounts)
+  finishes last in ~97% of games, so a terminal rank reward carries almost no signal. This is the cold start behaviour
+  cloning exists for; the gate should not have asked from-scratch PPO to pass it.
+- Value gate: sign accuracy is trivially high while the agent rarely wins, so it was replaced by the per-phase
+  correlation between value and final reward (`value/outcome_corr_*`; gate: late ≥ 0.5, mid ≥ early).
+- Open minors from the final review: the status shows "running" for a moment when stop arrives while paused; a hung
+  worker is killed but not reaped; `--resume` silently ignores flags outside `KEEP_ON_RESUME` (fix: explicit flags
+  override, but refuse worker/game-count changes, since episode counters are per slot).
+- Checkpoints: `checkpoints/onion-gate/` (every 250 updates + `latest.pt`), `checkpoints/onion-gate-g4-stopped/` (first
+  attempt, killed with its Claude Code session at update 375). Long runs must be started detached (see CLAUDE.md).
+
+**PROPOSED re-plan (2026-09-25) — not decided; to be judged in a planning session**
+Move behaviour cloning ahead of the full environment, as a thin slice on the current 5 actions:
+1. Close Phase 1 as "pipeline done" (merge `phase1`); the learning gate becomes "PPO from a BC init" (step 2e).
+2. New Phase 2, BC slice:
+   a. Measure first. Only records at the pinned `gitCommit` replay in sync, so count the ranked 1v1 records since
+      v0.34.17 went live (metadata requests only). On a sample of records, count human intents by type: the share
+      the 5 actions cover decides how much this slice can teach. Also measure APM against Δ = 0.5 s (decision 11).
+      Send the maintainers the bulk-download courtesy message (still open) before crawling.
+   b. `crawl.py` for ranked 1v1 (≈2.4k games/day): ≈1 req/s, cached, usernames blanked, deleted players purged, void
+      records dropped.
+   c. Replay extractor (bridge): build the game from the record's `GameStartInfo` (as `tests/replay/ReplayGame.ts`
+      does), replay its turns, and stream the same observation blobs as the env worker plus per-seat labels, through
+      the same protocol and GPU builder, so BC and RL see identical inputs. Labels: no-op / spawn / attack (bin) / boat
+      (cell, bin) / build city. Human intents outside the action set are left out of the loss (never relabelled as
+      no-op). Extra intents queue into later windows (decision 11). Labels illegal under our approximate masks are
+      counted and left out.
+   d. BC training: loss = −log π(label) via `ActionDist.log_prob` with the masks; held-out games; accuracy/NLL per head
+      and per game phase; batches grouped by map (the trainer assumes one grid per `VecEnv` today).
+   e. Eval: BC vs random and vs the scripted expansion baseline (move it into `trainer/eval.py`). Where: ranked 1v1
+      (needs `rankedType`, 2 seats and bots in `EnvConfig`) and the Onion test. Then PPO from the BC checkpoint with
+      KL-to-BC.
+   f. Optional: watch games. Record eval games in the game's replay format and serve them to a local client at the
+      pinned version (the client loads archived games from `${apiBase}/game/<id>`, `src/client/JoinLobbyModal.ts`).
+      Needs a short investigation.
+3. Then the old Phase 2 (full actions, masks, configs, maps). New actions arrive by network surgery (zero-init
+   heads, decision 14) and the extractor maps more intent types. Then a BC refresh with all actions, then Phase 4 RL.
+Why BC was scheduled after the full environment: labels need the full action space (humans use ~20 intent types), and
+the crawler, extractor and ranked configs are substantial work. Against it: a 5-action BC already teaches the early-game
+expansion the agent lacks, and the design already supports growing the action space.
+Open questions: imitate winners only or both players (weighted by outcome)? Ranked 1v1 maps (Australia, Iceland, Asia,
+EuropeClassic) are not Onion; does BC transfer to the Onion test, or should the gate move to ranked 1v1?
+Alternatives if not adopted: 2-min timer curriculum with terminal reward (random reaches rank ≤ 3 in 19% of games vs 3%
+at 5 min), reverse curriculum, potential-based shaping (only with the user's OK), or the original order.
+
 **Phase 2 — Full environment (≈3 weeks)**
 - Full v1 actions + masks, spawn head, SAM coverage channels; `Configs.ts`: ranked 1v1/2v2 (copies of
   `get1v1Config/get2v2Config`), public sampler (playlist map weights, team configs, modifier pool and exclusions);

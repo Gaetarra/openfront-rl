@@ -52,6 +52,25 @@ npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a
 
 Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUDA 13.0 wheels).
 
+## Training commands (repo root)
+
+```bash
+.venv/Scripts/python -m unittest discover -s trainer -t .      # trainer tests (start real Node workers, need the GPU)
+.venv/Scripts/python -m trainer.ppo --run onion                 # train; control page http://127.0.0.1:8787
+.venv/Scripts/python -m trainer.ppo --run onion --resume        # continue from checkpoints/onion/latest.pt
+.venv/Scripts/python -m trainer.ctl pause|resume|save|stop|throttle half|status
+.venv/Scripts/python -m trainer.eval --policy checkpoints/onion/latest.pt   # fixed-seed eval (--policy random = baseline)
+.venv/Scripts/python scripts/diag_baselines.py                  # random vs scripted expansion (Phase 1 diagnosis)
+.venv/Scripts/tensorboard --logdir runs                         # charts, incl. actions/* mix and episodes/* ranks
+```
+
+- Claude Code kills its background tasks when the session ends, and a training run started as one dies with it. Start
+  runs longer than a few minutes detached: a short Python launcher calling `subprocess.Popen([...], stdout=log,
+  stderr=log, creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)`, or the user's own
+  terminal. Detached runs are still controlled via the page / `trainer.ctl`. (Surviving a session restart is not yet
+  verified.)
+- `--resume` keeps the checkpoint's settings except `KEEP_ON_RESUME` (`trainer/ppo.py`); other flags are ignored.
+
 ## Simulation facts the bridge relies on
 
 - 10 ticks = 1 s of game time. One turn is executed per tick.
