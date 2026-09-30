@@ -8,6 +8,7 @@ __pycache__/
 runs/
 checkpoints/
 data/
+replays/
 
 # Profiler output
 *.cpuprofile
