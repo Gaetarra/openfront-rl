@@ -4,9 +4,12 @@
 Goal: train the strongest possible deep-RL bot for OpenFront — Ranked 1v1/2v2, public FFA and Team, with modifiers and
 unseen maps — on a student budget: one PC (i5-13600KF 14C/20T, 32 GB RAM, RTX 4070 Ti 12 GB, Windows 11 without WSL,
 Node 24, Python 3.11 with PyTorch 2.14 cu130). User decisions: bootstrap from human replays; reward = terminal
-rank-based only (shaping only if learning stalls); final use = private lobbies with consenting humans, maybe AI-tagged official matches
-if the maintainers allow it. Upstream moves fast (~9 commits/day), so the game is pinned to the current production
+rank-based only (shaping only if learning stalls); final use = private lobbies with consenting humans and tests in
+official casual lobbies. Upstream moves fast (~9 commits/day), so the game is pinned to the current production
 release and the base model follows each new release.
+**Maintainers (OpenFront owner on Discord, 2026-09-30):** using the public API for training is fine (no data dump:
+we crawl it ourselves); the bot may be tested in casual multiplayer games (not ranked, no abuse); the user's account
+has an AI-DEV tag.
 
 ## Ambition ladder (honest expectations)
 | Level | Target | Outlook |
@@ -86,7 +89,8 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
    If learning stalls: reverse curriculum (start from mid/late-game states), only then annealed potential-based shaping.
 10. **PPO** (CleanRL-style), GAE, masked logits, KL-to-BC (annealed), territory-delta channel; PyTorch eager + bf16.
 11. **Δ = 5 ticks (0.5 s), one action per decision**: ~2,400 decisions per 20-min game instead of 12,000. Extra human
-    intents inside a BC window queue into following windows. Re-check with measured human APM.
+    intents inside a BC window queue into following windows. Measured on 61 replays (2026-09-30): median 21 commands/min
+    per player in ranked 1v1 (p90 32), 16 in 2v2; only 10–15% of active 0.5 s windows hold 2+ commands, so Δ = 5 holds.
 12. **Deployment requirements baked in**: same pinned commit on the server; random intent latency L ∈ {1,2,3} turns
     (p = .6/.3/.1), seat order shuffled per turn; ≤150 intents/min/seat; real-time CPU inference.
 13. **Curriculum: Ranked 1v1 → Ranked 2v2 → public FFA/Team with nations + modifiers → augmented/procedural maps.**
@@ -109,6 +113,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
     rules → optional BC refresh from new-version replays. Balance/rule patches: fine-tune only (hours–days of GPU);
     new mechanic: bridge code + surgery + longer fine-tune; never retrain from scratch. Keep one worktree per past pin so
     old replays stay re-extractable.
+    Log: v0.34.17 → **v0.34.21** (2026-10-01): 32 commits of lobby, telemetry, auth, record metadata and npm changes, no
+    simulation change (nothing in `src/core/game`, `execution`, `configuration`); ranked 1v1 records from v0.34.17,
+    v0.34.20 and v0.34.21 replay in sync at v0.34.21 (5/5, every hash). v0.34.21 requires npm ≥ 12.1 (`engine-strict`).
 
 ## Architecture
 ```
@@ -170,6 +177,10 @@ all modifiers, win-threshold progress, time left, tiles-per-cell.
 | diplomacy | player ptr × {request/accept, reject, break, extend, donate gold, donate troops, embargo on/off, target} | alliance* / donate* / embargo / targetPlayer |
 Dropped in v1: emoji, quick_chat, delete_unit, cancel_boat, embargo_all. Masks: cheap approximate grid masks (mostly
 derived on the GPU from observation channels); exact check only on the sampled action; failures = logged no-ops.
+Coverage of human commands (61 replays, 2026-09-30): this list 99.9% ranked 1v1, 99.8% 2v2, 99.5% FFA and Team; the
+Phase 1 subset (no-op, spawn, attack, boat, build city) 94.7%, 92.1%, 76.0%, 81.3%. The Phase 1 subset misses what
+decides the mid and late game: per ranked 1v1 game ~5 nukes, 3–4 silos, 3–4 defense posts, 2 factories, 1 port, 1 SAM,
+upgrades; FFA/Team add alliances (~6%), troop donations (~3% in Team) and warships.
 
 ## Repo layout
 New standalone GitHub repo **`Gaetarra/openfront-rl` (private; rename or make public any time)**, rooted at
@@ -208,7 +219,8 @@ The game's own deps are installed inside the submodule (`npm run inst`); bridge 
 - S2 env step: Compact Australia/World, 5 ticks + frame (full vs changed cells) + pipe transfer; target env overhead ≤30%
   of sim time, ≤ ~20 KB/step; `npm run perf:game` table (Compact/Normal, 0–400 bots).
 - S3 GPU: PyTorch CUDA venv; eager bf16 fwd+bwd samples/s of the encoder at 250×125 → model width.
-- Message the maintainers about bulk replay downloads (courtesy, avoids throttling, maybe a dump).
+- Message the maintainers about bulk replay downloads (courtesy, avoids throttling, maybe a dump). Done: the owner
+  answered on 2026-09-30 (see Context).
 - Gate: pin chosen; throughput numbers recorded.
 
 **Phase 0 results (2026-09-24, gate passed; scripts: `scripts/bench_env.ts`, `scripts/bench_gpu.py`)**
@@ -241,8 +253,9 @@ The game's own deps are installed inside the submodule (`npm run inst`); bridge 
 - Gate: tiny Compact map (Onion/Pangaea), 1 agent vs 2–3 Easy nations, 5-min timer, terminal reward → PPO clearly beats
   the random-legal agent within hours; value head predicts outcomes.
 
-**Phase 1 results (2026-09-25): pipeline done, learning gate NOT met** (branch `phase1`, not merged or pushed;
-implementation plan `docs/superpowers/plans/2026-09-24-phase1-vertical-slice.md`)
+**Phase 1 results (2026-09-25): pipeline done, learning gate NOT met.** Closed on 2026-10-01 as "pipeline done"
+(`phase1` merged into `main`); the learning test moves to Phase 2, after behaviour cloning. Implementation plan:
+`docs/superpowers/plans/2026-09-24-phase1-vertical-slice.md`.
 - Built as planned. Bridge: fresh per-game maps + `resetGameStatics` (K games per worker process), incremental cell frame,
   seeded latency queue, rank reward, masks + decoding (exact checks in the worker, failures = counted no-ops), per-seat
   observation, stdin/stdout worker protocol. Trainer: `VecEnv` with the GPU observation builder, ResNet 64/128/192
@@ -263,61 +276,57 @@ implementation plan `docs/superpowers/plans/2026-09-24-phase1-vertical-slice.md`
   cloning exists for; the gate should not have asked from-scratch PPO to pass it.
 - Value gate: sign accuracy is trivially high while the agent rarely wins, so it was replaced by the per-phase
   correlation between value and final reward (`value/outcome_corr_*`; gate: late ≥ 0.5, mid ≥ early).
+- Exploration-bonus defect (found 2026-09-25, fixed 2026-10-01): `ActionDist.entropy` weighted each type's argument
+  entropy by the type's probability, so the bonus pushed the type head toward the types with the most arguments
+  (attack, boat) and away from no-op: no-op fell from 44% to 1–18% of actions during the run. It did not cause the
+  stall (the missing reward signal did). The weights are now detached; `test_entropy_bonus_does_not_favour_types_with_more_arguments`.
 - Open minors from the final review: the status shows "running" for a moment when stop arrives while paused; a hung
   worker is killed but not reaped; `--resume` silently ignores flags outside `KEEP_ON_RESUME` (fix: explicit flags
   override, but refuse worker/game-count changes, since episode counters are per slot).
 - Checkpoints: `checkpoints/onion-gate/` (every 250 updates + `latest.pt`), `checkpoints/onion-gate-g4-stopped/` (first
   attempt, killed with its Claude Code session at update 375). Long runs must be started detached (see CLAUDE.md).
 
-**PROPOSED re-plan (2026-09-25) — not decided; to be judged in a planning session**
-Move behaviour cloning ahead of the full environment, as a thin slice on the current 5 actions:
-1. Close Phase 1 as "pipeline done" (merge `phase1`); the learning gate becomes "PPO from a BC init" (step 2e).
-2. New Phase 2, BC slice:
-   a. Measure first. Only records at the pinned `gitCommit` replay in sync, so count the ranked 1v1 records since
-      v0.34.17 went live (metadata requests only). On a sample of records, count human intents by type: the share
-      the 5 actions cover decides how much this slice can teach. Also measure APM against Δ = 0.5 s (decision 11).
-      Send the maintainers the bulk-download courtesy message (still open) before crawling.
-   b. `crawl.py` for ranked 1v1 (≈2.4k games/day): ≈1 req/s, cached, usernames blanked, deleted players purged, void
-      records dropped.
-   c. Replay extractor (bridge): build the game from the record's `GameStartInfo` (as `tests/replay/ReplayGame.ts`
-      does), replay its turns, and stream the same observation blobs as the env worker plus per-seat labels, through
-      the same protocol and GPU builder, so BC and RL see identical inputs. Labels: no-op / spawn / attack (bin) / boat
-      (cell, bin) / build city. Human intents outside the action set are left out of the loss (never relabelled as
-      no-op). Extra intents queue into later windows (decision 11). Labels illegal under our approximate masks are
-      counted and left out.
-   d. BC training: loss = −log π(label) via `ActionDist.log_prob` with the masks; held-out games; accuracy/NLL per head
-      and per game phase; batches grouped by map (the trainer assumes one grid per `VecEnv` today).
-   e. Eval: BC vs random and vs the scripted expansion baseline (move it into `trainer/eval.py`). Where: ranked 1v1
-      (needs `rankedType`, 2 seats and bots in `EnvConfig`) and the Onion test. Then PPO from the BC checkpoint with
-      KL-to-BC.
-   f. Optional: watch games. Record eval games in the game's replay format and serve them to a local client at the
-      pinned version (the client loads archived games from `${apiBase}/game/<id>`, `src/client/JoinLobbyModal.ts`).
-      Needs a short investigation.
-3. Then the old Phase 2 (full actions, masks, configs, maps). New actions arrive by network surgery (zero-init
-   heads, decision 14) and the extractor maps more intent types. Then a BC refresh with all actions, then Phase 4 RL.
-Why BC was scheduled after the full environment: labels need the full action space (humans use ~20 intent types), and
-the crawler, extractor and ranked configs are substantial work. Against it: a 5-action BC already teaches the early-game
-expansion the agent lacks, and the design already supports growing the action space.
-Open questions: imitate winners only or both players (weighted by outcome)? Ranked 1v1 maps (Australia, Iceland, Asia,
-EuropeClassic) are not Onion; does BC transfer to the Onion test, or should the gate move to ranked 1v1?
-Alternatives if not adopted: 2-min timer curriculum with terminal reward (random reaches rank ≤ 3 in 19% of games vs 3%
-at 5 min), reverse curriculum, potential-based shaping (only with the user's OK), or the original order.
+**Phase 2 — Behaviour-cloning slice on ranked 1v1 (adopted 2026-10-01)**
+From-scratch PPO with a terminal reward gets no signal (Phase 1). Behaviour cloning (BC) fixes the cold start, and the
+Phase 1 actions already cover 94.7% of ranked-1v1 human commands. The slice also tests the whole BC pipeline (crawl →
+replay → observations and labels → training → evaluation) before the full environment is built. User decisions
+(2026-10-01): the 5 Phase 1 actions now, the full action set right after; the learning test runs in ranked 1v1 (Onion
+becomes optional); games are watched in the game's own client; BC imitates all players.
+- a. `trainer/crawl.py`: ranked 1v1 records since v0.34.17 went live (≈2.4k games/day), ≈1 req/s, gzip cache in the
+  git-ignored `data/records/`; usernames blanked (clan tags and team indexes kept: sim inputs), deleted players
+  honoured, void games (fewer than 2 spawned players) dropped.
+- b. Replay extractor (`bridge/replay.ts` + a worker mode): the game is built from the record as in
+  `tests/replay/ReplayGame.ts` (`toWireGameStartInfo`); every 5 ticks it streams the same blobs as `EnvGame.observe`
+  for each human seat, through the same protocol and GPU builder, so BC and RL see identical inputs. Labels: no-op /
+  spawn (cell) / attack (target, bin) / boat (cell, bin) / build city (cell). Extra commands queue into later windows
+  (decision 11); commands outside the 5 actions and labels illegal under our approximate masks are counted and left
+  out of the loss, never relabelled as no-op. Recorded hashes are checked every 10 turns and a record is cut at its
+  first mismatch: the hashes, not an exact `gitCommit` match, decide which records are usable.
+- c. `trainer/bc.py`: loss = −log π(label) through `ActionDist.log_prob` with the masks; held-out games; accuracy and
+  NLL per head and per game phase; the 4 ranked maps padded to one grid. Every sample keeps the game outcome and the
+  player's Elo (computed from `publicID` over the crawled games), so the data can later be filtered or weighted
+  without re-extracting.
+- d. Ranked 1v1 environment: `EnvConfig` gains the ranked 1v1 setup (2 seats, 100/400 bots, no nations, spawn
+  immunity, 10/15-min timer, map weights), reusing `MapPlaylist.get1v1Config` if it imports cleanly.
+- e. Watching games: eval games are saved as game records (`createPartialGameRecord`, `src/core/Util.ts`) and replayed
+  in the game's own client in dev mode. On localhost the client loads archived games from
+  `http://localhost:8787/game/<id>` (`src/client/ApiBase.ts`, our control port) and skips the version check when its
+  `gitCommit` is "DEV" (`src/client/JoinLobbyModal.ts`), so the control server can serve them. Starts with a short spike.
+- Gate (ranked 1v1, fixed seeds, win rates with standard errors): the BC agent clearly beats random and the scripted
+  expander (moved from `scripts/diag_baselines.py` into `trainer/eval.py`); then PPO from the BC checkpoint with
+  KL-to-BC beats a frozen BC copy. The trainer speed fix (overlapping worker groups) only if profiling on ranked maps
+  (8–11× Onion's cells) still shows the Python thread as the bottleneck.
 
-**Phase 2 — Full environment (≈3 weeks)**
-- Full v1 actions + masks, spawn head, SAM coverage channels; `Configs.ts`: ranked 1v1/2v2 (copies of
-  `get1v1Config/get2v2Config`), public sampler (playlist map weights, team configs, modifier pool and exclusions);
-  `Maps.ts`: in-memory loader + dihedral augmentation; eval suite (fixed seeds, held-out maps) + TrueSkill table.
-- Gate: 1,000 games across modes without errors; invalid-action rate < 1%; throughput within the Phase 0 budget.
-
-**Phase 3 — Human replays + behaviour cloning (≈3–5 weeks)**
-- `crawl.py`: ≈1 req/s, cached, usernames blanked (clan tags/friends/teamIndex kept: sim inputs), deleted players
-  purged; void records dropped (see Phase 0 results); priority: all ranked 1v1/2v2 records, then top public FFA/Team
-  games.
-- Replay at the pinned commit; keep records (or prefixes) whose hashes stay in sync. Frames + labels generated on the fly.
-- Labels: troops → bins, tiles → cells, unit ids → cells, extra intents queued; imitate top finishers; measure APM.
+**Phase 3 — Full environment + BC refresh**
+- Full v1 actions + masks, spawn head, observation channels for every unit type, nukes in flight and SAM coverage,
+  added by network surgery (zero-init heads, decision 14); the extractor maps every intent type. `Configs.ts`: ranked
+  2v2 (`get2v2Config`), public sampler (playlist map weights, team configs, modifier pool and exclusions); `Maps.ts`:
+  in-memory loader + dihedral augmentation; eval suite (fixed seeds, held-out maps) + TrueSkill table.
+- Crawl ranked 2v2, then top public FFA/Team games; BC refresh with every action.
 - Model experiments on the same data (cheap, supervised): dense vs Soft-MoE and S/M/L sizes; held-out accuracy per
   bucket (spawn, early, mid, late-many, late-few, ranked, modifiers) plus decisions/s → pick the RL architecture.
-- Gate: BC agent beats the random/scripted baselines in ranked 1v1 and Easy/Medium nations in Compact FFA.
+- Gate: 1,000 games across modes without errors; invalid-action rate < 1%; throughput within the Phase 0 budget; the
+  refreshed BC agent beats the Phase 2 agent in ranked 1v1 and Easy/Medium nations in Compact FFA.
 
 **Phase 4 — RL on Ranked (ongoing)**
 - 4A ranked 1v1: self-play league from BC init — current policy vs pool (past checkpoints + BC), prioritized fictitious
@@ -334,8 +343,9 @@ nations as opponents; per-mode specialist fine-tunes if they win; bigger model; 
 
 **Phase 7 — Deployment**: ONNX export; headless Node bot client (core sim + onnxruntime) joining private lobbies on a
 self-hosted server at the pinned release; checkpoint chosen by lobby mode (AGPL: publish source if hosting a modified
-server for others). If the maintainers approve AI-tagged play on official servers, integrate through whatever path they
-provide (never by bypassing Turnstile).
+server for others). Official servers: the owner allows testing in casual multiplayer games from the AI-DEV account (not
+ranked, no abuse). The connection must keep Turnstile (e.g. the official web client in the user's own browser session,
+or a path the maintainers provide); never bypass it. To decide when the bot is strong enough to be worth testing.
 
 ## Reused code
 | Need | Existing code |
@@ -355,7 +365,7 @@ provide (never by bypassing Turnstile).
   AWS/GCP/Azure are poor value here (~$0.7–1.2/h for weaker GPUs, $3+/h A100, GPU quota requests) unless free student
   credits cover it. Kaggle's free weekly GPU quota suits BC experiments; Colab is too disconnect-prone for RL.
 - Everything runs locally; one optional 1–2 week rented run (~$50–150) only after the pipeline is proven.
-- Replay data is public (docs/API.md); contacting the maintainers is courtesy, not a blocker.
+- Replay data is public (docs/API.md) and the owner cleared its use for training; crawl politely (≈1 req/s, cached).
 
 ## Verification
 - `node --import tsx --test "../../bridge/*.test.ts"` (node:test, run from the game dir): decoder rules, masks, ranking, latency queue, frame deltas == full recompute,

@@ -18,7 +18,7 @@ read it before starting new work, and update it when a decision changes.
 
 ## Game version
 
-The submodule is pinned to the production release the official servers run (currently `v0.34.17`, commit `59da4bc1`).
+The submodule is pinned to the production release the official servers run (currently `v0.34.21`, commit `d7075bfa`).
 Check what production runs by reading `gitCommit` from a recent record:
 `https://api.openfront.io/public/game/<id>?turns=false` (list games via `/public/games`, see the game's `docs/API.md`).
 To upgrade, follow the playbook in `docs/PLAN.md` (decision 14): diff `src/core` between the tags, move the submodule,
@@ -27,7 +27,8 @@ run the bridge tests and determinism check, then fine-tune from the latest check
 ## Game commands (run inside `OpenFront_Source_Code/openfrontio/`)
 
 ```bash
-npm run inst                                   # install deps (npm ci --ignore-scripts); never use npm install
+npx -y npm@12.1.0 ci --ignore-scripts         # install deps: v0.34.21+ needs npm >= 12.1 (engine-strict), the PC has 11;
+                                               # never use npm install
 npm run perf:game -- --map world --ticks 1800 --bots 400    # headless full-game benchmark
 npm run replay:game -- <gameID|record.json> --api-base https://api.openfront.io/public   # re-simulate a record, verify hashes
 npx vitest tests/SomeTest.test.ts --run        # one game test file
@@ -85,7 +86,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   `packedTileUpdates`; update only the cells they touch (a full rebuild costs over half of the sim time).
 - The game logs with `console.log`: a process whose stdout carries frames must redirect it to stderr.
 - Replays: archived records contain only human intents; nations and bots re-simulate from the game seed. A record
-  only replays in sync at its exact `gitCommit`.
+  replays in sync when no simulation code changed between its `gitCommit` and the pin (v0.34.17-v0.34.21 are
+  identical); the hashes it carries every 10 turns decide, not the commit string.
 - v0.34.x has no game snapshots. `loadTerrainMap` caches one mutable map per map and size per process, so the bridge
   builds a fresh map for every game (`bridge/maps.ts: loadFreshTerrain`) and resets the game's cross-game static
   fields before each game (`resetGameStatics`); several games can then share a worker process. On every upgrade, grep
