@@ -134,3 +134,11 @@ class ActionDist:
         pt = self.type.probs.detach()
         return (self.type.entropy() / math.log(pt.shape[-1]) + pt[:, SPAWN] * hc[:, 0]
                 + pt[:, ATTACK] * (hp + hb[:, 0]) + pt[:, BOAT] * (hc[:, 1] + hb[:, 1]) + pt[:, BUILD] * hc[:, 2])
+
+
+def load_net(path, dims, device="cuda"):
+    """A frozen policy from a trainer.bc or trainer.ppo checkpoint, in eval mode."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    net = Policy(dims, tuple(int(w) for w in ckpt["args"]["widths"].split(",")))
+    net.load_state_dict(ckpt["model"])
+    return net.to(device).to(memory_format=torch.channels_last).eval().requires_grad_(False)
