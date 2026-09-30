@@ -4,6 +4,7 @@ import unittest
 import torch
 
 from trainer.env import ROOT
+from trainer.model import Policy
 from trainer.ppo import Outcomes, gae, main
 
 
@@ -68,6 +69,19 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(second["global_step"], 3 * 16 * 2)
         self.assertTrue(all(b >= a for a, b in zip(first["episodes"], second["episodes"])))
         self.assertTrue((ROOT / "runs" / self.RUN).is_dir())
+
+    def test_two_seats_against_a_frozen_opponent_with_kl(self):
+        init = ROOT / "checkpoints" / self.RUN / "init.pt"
+        init.parent.mkdir(parents=True, exist_ok=True)
+        dims = {"channels": 22, "playerFeatures": 17, "scalars": 16, "acts": 5, "troopBins": [0.1, 0.25, 0.5, 0.75, 1.0]}
+        torch.save({"model": Policy(dims).state_dict(), "args": {"widths": "64,128,192"}}, init)
+        main(["--run", self.RUN, "--workers", "1", "--games-per-worker", "2", "--steps", "8", "--minibatches", "2",
+              "--epochs", "1", "--port", "0", "--timer", "1", "--nations", "0", "--seats", "2",
+              "--init", str(init), "--opponent", str(init), "--kl-coef", "0.1", "--updates", "2"])
+        state = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
+        self.assertEqual(state["update"], 2)
+        self.assertEqual(state["global_step"], 2 * 8 * 2, "only the learner's decisions count")
+        self.assertEqual(state["args"]["kl_coef"], 0.1)
 
 
 if __name__ == "__main__":
