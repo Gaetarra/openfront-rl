@@ -1,0 +1,91 @@
+// ranked1v1.json.gz: ranked 1v1 game dUsm5zsWTC, Compact, v0.34.21; usernames, account IDs and tribe names blanked.
+import assert from "node:assert/strict";
+import path from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
+import { GameRecord, StampedIntent, Turn } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
+import { Act } from "./actions";
+import { seatClientID } from "./game";
+import { binOf, OUT_OF_SET, readRecord, RecordGame } from "./replay";
+import { gameConfigOf } from "./setups";
+import { ONION } from "./testkit";
+
+const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "testdata/ranked1v1.json.gz");
+
+test("troop shares map to the nearest bin in log scale", () => {
+  assert.equal(binOf(10, 100), 0);
+  assert.equal(binOf(30, 100), 1); // 0.3: nearer 0.25 than 0.5
+  assert.equal(binOf(40, 100), 2); // 0.4: nearer 0.5 than 0.25 in log scale
+  assert.equal(binOf(100, 100), 4);
+  assert.equal(binOf(500, 100), 4);
+  assert.equal(binOf(1, 100), 0);
+});
+
+test("a blanked ranked record replays in sync and labels every window", async () => {
+  const rg = await RecordGame.create(readRecord(FIXTURE), 256, 403);
+  assert.equal(rg.env.seats.length, 2);
+  assert.deepEqual([...rg.outcome].sort(), [-1, 1]);
+  const counts = new Map<number, number>();
+  while (!rg.done) {
+    rg.env.observe(rg.window === 0);
+    for (const [type] of rg.labels()) counts.set(type, (counts.get(type) ?? 0) + 1);
+    rg.advance();
+  }
+  assert.equal(rg.desync, false, "blanked usernames keep the replay in sync");
+  assert.ok((counts.get(Act.Spawn) ?? 0) >= 2, "both players spawned");
+  assert.ok((counts.get(Act.Attack) ?? 0) > 20);
+  assert.ok(counts.get(Act.Noop)! > counts.get(Act.Attack)!, "most windows have no command");
+});
+
+function synthetic(turns: Turn[], numTurns: number): GameRecord {
+  const players = [0, 1].map((i) => ({
+    clientID: seatClientID(i),
+    username: `agent${i}`,
+    clanTag: null,
+    persistentID: null,
+    stats: {},
+  }));
+  const config = gameConfigOf({ ...ONION, seats: 2, nations: 0 }, new PseudoRandom(1));
+  const info = {
+    gameID: "Synth001",
+    lobbyCreatedAt: 0,
+    config,
+    players,
+    start: 0,
+    end: 0,
+    duration: 0,
+    num_turns: numTurns,
+    winner: ["player", seatClientID(0)],
+    lobbyFillTime: 0,
+  };
+  return decompressGameRecord({ info, version: "v0.0.2", gitCommit: "DEV", turns } as unknown as GameRecord);
+}
+
+test("extra commands queue into later windows; unexpressible ones stay out of the loss", async () => {
+  const a = seatClientID(0);
+  const b = seatClientID(1);
+  const attack = (troops: number): StampedIntent => ({ type: "attack", targetID: null, troops, clientID: a });
+  const silo: StampedIntent = { type: "build_unit", unit: UnitType.MissileSilo, tile: 0, clientID: b };
+  const record = synthetic(
+    [
+      { turnNumber: 300, intents: [attack(100), attack(50), silo] },
+      { turnNumber: 400, intents: [attack(1), attack(2), attack(3), attack(4), attack(5)] },
+    ],
+    420,
+  );
+  const rg = await RecordGame.create(record, 64, 3);
+  const types: number[][] = [];
+  while (!rg.done) {
+    types.push(rg.labels().map((l) => l[0]));
+    rg.advance();
+  }
+  assert.deepEqual(types[59], [Act.Noop, Act.Noop]);
+  assert.deepEqual(types[60], [Act.Attack, OUT_OF_SET]);
+  assert.deepEqual(types[61], [Act.Attack, Act.Noop]); // the second attack of turn 300, one window later
+  assert.deepEqual(types[62], [Act.Noop, Act.Noop]);
+  assert.deepEqual(types.slice(80, 84).map((t) => t[0]), [Act.Attack, Act.Attack, Act.Attack, Act.Noop]);
+  assert.equal(rg.dropped, 2);
+});

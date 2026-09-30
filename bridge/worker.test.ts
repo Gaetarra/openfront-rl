@@ -109,3 +109,35 @@ test("a finished game is replaced by the next episode in the same reply", async 
   assert.deepEqual(g.rewards, [-1]);
   assert.equal(g.blobs[0][0], "terrain");
 });
+
+test("replay mode streams observations with labels and moves on to the next record", async () => {
+  const fixture = path.join(path.dirname(WORKER), "testdata/ranked1v1.json.gz");
+  const c = new Client();
+  try {
+    const init = await c.request({
+      cmd: "init",
+      config: { ...ONION, seats: 2, playlist: "ranked1v1" },
+      replay: { records: [fixture] },
+      games: 1,
+      seed: "rep",
+      worker: 0,
+    });
+    assert.deepEqual(init.header.dims.grid, [192, 256]);
+    const g0 = init.header.games[0];
+    assert.equal(g0.reset, true);
+    assert.equal(g0.seats.length, 2);
+    assert.deepEqual([...g0.outcome].sort(), [-1, 1]);
+    assert.deepEqual(g0.blobs.at(-1), ["labels", 2 * 4 * 4]);
+    let finished: any = null;
+    for (let step = 0; step < 2000 && finished === null; step++) {
+      const g = (await c.request({ cmd: "step" })).header.games[0];
+      if (g.done) finished = g;
+    }
+    assert.ok(finished !== null, "the record ended and the next one started");
+    assert.equal(finished.reset, true);
+    assert.equal(finished.desync, false);
+    assert.equal(finished.finished, g0.record);
+  } finally {
+    c.close(); // a failed assertion must not leave the worker, and the test run, hanging
+  }
+});

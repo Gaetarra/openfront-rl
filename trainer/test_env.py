@@ -1,9 +1,10 @@
+import collections
 import unittest
 
 import numpy as np
 import torch
 
-from trainer.env import LAND, N_CHANNELS, OWN, RANKED_1V1, VALID, VecEnv
+from trainer.env import LAND, N_CHANNELS, OWN, RANKED_1V1, ROOT, VALID, VecEnv
 
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
 
@@ -94,6 +95,21 @@ class VecEnvTest(unittest.TestCase):
             self.assertFalse((obs["cell_mask"] & ~valid[:, None]).any(), "no legal cell outside the map")
             self.assertTrue(set(env.area.tolist()) <= {16.0, 64.0})
             env.step(np.zeros((4, 4), np.int64))
+        finally:
+            env.close()
+
+    def test_replay_stream_labels_every_seat(self):
+        env = VecEnv(RANKED_1V1, workers=1, games_per_worker=1, seed="rep",
+                     records=[ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"])
+        try:
+            seen = collections.Counter()
+            for _ in range(200):
+                self.assertEqual(tuple(env.labels.shape), (2, 4))
+                seen.update(env.labels[:, 0].tolist())
+                env.step()
+            self.assertGreater(seen[0], seen[2], "no-ops outnumber attacks")
+            self.assertEqual(sorted(env.outcome[0].tolist()), [-1.0, 1.0])
+            self.assertEqual(len(env.seats_of[0]), 2)
         finally:
             env.close()
 

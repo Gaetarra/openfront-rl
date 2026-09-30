@@ -1,17 +1,24 @@
 /**
  * Env worker: runs K training games for the Python trainer (trainer/env.py) over stdin/stdout.
  *
- * In:  u32 length + JSON: {cmd:"init", config, games, seed, worker, episodes?} | {cmd:"step", actions, full?} |
- *      {cmd:"close"}. "init" may be sent again to restart all games.
+ * In:  u32 length + JSON: {cmd:"init", config, games, seed, worker, episodes?} starts K training games;
+ *      {cmd:"init", config, replay:{records}, games, seed, worker} replays game records instead (behaviour cloning:
+ *      every reply carries the seats' observations and labels, bridge/replay.ts); {cmd:"step", actions?, full?};
+ *      {cmd:"close"}. "init" may be sent again to restart.
  * Out: u32 size + u32 header length + header JSON + blobs. The header lists each game's blobs as [name, byteLength]
  *      in the order they follow. A finished game is replaced at once by the next episode: its reply has done and
  *      reset set, the finished game's rewards and ranks, and the new game's terrain and full frame.
  * Game seeds are `${seed}-w${worker}-g${game}-e${episode}`.
+ * Replay mode cycles through the worker's records in a seeded order; the first record of each slot starts at a random
+ * window, so the slots sit at different game phases.
  */
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
+import { simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
 import { N_ACTS, TROOP_BINS } from "./actions";
 import { UNIT_TYPES } from "./frame";
 import { Blob, EnvConfig, EnvGame } from "./game";
 import { PLAYER_FEATURES, SCALARS } from "./obs";
+import { readRecord, RecordGame } from "./replay";
 import { gridFor, slotsFor } from "./setups";
 
 // stdout carries replies only; the game logs a lot through console.log/info/warn.
@@ -24,10 +31,11 @@ interface Init {
   seed: string;
   worker: number;
   episodes?: number[];
+  replay?: { records: string[] };
 }
 interface Step {
   cmd: "step";
-  actions: number[][][];
+  actions?: number[][][];
   full?: boolean;
 }
 interface Part {
@@ -40,6 +48,80 @@ let games: EnvGame[] = [];
 let episodes: number[] = [];
 
 const seedOf = (g: number): string => `${init!.seed}-w${init!.worker}-g${g}-e${episodes[g]}`;
+
+let records: RecordGame[] = [];
+let order: number[] = [];
+let next = 0;
+let pick = new PseudoRandom(0);
+
+/** The next record of this worker's list that loads; `skip`: start it at a random window. */
+async function nextRecord(skip: boolean): Promise<RecordGame> {
+  const files = init!.replay!.records;
+  for (let tries = 0; tries < files.length; tries++) {
+    if (next >= order.length) {
+      order = pick.shuffleArray(order);
+      next = 0;
+    }
+    const file = files[order[next++]];
+    try {
+      const rg = await RecordGame.create(readRecord(file), gridFor(init!.config)[1], slotsFor(init!.config));
+      if (rg.env.seats.length !== init!.config.seats) throw new Error(`${rg.env.seats.length} players`);
+      const skipped = skip ? pick.nextInt(0, Math.max(1, Math.floor(rg.left / 2))) : 0;
+      for (let i = 0; i < skipped && !rg.done; i++) rg.advance();
+      if (!rg.done) return rg;
+    } catch (err) {
+      console.error(`skipping ${file}: ${err}`);
+    }
+  }
+  throw new Error("none of this worker's records can be replayed");
+}
+
+function replayPart(rg: RecordGame, reset: boolean, extra: Record<string, unknown>): Part {
+  const labels = new Int32Array(rg.labels().flat());
+  const blobs: Blob[] = [
+    ...(reset ? [["terrain", rg.env.terrain()] as Blob] : []),
+    ...rg.env.observe(reset),
+    ["labels", new Uint8Array(labels.buffer)],
+  ];
+  const header = {
+    tick: rg.env.game.ticks(),
+    episode: 0,
+    done: false,
+    reset,
+    hash: rg.env.hash,
+    invalid: rg.env.seats.map(() => false),
+    record: rg.record.info.gameID,
+    seats: rg.env.start.players.map((p) => p.clientID),
+    outcome: rg.outcome,
+    left: rg.left,
+    ...(reset ? { cellSize: rg.env.frame.cs } : {}),
+    ...extra,
+  };
+  return { header, blobs };
+}
+
+async function replayStep(): Promise<Part[]> {
+  const parts: Part[] = [];
+  for (let g = 0; g < records.length; g++) {
+    const rg = records[g];
+    let error: string | undefined;
+    try {
+      rg.advance();
+    } catch (err) {
+      error = String(err);
+      console.error(`${rg.record.info.gameID}: ${error}`);
+      rg.done = true;
+    }
+    if (!rg.done) {
+      parts.push(replayPart(rg, false, {}));
+      continue;
+    }
+    const end = { done: true, finished: rg.record.info.gameID, desync: rg.desync, ...(error ? { error } : {}) };
+    records[g] = await nextRecord(false);
+    parts.push(replayPart(records[g], true, end));
+  }
+  return parts;
+}
 
 function part(env: EnvGame, g: number, blobs: Blob[], extra: Record<string, unknown>): Part {
   return {
@@ -94,6 +176,15 @@ function encode(parts: Part[], dimsInfo: Record<string, unknown> | null): Buffer
 async function handle(msg: Init | Step): Promise<Buffer> {
   if (msg.cmd === "init") {
     init = msg;
+    if (msg.replay !== undefined) {
+      if (msg.replay.records.length === 0) throw new Error("replay mode needs records");
+      pick = new PseudoRandom(simpleHash(`${msg.seed}-w${msg.worker}`));
+      order = pick.shuffleArray(msg.replay.records.map((_, i) => i));
+      next = 0;
+      records = [];
+      for (let g = 0; g < msg.games; g++) records.push(await nextRecord(true));
+      return encode(records.map((rg) => replayPart(rg, true, {})), dims(msg.config));
+    }
     episodes = msg.episodes ?? new Array<number>(msg.games).fill(0);
     games = [];
     const parts: Part[] = [];
@@ -104,10 +195,11 @@ async function handle(msg: Init | Step): Promise<Buffer> {
     return encode(parts, dims(msg.config));
   }
   if (init === null) throw new Error("step before init");
+  if (init.replay !== undefined) return encode(await replayStep(), null);
   const parts: Part[] = [];
   for (let g = 0; g < games.length; g++) {
     const env = games[g];
-    env.step(msg.actions[g] ?? []);
+    env.step(msg.actions?.[g] ?? []);
     if (!env.done) {
       parts.push(part(env, g, env.observe(msg.full === true), {}));
       continue;

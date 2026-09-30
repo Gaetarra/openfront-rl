@@ -1,7 +1,8 @@
 """Vectorised OpenFront games for training.
 
 Node workers (bridge/worker.ts, protocol described there) run K games each and send per-cell frame deltas; the
-observation tensors are assembled on the GPU from the state kept here.
+observation tensors are assembled on the GPU from the state kept here. In replay mode the workers replay game records
+instead, and every step also brings each seat's label (the command its human player issued) for behaviour cloning.
 """
 import json
 import shutil
@@ -104,19 +105,26 @@ class VecEnv:
     """E = workers x games_per_worker games with S seats each; N = E x S observation rows (env-major)."""
 
     def __init__(self, config, workers, games_per_worker, seed, device="cuda", episodes=None, log_dir=None,
-                 full_frames=False):
+                 full_frames=False, records=None):
         self.device = torch.device(device)
         self.G = games_per_worker
         self.E = workers * games_per_worker
         self.full_frames = full_frames
+        self.replay = records is not None
+        if self.replay and len(records) < workers:
+            raise ValueError(f"{len(records)} records cannot feed {workers} workers")
         self.episodes = list(episodes) if episodes is not None else [0] * self.E
         if log_dir is not None:
             Path(log_dir).mkdir(parents=True, exist_ok=True)
         self.workers = [Worker(w, Path(log_dir) / f"worker{w}.log" if log_dir is not None else None)
                         for w in range(workers)]
         for w, wk in enumerate(self.workers):
-            wk.send({"cmd": "init", "config": config, "games": self.G, "seed": seed, "worker": w,
-                     "episodes": self.episodes[w * self.G:(w + 1) * self.G]})
+            msg = {"cmd": "init", "config": config, "games": self.G, "seed": seed, "worker": w}
+            if self.replay:
+                msg["replay"] = {"records": [str(r) for r in records[w::workers]]}
+            else:
+                msg["episodes"] = self.episodes[w * self.G:(w + 1) * self.G]
+            wk.send(msg)
         replies = [wk.recv() for wk in self.workers]
         d = replies[0][0]["dims"]
         self.H, self.W = d["grid"]  # padded by the worker to multiples of 16 (the CNN downsamples by 16)
@@ -134,16 +142,34 @@ class VecEnv:
         self.n1 = torch.zeros(self.E * hw, device=dev)
         self.n2 = torch.zeros_like(self.n1)
         self.fo = torch.zeros_like(self.n1)
+        # Replay mode: per game its record, players, their outcome (+1 winner, -1 otherwise) and windows left; per row
+        # the label [type, cell, target, bin] (type -1: a command outside the action set, -2: unmapped).
+        self.labels = None
+        self.outcome = np.zeros((self.E, self.S), np.float32)
+        self.left = np.zeros(self.E, np.int64)
+        self.record_of = [""] * self.E
+        self.seats_of = [[] for _ in range(self.E)]
         self.obs = self._absorb(replies)[0]
 
-    def step(self, actions):
-        """actions: int array [N, 4] of [type, cell, target, bin]; cells are grid indexes (row x W + column)."""
+    def send(self, actions=None):
+        """Starts every worker on its next step (replay mode takes no actions); recv() collects it, so the caller can
+        use the GPU meanwhile. actions: int array [N, 4] of [type, cell, target, bin] with grid cell indexes."""
+        if self.replay:
+            for wk in self.workers:
+                wk.send({"cmd": "step"})
+            return
         a = np.asarray(actions, dtype=np.int64).reshape(self.E, self.S, 4)
         for w, wk in enumerate(self.workers):
             wk.send({"cmd": "step", "actions": a[w * self.G:(w + 1) * self.G].tolist(), "full": self.full_frames})
+
+    def recv(self):
         out = self._absorb([wk.recv() for wk in self.workers])
         self.obs = out[0]
         return out
+
+    def step(self, actions=None):
+        self.send(actions)
+        return self.recv()
 
     def close(self):
         for wk in self.workers:
@@ -159,15 +185,25 @@ class VecEnv:
         scalars = np.empty((E, S, K), np.float32)
         types = np.empty((E, S, T), bool)
         attack = np.empty((E, S, P), bool)
+        labels = np.zeros((E, S, 4), np.int64)
         cells, units, infos, resets = [], [], [], []
         e = 0
         for header, games in replies:
             for g, b in zip(header["games"], games):
-                if g.get("done"):
+                if g.get("done") and self.replay:
+                    infos.append({"env": e, "record": g["finished"], "desync": g.get("desync", False),
+                                  "error": g.get("error")})
+                elif g.get("done"):
                     dones[e] = 1
                     rewards[e] = g["rewards"]
                     infos += [{"env": e, "seat": s, "reward": g["rewards"][s], "rank": g["ranks"][s],
                                "players": g["players"], "ticks": g["endTick"]} for s in range(S)]
+                if self.replay:
+                    labels[e] = np.frombuffer(b["labels"], np.int32).reshape(S, 4)
+                    self.outcome[e] = g["outcome"]
+                    self.left[e] = g["left"]
+                    self.record_of[e] = g["record"]
+                    self.seats_of[e] = g["seats"]
                 self.episodes[e] = g["episode"]
                 if g.get("reset"):
                     resets.append(e)
@@ -184,6 +220,8 @@ class VecEnv:
                 types[e] = np.frombuffer(b["types"], np.uint8).reshape(S, T)
                 attack[e] = np.frombuffer(b["attack"], np.uint8).reshape(S, P)
                 e += 1
+        if self.replay:
+            self.labels = torch.from_numpy(labels.reshape(-1, 4)).to(self.device)
         self._apply_cells(resets, cells)
         obs = self._observe(players, rel, scalars, types, attack, units)
         return obs, rewards.reshape(-1), dones.reshape(-1), infos, invalid.reshape(-1)
