@@ -13,6 +13,9 @@ export const ONION: EnvConfig = {
   seats: 1,
 };
 
+/** Ranked 1v1 training games: map, size, bots and timer come from the playlist (bridge/setups.ts). */
+export const RANKED: EnvConfig = { ...ONION, seats: 2, playlist: "ranked1v1" };
+
 /** A fixed land tile in the Onion map's lower right, for scripted spawns. */
 export function landTile(env: EnvGame): TileRef {
   const g = env.game;

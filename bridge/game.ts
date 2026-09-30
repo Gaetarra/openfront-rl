@@ -34,6 +34,8 @@ export interface EnvConfig {
   bots: number;
   timerMinutes: number;
   seats: number; // agent-controlled players
+  /** Draw each game's map, size, bots and timer from this playlist (bridge/setups.ts); then only `seats` is used. */
+  playlist?: "ranked1v1";
 }
 
 /** Ticks per agent decision (PLAN decision 11). */

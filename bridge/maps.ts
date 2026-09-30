@@ -85,6 +85,18 @@ export async function loadFreshTerrain(map: GameMapType, size: GameMapSize): Pro
 }
 
 /**
+ * A map's cell grid without building the map: Normal maps use 8x8-tile cells on the full-size map, Compact maps 4x4 on
+ * the half-size map, so both sizes of a map share one grid.
+ */
+export function mapGrid(map: GameMapType, size: GameMapSize): { h: number; w: number; cs: number } {
+  const manifest = JSON.parse(mapFiles(map).manifest) as MapManifest;
+  const normal = size === GameMapSize.Normal;
+  const m = normal ? manifest.map : manifest.map4x;
+  const cs = normal ? 8 : 4;
+  return { h: Math.ceil(m.height / cs), w: Math.ceil(m.width / cs), cs };
+}
+
+/**
  * Static fields in the game code that outlive a game. The real client runs one game per worker, so they start fresh;
  * here several games share a process, so they are reset before each game or a game's outcome would depend on the
  * games that ran before it. On every game upgrade, grep src/core for `private static` fields that are not readonly.
