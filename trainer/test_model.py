@@ -77,6 +77,13 @@ class ModelTest(unittest.TestCase):
         noop = torch.zeros(N, 4, dtype=torch.long, device="cuda")
         self.assertAlmostEqual(float(dist.log_prob(noop)[0]), math.log(0.5), places=5)
 
+    def test_entropy_bonus_does_not_favour_types_with_more_arguments(self):
+        out = RandomPolicy(DIMS)(self.obs)
+        out["type"].requires_grad_()
+        ActionDist(out, self.obs).entropy().sum().backward()
+        # Uniform over the legal types maximises the type entropy: only the argument terms could push the type head.
+        self.assertLess(float(out["type"].grad.abs().max()), 1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

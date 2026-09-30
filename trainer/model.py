@@ -126,10 +126,11 @@ class ActionDist:
 
     def entropy(self):
         """Exact joint entropy, H(type) + sum_k p(k) H(args | k), with every head divided by the log of its size so
-        the 4k-cell maps do not drown out the type head."""
+        the 4k-cell maps do not drown out the type head. p(k) is detached: otherwise the bonus pushes the type head
+        toward the types with the most arguments (attack, boat) and away from no-op, as it did in Phase 1."""
         hc = self.cells.entropy() / math.log(self.cells.logits.shape[-1])
         hb = self.bins.entropy() / math.log(self.bins.logits.shape[-1])
         hp = self.ptr.entropy() / math.log(max(self.ptr.logits.shape[-1], 2))
-        pt = self.type.probs
+        pt = self.type.probs.detach()
         return (self.type.entropy() / math.log(pt.shape[-1]) + pt[:, SPAWN] * hc[:, 0]
                 + pt[:, ATTACK] * (hp + hb[:, 0]) + pt[:, BOAT] * (hc[:, 1] + hb[:, 1]) + pt[:, BUILD] * hc[:, 2])
