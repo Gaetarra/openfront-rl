@@ -29,8 +29,12 @@ const UNIT_INDEX = new Map(UNIT_TYPES.map((t, i) => [t, i]));
  * time, see PLAN.md Phase 0 results).
  */
 export class CellFrame {
+  /** Cells per row of this game's map. */
   readonly cw: number;
   readonly ch: number;
+  /** Cells per grid row: the trainer's grid width, shared by every game of a worker (padding cells hold no tiles). */
+  readonly stride: number;
+  /** Grid cells up to the map's last row: ch x stride. */
   readonly n: number;
   readonly o1: Uint16Array;
   readonly o2: Uint16Array;
@@ -51,12 +55,15 @@ export class CellFrame {
   constructor(
     map: GameMap,
     readonly cs: number,
+    stride?: number,
   ) {
     this.w = map.width();
     this.h = map.height();
     this.cw = Math.ceil(this.w / cs);
     this.ch = Math.ceil(this.h / cs);
-    this.n = this.cw * this.ch;
+    this.stride = stride ?? this.cw;
+    if (this.stride < this.cw) throw new Error(`grid width ${this.stride} < map width ${this.cw} cells`);
+    this.n = this.ch * this.stride;
     this.o1 = new Uint16Array(this.n);
     this.o2 = new Uint16Array(this.n);
     this.n1 = new Uint8Array(this.n);
@@ -72,13 +79,15 @@ export class CellFrame {
   cellOf(tile: TileRef): number {
     const x = tile % this.w;
     const y = (tile - x) / this.w;
-    return Math.floor(y / this.cs) * this.cw + Math.floor(x / this.cs);
+    return Math.floor(y / this.cs) * this.stride + Math.floor(x / this.cs);
   }
 
-  /** The cell's tiles, row by row. */
+  /** The cell's tiles, row by row; none for a padding cell. */
   tilesOf(cell: number): TileRef[] {
-    const x0 = (cell % this.cw) * this.cs;
-    const y0 = Math.floor(cell / this.cw) * this.cs;
+    const cx = cell % this.stride;
+    if (cx >= this.cw) return [];
+    const x0 = cx * this.cs;
+    const y0 = Math.floor(cell / this.stride) * this.cs;
     const tiles: TileRef[] = [];
     for (let y = y0; y < Math.min(y0 + this.cs, this.h); y++) {
       for (let x = x0; x < Math.min(x0 + this.cs, this.w); x++) tiles.push(y * this.w + x);
@@ -88,7 +97,7 @@ export class CellFrame {
 
   /** Tile coordinates of the cell's centre. */
   center(cell: number): [number, number] {
-    return [(cell % this.cw) * this.cs + this.cs / 2, Math.floor(cell / this.cw) * this.cs + this.cs / 2];
+    return [(cell % this.stride) * this.cs + this.cs / 2, Math.floor(cell / this.stride) * this.cs + this.cs / 2];
   }
 
   /** Marks the cells touched by one tick's packedTileUpdates ([tileRef, state] pairs). */
@@ -135,8 +144,8 @@ export class CellFrame {
 
   /** Recomputes one cell from the tile states; returns whether it changed. Ties keep the first owner seen. */
   private compute(c: number): boolean {
-    const x0 = (c % this.cw) * this.cs;
-    const y0 = Math.floor(c / this.cw) * this.cs;
+    const x0 = (c % this.stride) * this.cs;
+    const y0 = Math.floor(c / this.stride) * this.cs;
     const x1 = Math.min(x0 + this.cs, this.w);
     const y1 = Math.min(y0 + this.cs, this.h);
     let fallout = 0;
@@ -177,16 +186,17 @@ export class CellFrame {
   }
 }
 
-/** Static terrain per cell, 4 planes of frame.n bytes: land, shore (land next to water) and ocean tiles, and the mean
- *  height (magnitude 0-31) of the land. */
+/** Static terrain per cell, 5 planes of frame.n bytes: land, shore (land next to water) and ocean tiles, the mean height
+ *  (magnitude 0-31) of the land, and 1 for cells inside the map (0 = grid padding). */
 export function terrainCells(map: GameMap, frame: CellFrame): Uint8Array {
-  const out = new Uint8Array(4 * frame.n);
+  const out = new Uint8Array(5 * frame.n);
   for (let c = 0; c < frame.n; c++) {
+    const tiles = frame.tilesOf(c);
     let land = 0;
     let shore = 0;
     let ocean = 0;
     let height = 0;
-    for (const t of frame.tilesOf(c)) {
+    for (const t of tiles) {
       if (map.isLand(t) && !map.isImpassable(t)) {
         land++;
         height += map.magnitude(t);
@@ -199,6 +209,7 @@ export function terrainCells(map: GameMap, frame: CellFrame): Uint8Array {
     out[frame.n + c] = shore;
     out[2 * frame.n + c] = ocean;
     out[3 * frame.n + c] = land > 0 ? Math.round(height / land) : 0;
+    out[4 * frame.n + c] = tiles.length > 0 ? 1 : 0;
   }
   return out;
 }

@@ -1,12 +1,8 @@
 import { Config } from "../OpenFront_Source_Code/openfrontio/src/core/configuration/Config";
 import { Executor } from "../OpenFront_Source_Code/openfrontio/src/core/execution/ExecutionManager";
 import {
-  Difficulty,
   Game,
   GameMapSize,
-  GameMapType,
-  GameMode,
-  GameType,
   Player,
   PlayerInfo,
   PlayerType,
@@ -16,7 +12,7 @@ import { GameUpdateType, HashUpdate } from "../OpenFront_Source_Code/openfrontio
 import { createNationsForGame } from "../OpenFront_Source_Code/openfrontio/src/core/game/NationCreation";
 import { GameRunner } from "../OpenFront_Source_Code/openfrontio/src/core/GameRunner";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { GameConfig, GameStartInfo, StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { GameStartInfo, StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
 import { simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
 import { attackMask, decodeAction, N_ACTS, typeMask } from "./actions";
 import { CellFrame, encodeUnits, terrainCells } from "./frame";
@@ -24,6 +20,7 @@ import { LatencyQueue } from "./latency";
 import { loadFreshTerrain, resetGameStatics } from "./maps";
 import { encodeSeat, PLAYER_FEATURES, SCALARS } from "./obs";
 import { rewardOf, seatStanding } from "./ranking";
+import { gameConfigOf, gameIdOf, gridFor, slotsFor } from "./setups";
 
 /** A training game setup, sent by the trainer as JSON. FFA only in Phase 1. */
 export interface EnvConfig {
@@ -58,14 +55,15 @@ export class EnvGame {
   private masks: { types: Uint8Array; attack: Uint8Array }[] | null = null;
 
   private constructor(
-    readonly cfg: EnvConfig,
+    /** How the game was created: a record of it replays from this. */
+    readonly start: GameStartInfo,
     readonly game: Game,
     readonly seats: Player[],
     readonly frame: CellFrame,
-    /** Rows of the player table: smallID 0 (unowned land) up to seats + nations + bots. */
+    /** Rows of the player table: smallID 0 (unowned land) up to the config's largest player count. */
     readonly slots: number,
     private readonly runner: GameRunner,
-    private readonly sim: { hash: number; fatal: string | null },
+    private readonly sim: { hash: number; hashTick: number; fatal: string | null },
     private readonly latency: LatencyQueue,
   ) {
     this.invalid = seats.map(() => false);
@@ -76,32 +74,50 @@ export class EnvGame {
     return this.sim.hash;
   }
 
+  /** Tick of the latest hash. */
+  get hashTick(): number {
+    return this.sim.hashTick;
+  }
+
+  get timerMinutes(): number {
+    return this.start.config.maxTimerValue ?? 60;
+  }
+
+  /** A training game: its game ID and every random draw derive from the seed. */
   static async create(cfg: EnvConfig, seed: string): Promise<EnvGame> {
+    const config = gameConfigOf(cfg, new PseudoRandom(simpleHash(`${seed}:setup`)));
+    const players = Array.from({ length: cfg.seats }, (_, i) => ({
+      clientID: seatClientID(i),
+      username: `agent${i}`,
+      clanTag: null,
+    }));
+    const start: GameStartInfo = { gameID: gameIdOf(seed), lobbyCreatedAt: 0, config, players };
+    return EnvGame.fromStart(start, gridFor(cfg)[1], slotsFor(cfg), `${seed}:latency`);
+  }
+
+  /**
+   * Builds a game from its start info the way the game's client does (tests/replay/ReplayGame.ts): the RNG is seeded
+   * from the game ID and the seats are the start info's players, in order. `stride`: the trainer's grid width in cells.
+   */
+  static async fromStart(start: GameStartInfo, stride: number, slots: number, latencySeed: string): Promise<EnvGame> {
     resetGameStatics();
-    const config: GameConfig = {
-      gameMap: cfg.map as GameMapType,
-      gameMapSize: cfg.compact ? GameMapSize.Compact : GameMapSize.Normal,
-      gameMode: GameMode.FFA,
-      gameType: GameType.Private,
-      difficulty: cfg.difficulty as Difficulty,
-      nations: cfg.nations > 0 ? cfg.nations : "disabled",
-      bots: cfg.bots,
-      donateGold: false,
-      donateTroops: false,
-      infiniteGold: false,
-      infiniteTroops: false,
-      instantBuild: false,
-      randomSpawn: false,
-      maxTimerValue: cfg.timerMinutes,
-    };
+    const config = start.config;
     const terrain = await loadFreshTerrain(config.gameMap, config.gameMapSize);
-    const gameStart: GameStartInfo = { gameID: seed, lobbyCreatedAt: 0, config, players: [] };
-    const random = new PseudoRandom(simpleHash(seed));
-    const humans = Array.from(
-      { length: cfg.seats },
-      (_, i) => new PlayerInfo(`agent${i}`, PlayerType.Human, seatClientID(i), random.nextID()),
+    const random = new PseudoRandom(simpleHash(start.gameID));
+    const humans = start.players.map(
+      (p) =>
+        new PlayerInfo(
+          p.username,
+          PlayerType.Human,
+          p.clientID,
+          random.nextID(),
+          p.isLobbyCreator ?? false,
+          p.clanTag,
+          p.friends ?? [],
+          p.teamIndex ?? null,
+        ),
     );
-    const nations = createNationsForGame(gameStart, terrain.nations, terrain.additionalNations, humans.length, random);
+    const nations = createNationsForGame(start, terrain.nations, terrain.additionalNations, humans.length, random);
     const game = createGame(
       humans,
       nations,
@@ -110,20 +126,24 @@ export class EnvGame {
       new Config(config, null, false),
       terrain.teamGameSpawnAreas,
     );
-    const frame = new CellFrame(game.map(), cfg.compact ? 4 : 8);
-    const sim = { hash: 0, fatal: null as string | null };
-    const runner = new GameRunner(game, new Executor(game, seed, undefined), (gu) => {
+    const frame = new CellFrame(game.map(), config.gameMapSize === GameMapSize.Compact ? 4 : 8, stride);
+    const sim = { hash: 0, hashTick: -1, fatal: null as string | null };
+    const executor = new Executor(game, start.gameID, undefined, start.tribes?.map((t) => t.name));
+    const runner = new GameRunner(game, executor, (gu) => {
       if ("errMsg" in gu) {
         sim.fatal = gu.errMsg;
         return;
       }
       frame.mark(gu.packedTileUpdates);
-      for (const h of gu.updates[GameUpdateType.Hash] as HashUpdate[]) sim.hash = h.hash;
+      for (const h of gu.updates[GameUpdateType.Hash] as HashUpdate[]) {
+        sim.hash = h.hash;
+        sim.hashTick = h.tick;
+      }
     });
     runner.init();
     const seats = humans.map((h) => game.player(h.id));
-    const latency = new LatencyQueue(new PseudoRandom(simpleHash(`${seed}:latency`)));
-    return new EnvGame(cfg, game, seats, frame, 1 + cfg.seats + nations.length + cfg.bots, runner, sim, latency);
+    const latency = new LatencyQueue(new PseudoRandom(simpleHash(latencySeed)));
+    return new EnvGame(start, game, seats, frame, slots, runner, sim, latency);
   }
 
   /** Executes one turn (one tick) with the given intents. */
@@ -170,7 +190,7 @@ export class EnvGame {
       encodeSeat(
         this.game,
         seat,
-        this.cfg,
+        this.timerMinutes,
         this.frame.cs,
         m.attack,
         players.subarray(i * P * PLAYER_FEATURES, (i + 1) * P * PLAYER_FEATURES),
@@ -204,7 +224,7 @@ export class EnvGame {
   private checkDone(): void {
     const g = this.game;
     const out = (s: Player) => !g.inSpawnPhase() && (!s.hasSpawned() || !s.isAlive());
-    const backstop = g.ticks() >= g.config().numSpawnPhaseTurns() + (this.cfg.timerMinutes + 1) * 600;
+    const backstop = g.ticks() >= g.config().numSpawnPhaseTurns() + (this.timerMinutes + 1) * 600;
     if (g.getWinner() === null && !this.seats.every(out) && !backstop) return;
     this.done = true;
     const standings = this.seats.map((s) => seatStanding(g, s));

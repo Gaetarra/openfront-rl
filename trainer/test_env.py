@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 import torch
 
-from trainer.env import LAND, N_CHANNELS, OWN, VecEnv
+from trainer.env import LAND, N_CHANNELS, OWN, RANKED_1V1, VALID, VecEnv
 
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
 
@@ -80,6 +80,20 @@ class VecEnvTest(unittest.TestCase):
             env.workers[0].proc.wait()
             with self.assertRaisesRegex(RuntimeError, "worker 0"):
                 env.step(np.zeros((1, 4), np.int64))
+        finally:
+            env.close()
+
+    def test_ranked_games_share_one_padded_grid(self):
+        env = VecEnv(RANKED_1V1, workers=1, games_per_worker=2, seed="grid")
+        try:
+            obs = env.obs
+            self.assertEqual(obs["spatial"].shape, (4, N_CHANNELS, 192, 256))
+            self.assertEqual(obs["players"].shape[1], 403)
+            valid = obs["spatial"][:, VALID].float().flatten(1) > 0
+            self.assertTrue(set(valid.sum(1).tolist()) <= {47000, 37500, 31250})  # the ranked maps' cells
+            self.assertFalse((obs["cell_mask"] & ~valid[:, None]).any(), "no legal cell outside the map")
+            self.assertTrue(set(env.area.tolist()) <= {16.0, 64.0})
+            env.step(np.zeros((4, 4), np.int64))
         finally:
             env.close()
 

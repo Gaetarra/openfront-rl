@@ -1,5 +1,4 @@
 import { Game, Player, PlayerType, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import type { EnvConfig } from "./game";
 
 export const PLAYER_FEATURES = 17;
 export const SCALARS = 16;
@@ -29,7 +28,7 @@ const logScale = (v: number, div: number) => Math.log1p(Math.max(0, v)) / div;
 export function encodeSeat(
   game: Game,
   seat: Player,
-  cfg: EnvConfig,
+  timerMinutes: number,
   cellSize: number,
   attack: Uint8Array,
   players: Float32Array,
@@ -90,7 +89,7 @@ export function encodeSeat(
   const gold = Number(seat.gold());
   const cityCost = Number(game.unitInfo(UnitType.City).cost(game, seat));
   const ahead = alive.filter((p) => p !== seat && p.numTilesOwned() > myTiles).length;
-  scalars[0] = Math.min(game.ticks() / (spawnTurns + cfg.timerMinutes * 600), 1);
+  scalars[0] = Math.min(game.ticks() / (spawnTurns + timerMinutes * 600), 1);
   scalars[1] = game.inSpawnPhase() ? 1 : 0;
   scalars[2] = Math.min(game.ticks() / spawnTurns, 1);
   scalars[3] = seat.hasSpawned() ? 1 : 0;
@@ -102,7 +101,7 @@ export function encodeSeat(
   scalars[9] = myTiles / land;
   scalars[10] = seat.unitCount(UnitType.TransportShip) / Math.max(config.boatMaxNumber(), 1);
   scalars[11] = alive.length / Math.max(nonBot.length, 1);
-  scalars[12] = Math.min(1, Math.max(0, 1 - game.elapsedGameSeconds() / (cfg.timerMinutes * 60)));
+  scalars[12] = Math.min(1, Math.max(0, 1 - game.elapsedGameSeconds() / (timerMinutes * 60)));
   scalars[13] = game.isSpawnImmunityActive() ? 1 : 0;
   scalars[14] = (cellSize * cellSize) / 64;
   scalars[15] = seat.isAlive() ? ahead / Math.max(nonBot.length - 1, 1) : 1;

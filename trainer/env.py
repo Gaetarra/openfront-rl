@@ -31,6 +31,12 @@ UNIT_GROUP = {"City": 0, "Port": 1, "Factory": 2, "Missile Silo": 2, "SAM Launch
               "Transport": 3, "Warship": 4}
 DENSITY_FEATURE = 16  # player feature: log troops per tile
 
+# The Phase 1 gate setup, and ranked 1v1 games (the worker draws map, size, bots and timer from the official ranked 1v1
+# playlist, bridge/setups.ts; of the other fields only "seats" is used).
+ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
+RANKED_1V1 = {"map": "Australia", "compact": False, "nations": 0, "difficulty": "Medium", "bots": 400,
+              "timerMinutes": 15, "seats": 2, "playlist": "ranked1v1"}
+
 
 class Worker:
     """One Node process running K games (bridge/worker.ts)."""
@@ -113,20 +119,16 @@ class VecEnv:
                      "episodes": self.episodes[w * self.G:(w + 1) * self.G]})
         replies = [wk.recv() for wk in self.workers]
         d = replies[0][0]["dims"]
-        self.H0, self.W0 = d["grid"]
-        self.cs, self.P, self.S = d["cellSize"], d["slots"], d["seats"]
+        self.H, self.W = d["grid"]  # padded by the worker to multiples of 16 (the CNN downsamples by 16)
+        self.P, self.S = d["slots"], d["seats"]
         self.F, self.K, self.T = d["playerFeatures"], d["scalars"], d["acts"]
-        self.H, self.W = -(-self.H0 // 16) * 16, -(-self.W0 // 16) * 16  # the CNN downsamples by 16
         self.N = self.E * self.S
         self.dims = {**d, "channels": N_CHANNELS, "H": self.H, "W": self.W}
         dev, hw = self.device, self.H * self.W
-        cells = np.arange(self.H0 * self.W0)
-        self.pad = torch.from_numpy((cells // self.W0) * self.W + cells % self.W0).to(dev)
-        self.valid = torch.zeros(hw, dtype=torch.bool, device=dev)
-        self.valid[self.pad] = True
         self.unit_group = torch.tensor([UNIT_GROUP.get(t, -1) for t in d["unitTypes"]], device=dev)
         self.transport = d["unitTypes"].index("Transport")
-        self.terrain = torch.zeros(self.E, 4, hw, device=dev)
+        self.terrain = torch.zeros(self.E, 5, hw, device=dev)  # land, shore, ocean, height, inside the map
+        self.area = torch.full((self.E,), 64.0, device=dev)  # tiles per cell of each game
         self.o1 = torch.zeros(self.E * hw, dtype=torch.long, device=dev)
         self.o2 = torch.zeros_like(self.o1)
         self.n1 = torch.zeros(self.E * hw, device=dev)
@@ -135,9 +137,8 @@ class VecEnv:
         self.obs = self._absorb(replies)[0]
 
     def step(self, actions):
-        """actions: int array [N, 4] of [type, cell, target, bin] with padded cell indices."""
-        a = np.asarray(actions, dtype=np.int64).reshape(self.E, self.S, 4).copy()
-        a[..., 1] = (a[..., 1] // self.W) * self.W0 + a[..., 1] % self.W
+        """actions: int array [N, 4] of [type, cell, target, bin]; cells are grid indexes (row x W + column)."""
+        a = np.asarray(actions, dtype=np.int64).reshape(self.E, self.S, 4)
         for w, wk in enumerate(self.workers):
             wk.send({"cmd": "step", "actions": a[w * self.G:(w + 1) * self.G].tolist(), "full": self.full_frames})
         out = self._absorb([wk.recv() for wk in self.workers])
@@ -170,9 +171,10 @@ class VecEnv:
                 self.episodes[e] = g["episode"]
                 if g.get("reset"):
                     resets.append(e)
-                    terr = torch.from_numpy(np.frombuffer(b["terrain"], np.uint8).reshape(4, -1).astype(np.float32))
+                    terr = np.frombuffer(b["terrain"], np.uint8).reshape(5, -1)
                     self.terrain[e].zero_()
-                    self.terrain[e][:, self.pad] = terr.to(self.device)
+                    self.terrain[e][:, :terr.shape[1]] = torch.from_numpy(terr.astype(np.float32)).to(self.device)
+                    self.area[e] = float(g["cellSize"]) ** 2
                 invalid[e] = g["invalid"]
                 cells.append((e, np.frombuffer(b["cells"], CELL)))
                 units.append((e, np.frombuffer(b["units"], UNIT)))
@@ -195,21 +197,22 @@ class VecEnv:
         if len(rec) == 0:
             return
         env = np.concatenate([np.full(len(c), e, np.int64) for e, c in cells])
-        idx = torch.from_numpy(env).to(dev) * hw + self.pad[torch.from_numpy(rec["idx"].astype(np.int64)).to(dev)]
+        idx = torch.from_numpy(env * hw + rec["idx"].astype(np.int64)).to(dev)
         for name, t in (("o1", self.o1), ("o2", self.o2), ("n1", self.n1), ("n2", self.n2), ("fo", self.fo)):
             t[idx] = torch.from_numpy(rec[name].astype(np.int64 if name[0] == "o" else np.float32)).to(dev)
 
     def _observe(self, players, rel, scalars, types, attack, units):
         N, S, P, hw, dev = self.N, self.S, self.P, self.H * self.W, self.device
-        area = float(self.cs * self.cs)
         row_env = torch.arange(N, device=dev) // S
+        area = self.area[row_env][:, None]  # [N, 1]
         rel_t = torch.from_numpy(rel.reshape(N, P).astype(np.int64)).to(dev)
         pl = torch.from_numpy(players.reshape(N, P, self.F)).to(dev)
         x = torch.zeros(N, N_CHANNELS, hw, device=dev)
         terr = self.terrain[row_env]
-        x[:, LAND:OCEAN + 1] = terr[:, 0:3] / area
+        valid = terr[:, 4] > 0
+        x[:, LAND:OCEAN + 1] = terr[:, 0:3] / area[:, None]
         x[:, HEIGHT] = terr[:, 3] / 31
-        x[:, VALID] = self.valid.float()
+        x[:, VALID] = valid.float()
         flat = row_env[:, None] * hw + torch.arange(hw, device=dev)
         own = torch.zeros(N, 4, hw, device=dev)
         dens = pl[..., DENSITY_FEATURE]
@@ -225,7 +228,7 @@ class VecEnv:
         self._add_units(x, units, rel_t)
         cell_mask = torch.stack([x[:, UNOWNED] > 0,
                                  (x[:, SHORE] > 0) & (x[:, LAND] - x[:, OWN] > 1e-6),
-                                 x[:, OWN] > 0], 1) & self.valid
+                                 x[:, OWN] > 0], 1) & valid[:, None]
         return {
             "spatial": x.view(N, N_CHANNELS, self.H, self.W).to(torch.bfloat16),
             "scalars": torch.from_numpy(scalars.reshape(N, self.K)).to(dev),
@@ -243,7 +246,7 @@ class VecEnv:
         env = torch.from_numpy(np.concatenate([np.full(len(u), e, np.int64) for e, u in units])).to(dev)
         typ = torch.from_numpy(rec["type"].astype(np.int64)).to(dev)
         owner = torch.from_numpy(rec["owner"].astype(np.int64)).to(dev)
-        cell = self.pad[torch.from_numpy(rec["cell"].astype(np.int64)).to(dev)]
+        cell = torch.from_numpy(rec["cell"].astype(np.int64)).to(dev)
         troops = torch.from_numpy(rec["troops"].astype(np.float32)).to(dev)
         group = self.unit_group[typ]
         value = torch.where(typ == self.transport, torch.log1p(troops) / 10, torch.ones_like(troops))

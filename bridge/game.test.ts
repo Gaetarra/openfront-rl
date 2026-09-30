@@ -5,7 +5,7 @@ import { Act } from "./actions";
 import { CellFrame } from "./frame";
 import { EnvGame } from "./game";
 import { rewardOf } from "./ranking";
-import { ONION, script, spawnCell } from "./testkit";
+import { landTile, ONION, RANKED, script, spawnCell } from "./testkit";
 
 const blob = (blobs: [string, Uint8Array][], name: string) => blobs.find(([n]) => n === name)![1];
 
@@ -79,7 +79,39 @@ test("observe returns the blobs in protocol order with consistent sizes", async 
   assert.deepEqual(blobs.map(([n]) => n), ["cells", "units", "players", "rel", "scalars", "types", "attack"]);
   assert.equal(blob(blobs, "cells").byteLength, env.frame.n * 11);
   assert.equal(blob(blobs, "players").byteLength, env.slots * 17 * 4);
-  assert.equal(env.terrain().byteLength, 4 * env.frame.n);
+  assert.equal(env.terrain().byteLength, 5 * env.frame.n);
   env.step([[Act.Noop, 0, 0, 0]]);
   assert.ok(env.observe(false)[0][1].byteLength < env.frame.n * 11);
+});
+
+test("a frame on a wider grid indexes cells by grid row and leaves the padding empty", async () => {
+  const env = await EnvGame.create(ONION, "pad");
+  script(env, 600);
+  const plain = new CellFrame(env.game.map(), env.frame.cs);
+  const padded = new CellFrame(env.game.map(), env.frame.cs, 80);
+  plain.encode(true);
+  padded.encode(true);
+  assert.equal(padded.n, plain.ch * 80);
+  for (let y = 0; y < plain.ch; y++) {
+    for (let x = 0; x < 80; x++) {
+      const c = y * 80 + x;
+      if (x < plain.cw) {
+        assert.equal(padded.o1[c], plain.o1[y * plain.cw + x]);
+      } else {
+        assert.equal(padded.o1[c], 0);
+        assert.deepEqual(padded.tilesOf(c), []);
+      }
+    }
+  }
+  const tile = landTile(env);
+  assert.ok(padded.tilesOf(padded.cellOf(tile)).includes(tile));
+});
+
+test("ranked games draw from the playlist and share the ranked grid", async () => {
+  const env = await EnvGame.create(RANKED, "ranked-a");
+  assert.equal(env.seats.length, 2);
+  assert.equal(env.frame.stride, 256);
+  assert.equal(env.slots, 403);
+  assert.equal(env.start.config.rankedType, "1v1");
+  assert.match(env.start.gameID, /^[A-Za-z0-9]{8}$/);
 });

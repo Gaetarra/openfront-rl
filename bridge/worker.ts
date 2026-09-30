@@ -12,6 +12,7 @@ import { N_ACTS, TROOP_BINS } from "./actions";
 import { UNIT_TYPES } from "./frame";
 import { Blob, EnvConfig, EnvGame } from "./game";
 import { PLAYER_FEATURES, SCALARS } from "./obs";
+import { gridFor, slotsFor } from "./setups";
 
 // stdout carries replies only; the game logs a lot through console.log/info/warn.
 console.log = console.info = console.warn = console.debug = () => {};
@@ -48,14 +49,17 @@ function part(env: EnvGame, g: number, blobs: Blob[], extra: Record<string, unkn
 }
 
 const fresh = (g: number, extra: Record<string, unknown>): Part =>
-  part(games[g], g, [["terrain", games[g].terrain()], ...games[g].observe(true)], { reset: true, ...extra });
+  part(games[g], g, [["terrain", games[g].terrain()], ...games[g].observe(true)], {
+    reset: true,
+    cellSize: games[g].frame.cs,
+    ...extra,
+  });
 
-function dims(env: EnvGame): Record<string, unknown> {
+function dims(cfg: EnvConfig): Record<string, unknown> {
   return {
-    grid: [env.frame.ch, env.frame.cw],
-    cellSize: env.frame.cs,
-    slots: env.slots,
-    seats: env.seats.length,
+    grid: gridFor(cfg),
+    slots: slotsFor(cfg),
+    seats: cfg.seats,
     playerFeatures: PLAYER_FEATURES,
     scalars: SCALARS,
     acts: N_ACTS,
@@ -97,7 +101,7 @@ async function handle(msg: Init | Step): Promise<Buffer> {
       games.push(await EnvGame.create(msg.config, seedOf(g)));
       parts.push(fresh(g, {}));
     }
-    return encode(parts, dims(games[0]));
+    return encode(parts, dims(msg.config));
   }
   if (init === null) throw new Error("step before init");
   const parts: Part[] = [];
