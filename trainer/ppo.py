@@ -239,7 +239,7 @@ def main(argv=None):
     buf = {k: torch.zeros((T,) + tuple(v.shape), dtype=v.dtype, device=device)
            for k, v in rows(obs, learner).items()}
     actions = torch.zeros(T, N, 4, dtype=torch.long, device=device)
-    logps, values, rewards, dones, ref_logps = (torch.zeros(T, N, device=device) for _ in range(5))
+    logps, values, rewards, dones = (torch.zeros(T, N, device=device) for _ in range(4))
     outcomes = Outcomes(N)
     if state and "outcomes" in state:  # older checkpoints lack it
         outcomes.load(state["outcomes"])
@@ -268,10 +268,6 @@ def main(argv=None):
                     with torch.autocast("cuda", torch.bfloat16):
                         out_o = opponent(theirs)
                     full[r] = ActionDist(out_o, theirs).sample()
-                if ref is not None:
-                    with torch.autocast("cuda", torch.bfloat16):
-                        out_r = ref(mine)
-                    ref_logps[step] = ActionDist(out_r, mine).log_prob(act)
             outcomes.record(mine["scalars"][:, 0].tolist(), values[step].tolist())
             obs, rew, done, infos, invalid = envs.step(full.cpu().numpy())
             rewards[step] = torch.from_numpy(rew.reshape(envs.E, S)[:, 0].copy()).to(device)
@@ -290,7 +286,6 @@ def main(argv=None):
         ret = adv + values
         flat = {k: v.flatten(0, 1) for k, v in buf.items()}
         b_act, b_logp, b_adv, b_ret = actions.flatten(0, 1), logps.flatten(), adv.flatten(), ret.flatten()
-        b_ref = ref_logps.flatten()
         stats = collections.defaultdict(list)
         for _ in range(a.epochs):
             for mb in torch.randperm(T * N, device=device).split(T * N // a.minibatches):
@@ -306,8 +301,9 @@ def main(argv=None):
                 v_loss = 0.5 * (out["value"].float() - b_ret[mb]).pow(2).mean()
                 loss = pg_loss - a.ent_coef * ent.mean() + a.vf_coef * v_loss
                 if ref is not None:
-                    d = (b_ref[mb] - logp).clamp(-20, 20)  # log pi_ref(a) / pi(a) of the taken action
-                    kl = (d.exp() - 1 - d).mean()  # k3 estimator of KL(pi || pi_ref): unbiased and >= 0
+                    with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+                        out_r = ref(o)
+                    kl = dist.kl(ActionDist(out_r, o)).mean()  # exact: the one-sample estimate spiked into the hundreds
                     loss = loss + a.kl_coef * kl
                     stats["loss/kl_ref"].append(kl.item())
                 opt.zero_grad(set_to_none=True)

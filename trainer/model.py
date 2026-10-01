@@ -135,6 +135,21 @@ class ActionDist:
         return (self.type.entropy() / math.log(pt.shape[-1]) + pt[:, SPAWN] * hc[:, 0]
                 + pt[:, ATTACK] * (hp + hb[:, 0]) + pt[:, BOAT] * (hc[:, 1] + hb[:, 1]) + pt[:, BUILD] * hc[:, 2])
 
+    def kl(self, ref):
+        """Exact KL(self || ref) of the joint action, KL(type) + sum_k p(k) KL(args | k). The one-sample estimate
+        from the taken action is not usable: it explodes when that action is one this policy all but rules out and
+        ref does not, which a spread-out 49k-cell map makes common."""
+        kc, kb = _kl(self.cells, ref.cells), _kl(self.bins, ref.bins)  # [N, 3], [N, 2]
+        pt = self.type.probs
+        return (_kl(self.type, ref.type) + pt[:, SPAWN] * kc[:, 0] + pt[:, ATTACK] * (_kl(self.ptr, ref.ptr) + kb[:, 0])
+                + pt[:, BOAT] * (kc[:, 1] + kb[:, 1]) + pt[:, BUILD] * kc[:, 2])
+
+
+def _kl(p, q):
+    """KL(p || q) of categoricals over the same legal entries. torch's kl_divergence returns inf where q's probability
+    underflows to 0 (a sure policy on a 49k-cell map); the log-probabilities stay finite, and masked entries add 0."""
+    return (p.probs * (p.logits - q.logits)).sum(-1)
+
 
 def load_net(path, dims, device="cuda"):
     """A frozen policy from a trainer.bc or trainer.ppo checkpoint, in eval mode."""
