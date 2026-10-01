@@ -155,8 +155,10 @@ def main(argv=None):
     val = [crawl.record_path(e["id"]) for e in entries if is_val(e["id"], a.val_share)]
     if len(train) < a.workers or len(val) < a.val_workers:
         raise SystemExit(f"{len(train)} training and {len(val)} held-out records: run trainer.crawl first")
-    envs = VecEnv(RANKED_1V1, a.workers, a.games_per_worker, seed=f"{a.run}-{a.seed}", device=device, records=train,
-                  log_dir=run_dir / "workers")
+    # A resumed run draws a new record order: with the old one, every stop and resume would replay the same records.
+    start = state["update"] if state else 0
+    envs = VecEnv(RANKED_1V1, a.workers, a.games_per_worker, seed=f"{a.run}-{a.seed}-u{start}", device=device,
+                  records=train, log_dir=run_dir / "workers")
     val_envs = None
     if a.val_workers:
         val_envs = VecEnv(RANKED_1V1, a.val_workers, a.games_per_worker, seed="val", device=device, records=val,

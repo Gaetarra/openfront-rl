@@ -11,6 +11,7 @@ the records of deleted players are removed (docs/API.md "Recently Deleted Player
 import argparse
 import datetime as dt
 import gzip
+import http.client
 import json
 import time
 import urllib.error
@@ -40,7 +41,8 @@ def parse_time(s):
 
 
 class Api:
-    """GET requests, at most one per `interval` seconds, retried with backoff on HTTP 429, 5xx and network errors."""
+    """GET requests, at most one per `interval` seconds, retried with backoff on HTTP 429, 5xx, network errors and
+    broken bodies."""
 
     def __init__(self, interval=1.0, opener=urllib.request.urlopen, sleep=time.sleep, clock=time.monotonic):
         self.interval, self.opener, self.sleep, self.clock = interval, opener, sleep, clock
@@ -63,8 +65,8 @@ class Api:
                     return None
                 if e.code != 429 and e.code < 500:
                     raise
-            except (urllib.error.URLError, TimeoutError, ConnectionError):
-                pass
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, ValueError):
+                pass  # network errors, and bodies cut off mid-read (IncompleteRead) or garbled (JSONDecodeError)
             self.sleep(min(300, 5 * 2 ** attempt))
         raise RuntimeError(f"giving up on {url}")
 

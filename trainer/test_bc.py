@@ -7,7 +7,7 @@ from unittest import mock
 
 import torch
 
-from trainer import crawl
+from trainer import bc, crawl
 from trainer.bc import Meter, bc_loss, is_val, label_legal, main
 from trainer.env import RANKED_1V1, ROOT, VecEnv
 from trainer.model import Policy
@@ -86,13 +86,20 @@ class MainTest(unittest.TestCase):
         (data / "index.jsonl").write_text(json.dumps(entry) + "\n")
         common = ["--run", self.RUN, "--workers", "1", "--games-per-worker", "1", "--val-workers", "0",
                   "--val-share", "0", "--port", "0", "--log-every", "1", "--save-every", "2"]
-        with mock.patch.multiple(crawl, DATA=data, RECORDS=data / "records", INDEX=data / "index.jsonl"):
+        seeds, real = [], bc.VecEnv
+
+        def spy(*args, **kwargs):
+            seeds.append(kwargs["seed"])
+            return real(*args, **kwargs)
+
+        with mock.patch.multiple(crawl, DATA=data, RECORDS=data / "records", INDEX=data / "index.jsonl"),                 mock.patch.object(bc, "VecEnv", spy):
             main(common + ["--updates", "3"])
             first = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
             self.assertEqual((first["kind"], first["update"]), ("bc", 3))
             main(common + ["--updates", "4", "--resume"])
         self.assertEqual(torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)["update"], 4)
         self.assertTrue((ROOT / "runs" / self.RUN).is_dir())
+        self.assertNotEqual(seeds[0], seeds[1], "a resumed run replays the records in a new order, not the same one")
 
 
 if __name__ == "__main__":

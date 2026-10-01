@@ -1,5 +1,6 @@
 import datetime as dt
 import gzip
+import http.client
 import io
 import json
 import tempfile
@@ -107,6 +108,21 @@ class CrawlTest(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertTrue(calls[0].get_header("User-agent").startswith("openfront-rl/"))
         self.assertGreaterEqual(sum(slept), 1.0 + 5.0)  # the spacing, then the backoff
+
+    def test_api_retries_a_response_cut_off_mid_read(self):
+        calls = []
+
+        class CutOff(io.BytesIO):
+            def read(self, *args):
+                raise http.client.IncompleteRead(b'{"ok"')
+
+        def opener(req, timeout):
+            calls.append(req)
+            return CutOff() if len(calls) == 1 else io.BytesIO(b'{"ok": true}')
+
+        api = crawl.Api(interval=0.0, opener=opener, sleep=lambda s: None)
+        self.assertEqual(api.get("/game/x"), {"ok": True})  # a long crawl must not stop at one dropped connection
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":
