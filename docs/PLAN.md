@@ -342,15 +342,21 @@ becomes optional); games are watched in the game's own client; BC imitates all p
 - PPO run `ppo-bc` (16 workers × 2 games, 48 steps, lr 2.5e-4, entropy bonus 0.01, KL to the clone 0.05 from a
   one-sample estimate, learner always in seat 0): ~190 decisions/s (8 × 4: ~166). The training win rate (last 200 games)
   rose to ~0.6 at updates 480–600, then collapsed to ~0.2 over the last ~60 games by update 718, while the KL estimate
-  spiked (31, 82, 300+). Gate B on update 500 (512 games, seats swapped): 0.471 (SE 0.022), FAILED. The ~0.6 came from
-  seat 0 only and was picked at a noisy peak.
+  spiked (31, 82, 300+). Gate B on update 500 (512 games, seats swapped): 0.471 (SE 0.022), FAILED. The ~0.6 overstated
+  it: update 500 was picked at the top of a noisy curve, and a window of the most recently finished games
+  over-represents short ones (if the learner wins its quick games, it looks stronger than over Gate B's fixed games).
+  Seat is unlikely to matter: the game is real-time and symmetric, the latency queue shuffles each tick's intents,
+  and the model cannot tell which seat it plays (player rows are read by their features, not their position).
 - Fixes (2026-10-01): the KL penalty is the exact joint KL (`ActionDist.kl`; the one-sample estimate explodes when the
   learner samples a map cell it gives almost no probability that the clone favours); the learner plays both seats, half
-  the games each, with the win rate logged per seat; checkpoints keep the win-rate window across resumes; the control
+  the games each, with the win rate logged per seat (cheap insurance: the two lines should match); checkpoints keep the
+  win-rate window across resumes; the control
   page charts the key curves and says what is training. PPO run `ppo-bc2` started 2026-10-01 evening: from the clone,
   exact KL 0.2, lr 1e-4, no entropy bonus, 16 × 2, 5,000 updates (~10 h, ~210 decisions/s, GPU peak 10.9 of 12 GB).
-- Open: Gate B on `ppo-bc2`; BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and
-  overwrite each other in `replays/` (Gate B's replaced Gate A's).
+- Open: Gate B on `ppo-bc2`, on several snapshots rather than at the training curve's peak (the curve is
+  length-biased; the saved window keeps each game's length and result, so win rate by game length can be checked);
+  BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and overwrite each other in
+  `replays/` (Gate B's replaced Gate A's).
 
 **Phase 3 — Full environment + BC refresh**
 - Full v1 actions + masks, spawn head, observation channels for every unit type, nukes in flight and SAM coverage,

@@ -93,7 +93,7 @@ def run_info(a):
 
 def seat_rows(E, S, device="cpu"):
     """Rows of the learner and of every other seat. The learner plays seat e % S of game slot e, so it plays each seat
-    equally often, as in trainer.eval: its win rate then measures what Gate B measures."""
+    equally often, as in trainer.eval (the game is symmetric, so the per-seat win rates should match)."""
     seat = torch.arange(E, device=device) % S
     base = torch.arange(E, device=device) * S
     return base + seat, [base + (seat + s) % S for s in range(1, S)], seat
