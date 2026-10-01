@@ -317,6 +317,41 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   KL-to-BC beats a frozen BC copy. The trainer speed fix (overlapping worker groups) only if profiling on ranked maps
   (8–11× Onion's cells) still shows the Python thread as the bottleneck.
 
+**Phase 2 results so far (2026-10-01): Gate A passed, Gate B pending.** Plan:
+`docs/superpowers/plans/2026-10-01-phase2-bc-slice.md`; branch `phase2` (local, not merged).
+- Data: 16,107 usable ranked 1v1 records started 2026-09-23 18:00 to 2026-09-30 23:10 UTC; 2,355 void ones dropped
+  (13%); 765 held out (5%, by a hash of the game ID). BC replayed 7,242 records with 0 errors and 0 desyncs. Labels:
+  no-op in 83.4% of windows, a command in 16.6%; commands outside the 5 actions 1.0%, labels our masks forbid 0.6%
+  (held-out 0.3–1.5%); the latency queue dropped 3.1% of commands (20-record sample). The profile showed the simulation
+  workers, not the trainer, as the bottleneck: no trainer speed fix needed.
+- Watching works: public records and our recorded games play in the game's dev client (`trainer.watch`, or a running
+  trainer, serves them on 8787). A download manager that intercepts the map `.bin` fetches (Internet Download Manager)
+  hangs the replay at "Game is starting...".
+- BC run `bc` (14 workers × 6 games): ~745 rows/s (validation every 500 updates costs ~15%). It learnt in the first
+  ~10k updates (~40 min) and then stayed flat; stopped by choice at update 72,729 of 200,000 (4 h 52 min, 12.2M rows,
+  7,242 games). On the same 224 held-out games every 10k-update snapshot scores within noise (NLL 1.065–1.10); 60k is
+  best: NLL 1.065 (spawn 0.73, early 1.08, mid 1.15, late 0.60), value/outcome correlation 0.557, attack target 36%,
+  attack size 52%, spawn cell 1.4%, boat cell 3.5%, action type 84% (the no-op share: the likeliest choice is to wait,
+  sampling acts at the human rate). The in-run held-out checks (12 games each) are too noisy to pick a checkpoint.
+  Likely cause of the plateau: a constant learning rate with small, correlated batches (one 5-turn window of the same
+  84 games per update, ~28 command rows); the next BC run gets a decaying learning rate and several windows per update.
+- Gate A PASSED with `checkpoints/bc/update0060000.pt` (256 games each, seats swapped): 0.984 (SE 0.008) against
+  random, 0.949 (SE 0.014) against the scripted expander, value/outcome correlation 0.557. In 8 recorded games against
+  the expander the clone won all 8: it builds 5–17 cities (the expander none), launches boats, attacks less often, and
+  re-clicks its spawn during the spawn phase as humans do.
+- PPO run `ppo-bc` (16 workers × 2 games, 48 steps, lr 2.5e-4, entropy bonus 0.01, KL to the clone 0.05 from a
+  one-sample estimate, learner always in seat 0): ~190 decisions/s (8 × 4: ~166). The training win rate (last 200 games)
+  rose to ~0.6 at updates 480–600, then collapsed to ~0.2 over the last ~60 games by update 718, while the KL estimate
+  spiked (31, 82, 300+). Gate B on update 500 (512 games, seats swapped): 0.471 (SE 0.022), FAILED. The ~0.6 came from
+  seat 0 only and was picked at a noisy peak.
+- Fixes (2026-10-01): the KL penalty is the exact joint KL (`ActionDist.kl`; the one-sample estimate explodes when the
+  learner samples a map cell it gives almost no probability that the clone favours); the learner plays both seats, half
+  the games each, with the win rate logged per seat; checkpoints keep the win-rate window across resumes; the control
+  page charts the key curves and says what is training. PPO run `ppo-bc2` started 2026-10-01 evening: from the clone,
+  exact KL 0.2, lr 1e-4, no entropy bonus, 16 × 2, 5,000 updates (~10 h, ~210 decisions/s, GPU peak 10.9 of 12 GB).
+- Open: Gate B on `ppo-bc2`; BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and
+  overwrite each other in `replays/` (Gate B's replaced Gate A's).
+
 **Phase 3 — Full environment + BC refresh**
 - Full v1 actions + masks, spawn head, observation channels for every unit type, nukes in flight and SAM coverage,
   added by network surgery (zero-init heads, decision 14); the extractor maps every intent type. `Configs.ts`: ranked

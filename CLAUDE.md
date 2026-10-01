@@ -63,10 +63,10 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.crawl                          # download ranked 1v1 records into data/ (hours: detach)
 .venv/Scripts/python -m trainer.crawl --purge                  # remove deleted players' records (daily while data is kept)
 .venv/Scripts/python -m trainer.bc --run bc                     # behaviour cloning on the records; same control page
-.venv/Scripts/python -m trainer.eval --a checkpoints/bc/latest.pt --b scripted   # ranked 1v1 match, 256 games
+.venv/Scripts/python -m trainer.eval --a checkpoints/bc/update0060000.pt --b scripted   # ranked 1v1 match, 256 games
 .venv/Scripts/python -m trainer.eval --setup onion --a random   # Phase 1 setup: one seat vs 3 Easy nations
-.venv/Scripts/python -m trainer.ppo --run ppo-bc --setup ranked1v1 --init checkpoints/bc/latest.pt --opponent checkpoints/bc/latest.pt --kl-coef 0.05
-.venv/Scripts/python -m trainer.eval --a checkpoints/bc/latest.pt --b random --episodes 8 --record 1   # save games to replays/
+.venv/Scripts/python -m trainer.ppo --run ppo-bc2 --setup ranked1v1 --init checkpoints/bc/update0060000.pt --opponent checkpoints/bc/update0060000.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --updates 5000   # PPO from the Gate A clone (settings: docs/PLAN.md, Phase 2 results)
+.venv/Scripts/python -m trainer.eval --a checkpoints/bc/update0060000.pt --b random --episodes 8 --record 1   # save games to replays/
 .venv/Scripts/python -m trainer.watch                          # serve replays/ to the game's dev client (npm run dev)
 .venv/Scripts/python scripts/diag_baselines.py                  # random vs scripted expansion (Phase 1 diagnosis)
 .venv/Scripts/tensorboard --logdir runs                         # charts, incl. actions/* mix and episodes/* ranks
