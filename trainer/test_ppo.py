@@ -1,11 +1,12 @@
 import shutil
 import unittest
 
+import numpy as np
 import torch
 
 from trainer.env import ROOT
 from trainer.model import Policy
-from trainer.ppo import Outcomes, gae, main, parse_args, run_info
+from trainer.ppo import Outcomes, gae, main, parse_args, run_info, seat_rows
 
 
 class RunInfoTest(unittest.TestCase):
@@ -17,10 +18,24 @@ class RunInfoTest(unittest.TestCase):
         self.assertEqual((ranked["Against"], ranked["Starts from"]), ("frozen bc.pt", "bc.pt"))
         self.assertEqual(ranked["KL penalty to the start"], 0.05)
         self.assertEqual(ranked["Games at once"], "32 (16 workers x 2)")
+        self.assertEqual(ranked["Learner seat"], "both, half the games each")
         onion = run_info(parse_args([]))
         self.assertEqual(onion["Game"], "Onion, Compact, 5 min")
         self.assertEqual(onion["Against"], "3 Easy nations")
         self.assertEqual((onion["Starts from"], onion["KL penalty to the start"]), ("random weights", "none"))
+        self.assertNotIn("Learner seat", onion, "a single agent seat")
+
+
+class SeatRowsTest(unittest.TestCase):
+    def test_the_learner_plays_every_seat_equally(self):
+        learner, others, seat = seat_rows(4, 2)
+        self.assertEqual(learner.tolist(), [0, 3, 4, 7])  # game slot e, seat e % 2: row e * 2 + seat
+        self.assertEqual([o.tolist() for o in others], [[1, 2, 5, 6]])
+        self.assertEqual(seat.tolist(), [0, 1, 0, 1])
+        per_seat = np.arange(8).reshape(4, 2)  # what the workers return per game and seat: rewards, dones
+        self.assertEqual(per_seat[np.arange(4), seat.numpy()].tolist(), learner.tolist(), "the learner's own values")
+        learner, others, seat = seat_rows(3, 1)
+        self.assertEqual((learner.tolist(), others, seat.tolist()), ([0, 1, 2], [], [0, 0, 0]))
 
 
 class OutcomesTest(unittest.TestCase):
@@ -28,18 +43,25 @@ class OutcomesTest(unittest.TestCase):
         o = Outcomes(rows=2)
         o.record([0.9, 0.9], [0.8, -0.8])
         o.finish([{"env": 0, "seat": 0, "reward": 1.0, "rank": 1, "ticks": 10},
-                  {"env": 1, "seat": 0, "reward": -1.0, "rank": 2, "ticks": 20}], seats=1)
+                  {"env": 1, "seat": 0, "reward": -1.0, "rank": 2, "ticks": 20}])
         resumed = Outcomes(rows=2)
         resumed.load(o.state())
         self.assertEqual(resumed.summary(), o.summary(), "the win rate and value curves carry on after a resume")
         self.assertEqual(resumed.summary()["episodes/win_rate"], 0.5)
+
+    def test_win_rate_per_seat(self):
+        o = Outcomes(rows=2)
+        o.finish([{"env": 0, "seat": 0, "reward": 1.0, "rank": 1, "ticks": 10},
+                  {"env": 1, "seat": 1, "reward": -1.0, "rank": 2, "ticks": 20}])
+        s = o.summary()
+        self.assertEqual((s["episodes/win_rate_seat0"], s["episodes/win_rate_seat1"]), (1.0, 0.0))
 
     def test_value_outcome_correlation_by_phase(self):
         o = Outcomes(rows=4)
         rewards = [1.0, -1.0, -2 / 3, -5 / 6]
         o.record([0.1] * 4, [0.3, 0.3, -0.2, -0.2])  # early: only loosely related to the outcome
         o.record([0.9] * 4, [0.9 * r for r in rewards])  # late: tracks it
-        o.finish([{"env": i, "seat": 0, "reward": r, "rank": 1, "ticks": 1} for i, r in enumerate(rewards)], seats=1)
+        o.finish([{"env": i, "seat": 0, "reward": r, "rank": 1, "ticks": 1} for i, r in enumerate(rewards)])
         s = o.summary()
         self.assertAlmostEqual(s["value/outcome_corr_late"], 1.0, places=5)
         self.assertLess(s["value/outcome_corr_early"], 0.9)
@@ -48,7 +70,7 @@ class OutcomesTest(unittest.TestCase):
     def test_no_correlation_when_every_game_ends_the_same(self):
         o = Outcomes(rows=2)
         o.record([0.9, 0.9], [-0.5, -0.8])
-        o.finish([{"env": i, "seat": 0, "reward": -1.0, "rank": 4, "ticks": 1} for i in range(2)], seats=1)
+        o.finish([{"env": i, "seat": 0, "reward": -1.0, "rank": 4, "ticks": 1} for i in range(2)])
         s = o.summary()
         self.assertEqual(s["value/outcome_acc_late"], 1.0)  # trivially right: why the gate uses the correlation
         self.assertNotIn("value/outcome_corr_late", s)

@@ -82,10 +82,21 @@ def run_info(a):
         rivals = f"{a.nations} {a.difficulty} nations" + (f" and {a.bots} bots" if a.bots else "")
         if a.seats > 1:
             rivals += f"; frozen {a.opponent} in the other seats"
-    return {"Name": a.run, "Method": "PPO (reinforcement learning)", "Game": game, "Against": rivals,
+    seats = 2 if a.setup == "ranked1v1" else a.seats
+    plays = {"Learner seat": "both, half the games each" if seats == 2 else f"all {seats}, equally often"} \
+        if seats > 1 else {}
+    return {"Name": a.run, "Method": "PPO (reinforcement learning)", "Game": game, "Against": rivals, **plays,
             "Starts from": a.init or "random weights", "KL penalty to the start": a.kl_coef or "none",
             "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
             "Updates": f"{a.updates:,}"}
+
+
+def seat_rows(E, S, device="cpu"):
+    """Rows of the learner and of every other seat. The learner plays seat e % S of game slot e, so it plays each seat
+    equally often, as in trainer.eval: its win rate then measures what Gate B measures."""
+    seat = torch.arange(E, device=device) % S
+    base = torch.arange(E, device=device) * S
+    return base + seat, [base + (seat + s) % S for s in range(1, S)], seat
 
 
 def gae(rewards, values, dones, last_value, gamma, lam):
@@ -128,9 +139,10 @@ class Outcomes:
         for row, (p, v) in enumerate(zip(progress, values)):
             self.pending[row].append((p, v))
 
-    def finish(self, infos, seats):
+    def finish(self, infos):
+        """The learner's finished games; its row is the game slot, whichever seat it plays there."""
         for info in infos:
-            row = info["env"] * seats + info["seat"]
+            row = info["env"]
             self.samples.extend((min(int(p * 3), 2), v, info["reward"]) for p, v in self.pending[row])
             self.pending[row] = []
             self.episodes.append(info)
@@ -151,6 +163,10 @@ class Outcomes:
                "episodes/mean_reward": float(np.mean([e["reward"] for e in ep])),
                "episodes/mean_rank": float(np.mean([e["rank"] for e in ep])),
                "episodes/ticks": float(np.mean([e["ticks"] for e in ep]))}
+        seats = sorted({e["seat"] for e in ep})
+        if len(seats) > 1:  # the learner plays every seat: does it win from each?
+            for seat in seats:
+                out[f"episodes/win_rate_seat{seat}"] = float(np.mean([e["rank"] == 1 for e in ep if e["seat"] == seat]))
         s = np.array(self.samples, float).reshape(-1, 3)
         for bucket, name in enumerate(("early", "mid", "late")):
             v, r = s[s[:, 0] == bucket, 1], s[s[:, 0] == bucket, 2]
@@ -213,8 +229,8 @@ def main(argv=None):
 
     opponent = net(a.opponent) if S > 1 else None
     ref = net(a.init) if a.kl_coef > 0 else None
-    learner = torch.arange(envs.E, device=device) * S  # the learner plays seat 0 of every game
-    others = [learner + s for s in range(1, S)]
+    learner, others, seat = seat_rows(envs.E, S, device)
+    games, seat = np.arange(envs.E), seat.cpu().numpy()  # for the per-seat arrays the workers return
     rows = lambda o, r: {k: v[r] for k, v in o.items()}
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
     control.update(run=run_info(a))
@@ -270,11 +286,11 @@ def main(argv=None):
                     full[r] = ActionDist(out_o, theirs).sample()
             outcomes.record(mine["scalars"][:, 0].tolist(), values[step].tolist())
             obs, rew, done, infos, invalid = envs.step(full.cpu().numpy())
-            rewards[step] = torch.from_numpy(rew.reshape(envs.E, S)[:, 0].copy()).to(device)
-            dones[step] = torch.from_numpy(done.reshape(envs.E, S)[:, 0].copy()).to(device)
-            outcomes.finish([i for i in infos if i["seat"] == 0], seats=1)
+            rewards[step] = torch.from_numpy(rew.reshape(envs.E, S)[games, seat]).to(device)
+            dones[step] = torch.from_numpy(done.reshape(envs.E, S)[games, seat]).to(device)
+            outcomes.finish([i for i in infos if i["seat"] == seat[i["env"]]])
             np.add.at(act_counts, act.cpu().numpy()[:, 0], 1)
-            invalid_count += int(invalid.reshape(envs.E, S)[:, 0].sum())
+            invalid_count += int(invalid.reshape(envs.E, S)[games, seat].sum())
             global_step += N
             control.throttle(time.perf_counter() - t0)
         return True

@@ -341,9 +341,10 @@ async function refresh() {
 }
 // A chart shows when the run logs its tags. goal: which way is good; ref: [height of a dashed line, its name].
 const CHARTS = [
-  { title: "Win rate", lines: [["episodes/win_rate", "win rate"]], goal: "higher is better", ref: [0.545, "Gate B bar"],
-    note: "Share of the last 200 games the learner won. Against a copy of itself, 0.5 is a draw. Dashed: the Gate B " +
-      "bar, for games against the frozen clone." },
+  { title: "Win rate", lines: [["episodes/win_rate", "all"], ["episodes/win_rate_seat0", "seat 0"],
+    ["episodes/win_rate_seat1", "seat 1"]], goal: "higher is better", ref: [0.545, "Gate B bar"],
+    note: "Share of the last 200 games the learner won, overall and from each seat it plays. Against a copy of " +
+      "itself, 0.5 is a draw. Dashed: the Gate B bar, for games against the frozen clone." },
   { title: "KL to the initial policy", lines: [["loss/kl_ref", "KL"]], goal: "keep it small",
     note: "How far the policy has moved from where it started, per decision. If it keeps growing while the win rate " +
       "stays flat, resume with a higher --kl-coef." },
