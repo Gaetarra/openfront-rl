@@ -194,7 +194,7 @@ def main(argv=None):
     others = [learner + s for s in range(1, S)]
     rows = lambda o, r: {k: v[r] for k, v in o.items()}
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
-    server = serve(control, a.port)
+    server = serve(control, a.port, log_dir=run_dir)
     control.note(f"control page on http://127.0.0.1:{server.server_address[1]}")
     writer = SummaryWriter(run_dir)
     commit = game_commit()

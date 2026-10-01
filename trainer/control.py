@@ -3,6 +3,7 @@
 The CLI is `python -m trainer.ctl`. Pausing leaves the Node workers idle and frees the GPU's compute."""
 import collections
 import json
+import math
 import re
 import subprocess
 import threading
@@ -13,6 +14,8 @@ from pathlib import Path
 
 import psutil
 import torch
+from tensorboard.backend.event_processing.directory_watcher import DirectoryDeletedError
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 REPLAYS = Path(__file__).resolve().parents[1] / "replays"  # saved games (trainer.eval --record), served at /game/<id>
 GAME_PATH = re.compile(r"^/game/([A-Za-z0-9]{8,10})$")
@@ -155,8 +158,23 @@ def sample_system():
             "training_rss_gb": rss / 2**30, "gpu": gpu_status(), "cpu_temp": cpu_temp()}
 
 
-def serve(control, port, sampler=True):
-    """Starts the control server on 127.0.0.1:port (0 = any free port) in a daemon thread."""
+def serve(control, port, sampler=True, log_dir=None):
+    """Starts the control server on 127.0.0.1:port (0 = any free port) in a daemon thread. With the run's TensorBoard
+    `log_dir`, the page charts its curves."""
+    # At most 1,000 points per curve, sampled the way TensorBoard samples them.
+    curves = EventAccumulator(str(log_dir), size_guidance={"scalars": 1000}) if log_dir else None
+    lock = threading.Lock()
+
+    def history():
+        if curves is None:
+            return {}
+        with lock:  # requests run in parallel threads
+            try:
+                curves.Reload()  # reads only what the trainer appended since the last request
+            except DirectoryDeletedError:  # the trainer has not created its log yet
+                return {}
+            return {tag: [[e.step, e.value] for e in curves.Scalars(tag) if math.isfinite(e.value)]
+                    for tag in curves.Tags()["scalars"]}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -184,6 +202,8 @@ def serve(control, port, sampler=True):
                 self._send(200, PAGE, "text/html; charset=utf-8")
             elif self.path == "/status":
                 self._send(200, json.dumps(control.status()))
+            elif self.path == "/history":
+                self._send(200, json.dumps(history()))
             else:
                 self._send(404, "{}")
 
@@ -221,9 +241,9 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root { --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #677084; --accent: #2f6fe4; --hot: #c2410c;
-  --line: #e3e6eb; }
+  --line: #e3e6eb; --second: #d97706; --third: #15803d; --fourth: #7c3aed; }
 @media (prefers-color-scheme: dark) { :root { --bg: #14171c; --card: #1d2128; --text: #e6e9ef; --muted: #98a1b3;
-  --accent: #6b9bff; --hot: #fb923c; --line: #2c323c; } }
+  --accent: #6b9bff; --hot: #fb923c; --line: #2c323c; --second: #f0a742; --third: #4ade80; --fourth: #a78bfa; } }
 body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
 main { max-width: 980px; margin: 0 auto; padding: 16px; }
 header { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; }
@@ -242,6 +262,12 @@ td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
 .hot { color: var(--hot); font-weight: 600; }
 #log { font: 12px/1.5 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
 p.hint { color: var(--muted); font-size: 13px; }
+.chart-bar { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; justify-content: space-between; }
+.chart-bar label { font-size: 13px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 6px; }
+.chart-head { font-size: 13px; font-weight: 600; }
+.chart-last { font: 12px/1.5 ui-monospace, monospace; display: flex; flex-wrap: wrap; gap: 0 10px; min-height: 18px; }
+.chart-box { position: relative; height: 160px; }
 </style></head><body><main>
 <header><h1>Training control</h1><div>State: <span id="state">…</span></div></header>
 <div class="buttons">
@@ -257,10 +283,19 @@ p.hint { color: var(--muted); font-size: 13px; }
   <section><h2>Training</h2><table id="training"></table></section>
   <section><h2>Computer</h2><table id="system"></table></section>
 </div>
+<section style="margin-top:12px">
+  <div class="chart-bar"><h2>Curves</h2>
+    <label>Smoothing <input type="range" id="smoothing" min="0" max="0.99" step="0.01" value="0.8">
+    <output id="smoothing-out">0.80</output></label></div>
+  <div id="charts" class="charts"></div>
+</section>
 <section style="margin-top:12px"><h2>Events</h2><div id="log"></div></section>
-<p class="hint">Charts: run <code>.venv/Scripts/tensorboard --logdir runs</code> and open
-<a href="http://localhost:6006">localhost:6006</a>.</p>
+<p class="hint">The curves refresh every 30 s. Every metric: run <code>.venv/Scripts/tensorboard --logdir runs</code>
+and open <a href="http://localhost:6006">localhost:6006</a>.</p>
 </main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"
+  integrity="sha512-CQBWl4fJHWbryGE+Pc7UAxWMUMNMWzWxF4SQo9CgkJIN1kx6djDQZjh3Y8SZ1d+6I+1zze6Z7kHXO7q3UyZAWw=="
+  crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 const fmt = (v, d = 2) => v === null || v === undefined ? "–" : typeof v === "number" ? v.toFixed(d) : v;
 function rows(id, items) {
@@ -274,6 +309,7 @@ async function send(cmd) {
 async function refresh() {
   try {
     const s = await (await fetch("/status")).json();
+    if (s.update) perUpdate = s.global_step / s.update;
     const m = s.metrics || {}, sys = s.system || {}, g = sys.gpu || {};
     document.getElementById("state").textContent = s.state + (s.auto_paused ? " (GPU too hot)" : "") +
       (s.duty < 1 ? ` · throttled to ${Math.round(s.duty * 100)}%` : "");
@@ -296,7 +332,94 @@ async function refresh() {
     document.getElementById("state").textContent = "not responding (training stopped?)";
   }
 }
-refresh();
+// [title, [[tag, label], ...], optional [dashed line, its meaning]]; a chart shows when the run logs its tags.
+const CHARTS = [
+  ["Win rate, last 200 games", [["episodes/win_rate", "win rate"]], [0.545, "Gate B bar vs the frozen clone"]],
+  ["KL to the initial policy", [["loss/kl_ref", "KL"]]],
+  ["Entropy", [["loss/entropy", "entropy"]]],
+  ["Value vs outcome correlation", [["value/outcome_corr_early", "early"], ["value/outcome_corr_mid", "mid"],
+    ["value/outcome_corr_late", "late"]]],
+  ["Commands, share of decisions", [["actions/attack", "attack"], ["actions/boat", "boat"],
+    ["actions/build_city", "city"], ["actions/spawn", "spawn"]]],
+  ["Decisions / s", [["perf/decisions_per_s", "decisions/s"]]],
+  ["Loss", [["bc/nll", "training"], ["val/bc/nll", "held-out"]]],
+  ["Value vs outcome correlation, held-out", [["val/value_outcome_corr", "held-out"]], [0.5, "Gate A bar"]],
+  ["Attack target accuracy", [["bc/attack_target_acc", "training"], ["val/bc/attack_target_acc", "held-out"]]],
+  ["Windows with a command", [["bc/act_rate_human", "humans"], ["bc/act_rate_policy", "clone"]]],
+  ["Rows / s", [["perf/samples_per_s", "rows/s"]]],
+];
+const charts = {}, smoothing = document.getElementById("smoothing");
+let curves = {}, perUpdate = 1;  // TensorBoard steps per update, from /status
+function points(pts, w) {  // TensorBoard's smoothing: a debiased moving average
+  let last = 0, n = 0;
+  return pts.map(([x, y]) => { last = last * w + (1 - w) * y; n += 1; return {x: x / perUpdate, y: last / (1 - w ** n)}; });
+}
+function nearestPerLine(chart, e) {  // the point nearest the pointer on every line: lines are logged at different steps
+  const x = chart.scales.x.getValueForPixel(e.x), items = [];
+  chart.data.datasets.forEach((ds, i) => {
+    if (ds.faint || !chart.isDatasetVisible(i) || !ds.data.length) return;
+    let lo = 0, hi = ds.data.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (ds.data[mid].x < x) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && x - ds.data[lo - 1].x < ds.data[lo].x - x) lo -= 1;
+    items.push({ element: chart.getDatasetMeta(i).data[lo], datasetIndex: i, index: lo });
+  });
+  return items;
+}
+function drawCharts() {
+  const box = document.getElementById("charts");
+  if (!window.Chart) { box.textContent = "The charts need Chart.js from cdnjs.cloudflare.com, which did not load."; return; }
+  Chart.Interaction.modes.nearestPerLine = nearestPerLine;
+  const css = getComputedStyle(document.documentElement), color = name => css.getPropertyValue(name).trim();
+  const colors = ["--accent", "--second", "--third", "--fourth"].map(color), muted = color("--muted");
+  const grid = color("--line"), w = Number(smoothing.value);
+  for (const [title, lines, ref] of CHARTS) {
+    const shown = lines.filter(([tag]) => (curves[tag] || []).length);
+    if (!shown.length) continue;
+    const datasets = shown.flatMap(([tag, label], i) => [
+      { label, faint: true, data: points(curves[tag], 0), borderColor: colors[i] + "40", borderWidth: 1 },
+      { label, data: points(curves[tag], w), borderColor: colors[i], borderWidth: 1.75 }]);
+    if (ref) {
+      const xs = datasets.flatMap(d => [d.data[0].x, d.data[d.data.length - 1].x]);
+      datasets.push({ label: ref[1], faint: true, borderColor: muted, borderDash: [4, 4], borderWidth: 1,
+        data: [{ x: Math.min(...xs), y: ref[0] }, { x: Math.max(...xs), y: ref[0] }] });
+    }
+    let chart = charts[title];
+    if (chart) {
+      chart.data.datasets = datasets;
+      chart.update("none");
+    } else {
+      const card = document.createElement("div");
+      card.innerHTML = '<div class="chart-head"></div><div class="chart-last"></div><div class="chart-box"><canvas></canvas></div>';
+      card.querySelector(".chart-head").textContent = ref ? `${title} (dashed: ${ref[1]})` : title;
+      box.append(card);
+      const font = { size: 10 };
+      chart = charts[title] = new Chart(card.querySelector("canvas"), { type: "line", data: { datasets }, options: {
+        animation: false, parsing: false, normalized: true, responsive: true, maintainAspectRatio: false,
+        interaction: { mode: "nearestPerLine", intersect: false }, elements: { point: { radius: 0, hoverRadius: 3 } },
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { title: items => items.length ? `update ${Math.round(items[0].parsed.x)}` : "" } } },
+        scales: { x: { type: "linear", ticks: { color: muted, font, maxTicksLimit: 6 }, grid: { color: grid } },
+                  y: { ticks: { color: muted, font, maxTicksLimit: 5 }, grid: { color: grid } } } } });
+      chart.last = card.querySelector(".chart-last");
+    }
+    chart.last.innerHTML = datasets.filter(d => !d.faint).map(d => {
+      const y = d.data[d.data.length - 1].y;
+      return `<span style="color:${d.borderColor}">${d.label} ${fmt(y, Math.abs(y) >= 100 ? 0 : 3)}</span>`;
+    }).join("");
+  }
+}
+async function loadCurves() {
+  try {
+    curves = await (await fetch("/history")).json();
+    drawCharts();
+  } catch (e) {}
+}
+smoothing.addEventListener("input", () => {
+  document.getElementById("smoothing-out").textContent = Number(smoothing.value).toFixed(2);
+  drawCharts();
+});
+refresh().then(loadCurves);
 setInterval(refresh, 2000);
+setInterval(loadCurves, 30000);
 </script></body></html>
 """

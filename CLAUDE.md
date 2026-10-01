@@ -57,7 +57,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 
 ```bash
 .venv/Scripts/python -m unittest discover -s trainer -t .      # trainer tests (start real Node workers, need the GPU)
-.venv/Scripts/python -m trainer.ppo --run onion                 # train; control page http://127.0.0.1:8787
+.venv/Scripts/python -m trainer.ppo --run onion                 # train; control page with the key curves: http://127.0.0.1:8787
 .venv/Scripts/python -m trainer.ppo --run onion --resume        # continue from checkpoints/onion/latest.pt
 .venv/Scripts/python -m trainer.ctl pause|resume|save|stop|throttle half|status
 .venv/Scripts/python -m trainer.crawl                          # download ranked 1v1 records into data/ (hours: detach)

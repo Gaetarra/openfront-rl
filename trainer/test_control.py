@@ -1,9 +1,13 @@
 import json
+import tempfile
 import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+from torch.utils.tensorboard import SummaryWriter
 
 from trainer.control import REPLAYS, Control, cpu_temp, serve
 
@@ -59,6 +63,32 @@ class ControlTest(unittest.TestCase):
         self.assertEqual(s["metrics"]["episodes/win_rate"], 0.5)
         with urllib.request.urlopen(self.base + "/", timeout=5) as r:
             self.assertIn("<title>Training control</title>", r.read().decode())
+
+    def test_history_follows_the_run_log(self):
+        log_dir = Path(tempfile.mkdtemp()) / "run"  # the trainers start the server before their writer creates it
+        server = serve(Control(), 0, sampler=False, log_dir=log_dir)
+
+        def history():
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/history", timeout=10) as r:
+                return r.read().decode()
+
+        try:
+            self.assertEqual(json.loads(history()), {})
+            with SummaryWriter(log_dir) as w:
+                w.add_scalar("episodes/win_rate", 0.25, 100)
+                w.flush()
+                self.assertEqual(json.loads(history()), {"episodes/win_rate": [[100, 0.25]]})
+                w.add_scalar("episodes/win_rate", 0.5, 200)
+                w.add_scalar("loss/kl_ref", float("nan"), 200)
+                w.flush()
+                body = history()
+            self.assertEqual(json.loads(body)["episodes/win_rate"], [[100, 0.25], [200, 0.5]])
+            self.assertNotIn("NaN", body, "the page's JSON.parse rejects NaN")
+        finally:
+            server.shutdown()
+            server.server_close()
+        with urllib.request.urlopen(self.base + "/history", timeout=5) as r:
+            self.assertEqual(json.load(r), {}, "no run log, no curves")
 
     def test_wait_blocks_while_paused(self):
         self.c.command("pause")
