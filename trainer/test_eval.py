@@ -17,6 +17,11 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(s["mean_reward"], 0.0)
         self.assertEqual(s["mean_rank"], 2.5)
 
+    def test_summarize_splits_the_win_rate_by_seat(self):
+        s = summarize([{"reward": 1, "rank": 1, "seat": 0}, {"reward": 1, "rank": 1, "seat": 1},
+                       {"reward": -1, "rank": 2, "seat": 1}])
+        self.assertEqual((s["win_rate_seat0"], s["win_rate_seat1"]), (1.0, 0.5))
+
     def test_policies_swap_seats_between_slots(self):
         self.assertEqual(seats_for(4, 2), [[0, 1], [1, 0], [0, 1], [1, 0]])
         self.assertEqual(seats_for(2, 1), [[0], [0]])

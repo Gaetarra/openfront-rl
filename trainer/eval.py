@@ -27,8 +27,10 @@ def summarize(results):
     win = np.array([r["rank"] == 1 for r in results], float)
     rank = np.array([r["rank"] for r in results], float)
     se = lambda v: float(v.std(ddof=1) / np.sqrt(n)) if n > 1 else float("nan")
-    return {"episodes": n, "win_rate": float(win.mean()), "win_rate_se": se(win), "mean_reward": float(reward.mean()),
-            "mean_reward_se": se(reward), "mean_rank": float(rank.mean())}
+    seat = np.array([r.get("seat", 0) for r in results])
+    by_seat = {f"win_rate_seat{s}": float(win[seat == s].mean()) for s in np.unique(seat)} if len(set(seat)) > 1 else {}
+    return {"episodes": n, "win_rate": float(win.mean()), "win_rate_se": se(win), **by_seat,
+            "mean_reward": float(reward.mean()), "mean_reward_se": se(reward), "mean_rank": float(rank.mean())}
 
 
 class Scripted:
