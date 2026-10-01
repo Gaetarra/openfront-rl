@@ -12,8 +12,15 @@ import { GameUpdateType, HashUpdate } from "../OpenFront_Source_Code/openfrontio
 import { createNationsForGame } from "../OpenFront_Source_Code/openfrontio/src/core/game/NationCreation";
 import { GameRunner } from "../OpenFront_Source_Code/openfrontio/src/core/GameRunner";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { GameStartInfo, StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
-import { simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
+import {
+  GameRecord,
+  GameStartInfo,
+  PlayerRecord,
+  StampedIntent,
+  Turn,
+  Winner,
+} from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { createPartialGameRecord, simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
 import { attackMask, decodeAction, N_ACTS, typeMask } from "./actions";
 import { CellFrame, encodeUnits, terrainCells } from "./frame";
 import { LatencyQueue } from "./latency";
@@ -53,6 +60,8 @@ export class EnvGame {
   invalid: boolean[];
   private turn = 0;
   private masks: { types: Uint8Array; attack: Uint8Array }[] | null = null;
+  /** Executed turns while the game is recorded (record()). */
+  private turns: Turn[] | null = null;
 
   private constructor(
     /** How the game was created: a record of it replays from this. */
@@ -146,10 +155,41 @@ export class EnvGame {
     return new EnvGame(start, game, seats, frame, slots, runner, sim, latency);
   }
 
+  /** Records every executed turn from now on (call it before the first step), for toRecord(). */
+  record(): void {
+    this.turns = [];
+  }
+
+  get recording(): boolean {
+    return this.turns !== null;
+  }
+
+  /** The recorded game as a game record (GameRecordSchema), which the game's own client can replay. */
+  toRecord(gitCommit: string): GameRecord {
+    if (this.turns === null) throw new Error("this game was not recorded");
+    const w = this.game.getWinner();
+    const winner: Winner =
+      w === null
+        ? undefined
+        : typeof w === "string"
+          ? ["team", w]
+          : w.clientID() !== null
+            ? ["player", w.clientID()!]
+            : ["nation", w.name()];
+    const players: PlayerRecord[] = this.start.players.map((p) => ({ ...p, persistentID: null, stats: {} }));
+    const end = this.game.ticks() * 100; // ms of game time: 10 ticks a second
+    const partial = createPartialGameRecord(this.start.gameID, this.start.config, players, this.turns, 0, end, winner);
+    return { ...partial, gitCommit } as GameRecord;
+  }
+
   /** Executes one turn (one tick) with the given intents. */
   tickWith(intents: StampedIntent[]): void {
-    this.runner.addTurn({ turnNumber: this.turn++, intents });
-    if (!this.runner.executeNextTick()) throw new Error(`tick ${this.turn - 1} failed: ${this.sim.fatal}`);
+    const turnNumber = this.turn++;
+    this.runner.addTurn({ turnNumber, intents });
+    if (!this.runner.executeNextTick()) throw new Error(`tick ${turnNumber} failed: ${this.sim.fatal}`);
+    if (this.turns !== null) {
+      this.turns.push(this.sim.hashTick === turnNumber ? { turnNumber, intents, hash: this.sim.hash } : { turnNumber, intents });
+    }
   }
 
   /** Applies one decision per seat ([type, cell, target, bin]) through the latency queue and advances STEP_TICKS. */

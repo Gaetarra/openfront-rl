@@ -105,7 +105,7 @@ class VecEnv:
     """E = workers x games_per_worker games with S seats each; N = E x S observation rows (env-major)."""
 
     def __init__(self, config, workers, games_per_worker, seed, device="cuda", episodes=None, log_dir=None,
-                 full_frames=False, records=None):
+                 full_frames=False, records=None, record=None):
         self.device = torch.device(device)
         self.G = games_per_worker
         self.E = workers * games_per_worker
@@ -124,6 +124,8 @@ class VecEnv:
                 msg["replay"] = {"records": [str(r) for r in records[w::workers]]}
             else:
                 msg["episodes"] = self.episodes[w * self.G:(w + 1) * self.G]
+                if record is not None:  # {"dir", "gitCommit", "games"}: save each worker's first games as records
+                    msg["record"] = record
             wk.send(msg)
         replies = [wk.recv() for wk in self.workers]
         d = replies[0][0]["dims"]
@@ -197,7 +199,8 @@ class VecEnv:
                     dones[e] = 1
                     rewards[e] = g["rewards"]
                     infos += [{"env": e, "seat": s, "reward": g["rewards"][s], "rank": g["ranks"][s],
-                               "players": g["players"], "ticks": g["endTick"]} for s in range(S)]
+                               "players": g["players"], "ticks": g["endTick"], "recorded": g.get("recorded")}
+                              for s in range(S)]
                 if self.replay:
                     labels[e] = np.frombuffer(b["labels"], np.int32).reshape(S, 4)
                     self.outcome[e] = g["outcome"]

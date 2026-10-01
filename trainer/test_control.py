@@ -5,7 +5,7 @@ import unittest
 import urllib.error
 import urllib.request
 
-from trainer.control import Control, cpu_temp, serve
+from trainer.control import REPLAYS, Control, cpu_temp, serve
 
 
 class ControlTest(unittest.TestCase):
@@ -82,6 +82,28 @@ class ControlTest(unittest.TestCase):
 
     def test_cpu_temp_without_monitor_is_none(self):
         self.assertIsNone(cpu_temp("http://127.0.0.1:9/data.json"))
+
+    def test_saved_games_are_served_with_cors_and_commands_are_not(self):
+        REPLAYS.mkdir(exist_ok=True)
+        path = REPLAYS / "Test0001.json"
+        path.write_text('{"info": {}}')
+        try:
+            with urllib.request.urlopen(f"{self.base}/game/Test0001", timeout=5) as r:
+                self.assertEqual(json.load(r), {"info": {}})
+                self.assertEqual(r.headers["Access-Control-Allow-Origin"], "*")
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(f"{self.base}/game/Nope0001", timeout=5)
+            self.assertEqual(e.exception.code, 404)
+            preflight = urllib.request.Request(f"{self.base}/game/Test0001", method="OPTIONS")
+            with urllib.request.urlopen(preflight, timeout=5) as r:
+                self.assertEqual(r.status, 204)
+                self.assertEqual(r.headers["Access-Control-Allow-Methods"], "GET")
+            with self.assertRaises(urllib.error.HTTPError):  # no preflight approval for the buttons
+                urllib.request.urlopen(urllib.request.Request(f"{self.base}/pause", method="OPTIONS"), timeout=5)
+            with self.assertRaises(urllib.error.HTTPError):  # only game IDs, never paths
+                urllib.request.urlopen(f"{self.base}/game/..%2F..%2FREADME", timeout=5)
+        finally:
+            path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

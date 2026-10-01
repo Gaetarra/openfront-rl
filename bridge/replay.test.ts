@@ -5,13 +5,13 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { GameRecord, StampedIntent, Turn } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { GameRecord, GameRecordSchema, StampedIntent, Turn } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
 import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
 import { Act } from "./actions";
-import { seatClientID } from "./game";
+import { EnvGame, seatClientID } from "./game";
 import { binOf, OUT_OF_SET, readRecord, RecordGame } from "./replay";
 import { gameConfigOf } from "./setups";
-import { ONION } from "./testkit";
+import { landTile, ONION } from "./testkit";
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "testdata/ranked1v1.json.gz");
 
@@ -88,4 +88,26 @@ test("extra commands queue into later windows; unexpressible ones stay out of th
   assert.deepEqual(types[62], [Act.Noop, Act.Noop]);
   assert.deepEqual(types.slice(80, 84).map((t) => t[0]), [Act.Attack, Act.Attack, Act.Attack, Act.Noop]);
   assert.equal(rg.dropped, 2);
+});
+
+test("a recorded game passes the record schema and replays to the same state", async () => {
+  const env = await EnvGame.create({ ...ONION, seats: 2, nations: 0, timerMinutes: 1 }, "rec");
+  env.record();
+  const cell = env.frame.cellOf(landTile(env));
+  for (let step = 0; !env.done && step < 1000; step++) {
+    env.observe(step === 0);
+    const mine = step === 2 ? [Act.Spawn, cell, 0, 0] : step > 45 && step % 10 === 0 ? [Act.Attack, 0, 0, 2] : [0, 0, 0, 0];
+    env.step([mine, [Act.Noop, 0, 0, 0]]);
+  }
+  assert.ok(env.done);
+  const record = env.toRecord("DEV");
+  GameRecordSchema.parse(record); // what the game's client checks before replaying
+  const rg = await RecordGame.create(decompressGameRecord(structuredClone(record)), env.frame.stride, env.slots);
+  while (!rg.done) {
+    rg.labels();
+    rg.advance();
+  }
+  assert.equal(rg.desync, false);
+  assert.equal(rg.env.hash, env.hash);
+  assert.deepEqual(rg.env.observe(true), env.observe(true), "a replay sees what the agent saw");
 });

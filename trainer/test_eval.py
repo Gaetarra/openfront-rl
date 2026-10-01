@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from trainer.env import ONION
 from trainer.eval import play, seats_for, summarize
@@ -26,9 +29,14 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(first, second)
 
     def test_scripted_against_random(self):
-        r = play(["scripted", "random"], ONION2, episodes=4, workers=1, games_per_worker=4, seed="eval-2")
+        tmp = tempfile.mkdtemp()
+        r = play(["scripted", "random"], ONION2, episodes=4, workers=1, games_per_worker=4, seed="eval-2",
+                 record={"dir": tmp, "gitCommit": "DEV", "games": 1})
         self.assertEqual(r["episodes"], 4)
         self.assertTrue(0.0 <= r["win_rate"] <= 1.0)
+        self.assertEqual(len(r["recorded"]), 1)
+        saved = json.loads((Path(tmp) / f"{r['recorded'][0]}.json").read_text())
+        self.assertEqual(saved["info"]["gameID"], r["recorded"][0])
 
 
 if __name__ == "__main__":

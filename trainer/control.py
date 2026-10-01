@@ -3,14 +3,19 @@
 The CLI is `python -m trainer.ctl`. Pausing leaves the Node workers idle and frees the GPU's compute."""
 import collections
 import json
+import re
 import subprocess
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import psutil
 import torch
+
+REPLAYS = Path(__file__).resolve().parents[1] / "replays"  # saved games (trainer.eval --record), served at /game/<id>
+GAME_PATH = re.compile(r"^/game/([A-Za-z0-9]{8,10})$")
 
 THROTTLE = {"full": 1.0, "half": 0.5, "low": 0.2}
 
@@ -157,21 +162,40 @@ def serve(control, port, sampler=True):
         def log_message(self, *args):
             pass
 
-        def _send(self, code, body, ctype="application/json"):
+        def _send(self, code, body, ctype="application/json", cors=False):
             data = body.encode()
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
+            if cors:
+                self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(data)
 
         def do_GET(self):
+            game = GAME_PATH.match(self.path)
+            if game:
+                # For the game's own client: in dev mode it loads archived games from localhost:8787/game/<id>.
+                path = REPLAYS / f"{game[1]}.json"
+                if not path.exists():
+                    return self._send(404, "{}", cors=True)
+                return self._send(200, path.read_text(encoding="utf-8"), cors=True)
             if self.path == "/":
                 self._send(200, PAGE, "text/html; charset=utf-8")
             elif self.path == "/status":
                 self._send(200, json.dumps(control.status()))
             else:
                 self._send(404, "{}")
+
+        def do_OPTIONS(self):
+            # CORS preflight: other pages may read saved games and nothing else (the buttons stay same-page, do_POST).
+            if not GAME_PATH.match(self.path):
+                return self._send(404, "{}")
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
 
         def do_POST(self):
             # Browsers cannot add a custom header to a cross-site request without a CORS preflight, which this server

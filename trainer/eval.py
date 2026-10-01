@@ -13,8 +13,10 @@ import json
 import numpy as np
 import torch
 
+from trainer.control import REPLAYS
 from trainer.env import ONION, RANKED_1V1, VecEnv
 from trainer.model import ActionDist, RandomPolicy, load_net
+from trainer.ppo import game_commit
 
 SETUPS = {"onion": ONION, "ranked1v1": RANKED_1V1}
 
@@ -74,11 +76,12 @@ def seats_for(E, S):
     return [[(e + p) % S for p in range(S)] for e in range(E)]
 
 
-def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed="eval"):
-    """Plays the first ceil(episodes / games) episodes of every game slot; returns the summary of policy 0. Sampling
-    uses a fixed torch seed, so a given set of policies always gives the same result."""
+def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed="eval", record=None):
+    """Plays the first ceil(episodes / games) episodes of every game slot; returns the summary of policy 0, and the IDs
+    of the games saved with `record` ({"dir", "gitCommit", "games"}). Sampling uses a fixed torch seed, so a given set
+    of policies always gives the same result."""
     torch.manual_seed(0)
-    envs = VecEnv(config, workers, games_per_worker, seed=seed, device=device)
+    envs = VecEnv(config, workers, games_per_worker, seed=seed, device=device, record=record)
     try:
         S, E = envs.S, envs.E
         if len(specs) != S:
@@ -87,12 +90,13 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
         seats = seats_for(E, S)
         rows = [torch.tensor([e * S + seats[e][p] for e in range(E)], device=device) for p in range(S)]
         per_slot = -(-episodes // E)
-        counts, results, obs = np.zeros(E, int), [], envs.obs
+        counts, results, seen, obs = np.zeros(E, int), [], [], envs.obs
         while counts.min() < per_slot:
             act = torch.zeros(envs.N, 4, dtype=torch.long, device=device)
             for p, policy in enumerate(policies):
                 act[rows[p]] = policy({k: v[rows[p]] for k, v in obs.items()})
             obs, _, _, infos, _ = envs.step(act.cpu().numpy())
+            seen += infos
             for info in infos:
                 e = info["env"]
                 if info["seat"] == seats[e][0] and counts[e] < per_slot:
@@ -100,7 +104,7 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
                     results.append(info)
     finally:
         envs.close()
-    return summarize(results)
+    return {**summarize(results), "recorded": sorted({i["recorded"] for i in seen if i.get("recorded")})}
 
 
 def main(argv=None):
@@ -112,12 +116,17 @@ def main(argv=None):
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--games-per-worker", type=int, default=4)
     p.add_argument("--seed", default="eval")
+    p.add_argument("--record", type=int, default=0, help="games saved to replays/ per worker, to watch them")
     a = p.parse_args(argv)
     config = SETUPS[a.setup]
     if config["seats"] == 2 and a.b is None:
         p.error("--b is required in 2-seat setups")
-    result = play([a.a, a.b][:config["seats"]], config, a.episodes, a.workers, a.games_per_worker, seed=a.seed)
+    record = {"dir": str(REPLAYS), "gitCommit": game_commit(), "games": a.record} if a.record > 0 else None
+    result = play([a.a, a.b][:config["seats"]], config, a.episodes, a.workers, a.games_per_worker, seed=a.seed,
+                  record=record)
     print(json.dumps({"a": a.a, "b": a.b, "setup": a.setup, **result}, indent=2))
+    for game_id in result["recorded"]:
+        print(f"watch: python -m trainer.watch (or a running trainer), then http://localhost:9000/game/{game_id}")
 
 
 if __name__ == "__main__":

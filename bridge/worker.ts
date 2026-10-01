@@ -12,6 +12,8 @@
  * Replay mode cycles through the worker's records in a seeded order; the first record of each slot starts at a random
  * window, so the slots sit at different game phases.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
 import { simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
 import { N_ACTS, TROOP_BINS } from "./actions";
@@ -32,6 +34,7 @@ interface Init {
   worker: number;
   episodes?: number[];
   replay?: { records: string[] };
+  record?: { dir: string; gitCommit: string; games: number };
 }
 interface Step {
   cmd: "step";
@@ -48,6 +51,18 @@ let games: EnvGame[] = [];
 let episodes: number[] = [];
 
 const seedOf = (g: number): string => `${init!.seed}-w${init!.worker}-g${g}-e${episodes[g]}`;
+
+let recordStarted = 0;
+
+/** A new training game; the first `record.games` games of this worker are recorded. */
+async function newGame(g: number): Promise<EnvGame> {
+  const env = await EnvGame.create(init!.config, seedOf(g));
+  if (init!.record !== undefined && recordStarted < init!.record.games) {
+    env.record();
+    recordStarted++;
+  }
+  return env;
+}
 
 let records: RecordGame[] = [];
 let order: number[] = [];
@@ -187,9 +202,10 @@ async function handle(msg: Init | Step): Promise<Buffer> {
     }
     episodes = msg.episodes ?? new Array<number>(msg.games).fill(0);
     games = [];
+    recordStarted = 0;
     const parts: Part[] = [];
     for (let g = 0; g < msg.games; g++) {
-      games.push(await EnvGame.create(msg.config, seedOf(g)));
+      games.push(await newGame(g));
       parts.push(fresh(g, {}));
     }
     return encode(parts, dims(msg.config));
@@ -204,6 +220,12 @@ async function handle(msg: Init | Step): Promise<Buffer> {
       parts.push(part(env, g, env.observe(msg.full === true), {}));
       continue;
     }
+    let recorded: string | undefined;
+    if (env.recording) {
+      fs.mkdirSync(init.record!.dir, { recursive: true });
+      recorded = env.start.gameID;
+      fs.writeFileSync(path.join(init.record!.dir, `${recorded}.json`), JSON.stringify(env.toRecord(init.record!.gitCommit)));
+    }
     const end = {
       done: true,
       rewards: env.rewards,
@@ -212,9 +234,10 @@ async function handle(msg: Init | Step): Promise<Buffer> {
       endTick: env.game.ticks(),
       hash: env.hash,
       invalid: env.invalid,
+      ...(recorded ? { recorded } : {}),
     };
     episodes[g]++;
-    games[g] = await EnvGame.create(init.config, seedOf(g));
+    games[g] = await newGame(g);
     parts.push(fresh(g, end));
   }
   return encode(parts, null);
