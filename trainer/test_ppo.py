@@ -24,6 +24,16 @@ class RunInfoTest(unittest.TestCase):
 
 
 class OutcomesTest(unittest.TestCase):
+    def test_results_survive_a_restart(self):
+        o = Outcomes(rows=2)
+        o.record([0.9, 0.9], [0.8, -0.8])
+        o.finish([{"env": 0, "seat": 0, "reward": 1.0, "rank": 1, "ticks": 10},
+                  {"env": 1, "seat": 0, "reward": -1.0, "rank": 2, "ticks": 20}], seats=1)
+        resumed = Outcomes(rows=2)
+        resumed.load(o.state())
+        self.assertEqual(resumed.summary(), o.summary(), "the win rate and value curves carry on after a resume")
+        self.assertEqual(resumed.summary()["episodes/win_rate"], 0.5)
+
     def test_value_outcome_correlation_by_phase(self):
         o = Outcomes(rows=4)
         rewards = [1.0, -1.0, -2 / 3, -5 / 6]
@@ -78,6 +88,7 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(first["global_step"], 2 * 16 * 2)
         # 32 decisions do not finish a game: the unfinished games are skipped on resume, so no seed is played twice
         self.assertEqual(first["episodes"], [1, 1])
+        self.assertEqual(first["outcomes"], {"episodes": [], "samples": []}, "no game finished yet")
         main(common + ["--updates", "3", "--resume"])
         second = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
         self.assertEqual(second["update"], 3)

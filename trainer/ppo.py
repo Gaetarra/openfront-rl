@@ -135,6 +135,14 @@ class Outcomes:
             self.pending[row] = []
             self.episodes.append(info)
 
+    def state(self):
+        """The finished games and value samples, kept in checkpoints so the curves carry on after a resume."""
+        return {"episodes": list(self.episodes), "samples": list(self.samples)}
+
+    def load(self, state):
+        self.episodes.extend(state["episodes"])
+        self.samples.extend(state["samples"])
+
     def summary(self):
         if not self.episodes:
             return {}
@@ -219,7 +227,7 @@ def main(argv=None):
         # Games in progress are dropped on quit; a resume starts each slot at its next episode, so no seed replays.
         s = dict(model=model.state_dict(), optimizer=opt.state_dict(), args=vars(a), update=update,
                  global_step=global_step, episodes=[e + 1 for e in envs.episodes], game_commit=commit,
-                 rng={"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+                 outcomes=outcomes.state(), rng={"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
                       "cuda": torch.cuda.get_rng_state_all()})
         save_checkpoint(ckpt_dir / "latest.pt", **s)
         if update % 250 == 0 and update > 0:
@@ -233,6 +241,8 @@ def main(argv=None):
     actions = torch.zeros(T, N, 4, dtype=torch.long, device=device)
     logps, values, rewards, dones, ref_logps = (torch.zeros(T, N, device=device) for _ in range(5))
     outcomes = Outcomes(N)
+    if state and "outcomes" in state:  # older checkpoints lack it
+        outcomes.load(state["outcomes"])
     act_counts, invalid_count = np.zeros(envs.T), 0
 
     def rollout():
