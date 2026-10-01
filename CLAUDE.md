@@ -60,7 +60,14 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.ppo --run onion                 # train; control page http://127.0.0.1:8787
 .venv/Scripts/python -m trainer.ppo --run onion --resume        # continue from checkpoints/onion/latest.pt
 .venv/Scripts/python -m trainer.ctl pause|resume|save|stop|throttle half|status
-.venv/Scripts/python -m trainer.eval --policy checkpoints/onion/latest.pt   # fixed-seed eval (--policy random = baseline)
+.venv/Scripts/python -m trainer.crawl                          # download ranked 1v1 records into data/ (hours: detach)
+.venv/Scripts/python -m trainer.crawl --purge                  # remove deleted players' records (daily while data is kept)
+.venv/Scripts/python -m trainer.bc --run bc                     # behaviour cloning on the records; same control page
+.venv/Scripts/python -m trainer.eval --a checkpoints/bc/latest.pt --b scripted   # ranked 1v1 match, 256 games
+.venv/Scripts/python -m trainer.eval --setup onion --a random   # Phase 1 setup: one seat vs 3 Easy nations
+.venv/Scripts/python -m trainer.ppo --run ppo-bc --setup ranked1v1 --init checkpoints/bc/latest.pt --opponent checkpoints/bc/latest.pt --kl-coef 0.05
+.venv/Scripts/python -m trainer.eval --a checkpoints/bc/latest.pt --b random --episodes 8 --record 1   # save games to replays/
+.venv/Scripts/python -m trainer.watch                          # serve replays/ to the game's dev client (npm run dev)
 .venv/Scripts/python scripts/diag_baselines.py                  # random vs scripted expansion (Phase 1 diagnosis)
 .venv/Scripts/tensorboard --logdir runs                         # charts, incl. actions/* mix and episodes/* ranks
 ```
@@ -70,7 +77,10 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   stderr=log, creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)`, or the user's own
   terminal. Detached runs are still controlled via the page / `trainer.ctl`. (Surviving a session restart is not yet
   verified.)
-- `--resume` keeps the checkpoint's settings except `KEEP_ON_RESUME` (`trainer/ppo.py`); other flags are ignored.
+- `--resume` keeps the checkpoint's settings except `KEEP_ON_RESUME` (`trainer/ppo.py`, `trainer/bc.py`) and, for PPO,
+  a given `--kl-coef`; other flags are ignored.
+- Training runs and `trainer.watch` all serve on port 8787: stop `trainer.watch` before starting a run (a running
+  trainer serves `replays/` itself).
 
 ## Simulation facts the bridge relies on
 
@@ -85,6 +95,12 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   Read it only between ticks. Each tick's changed tiles arrive as `[tileRef, state]` pairs in the runner callback's
   `packedTileUpdates`; update only the cells they touch (a full rebuild costs over half of the sim time).
 - The game logs with `console.log`: a process whose stdout carries frames must redirect it to stderr.
+- A game's RNG is seeded from its game ID (as in the game's client), so training games get a valid 8-character ID from
+  their seed (`bridge/setups.ts: gameIdOf`) and `EnvGame.fromStart` builds env games and replayed records alike. A
+  recorded game (`EnvGame.record/toRecord`) replays in the game's own client.
+- All games of a trainer share one padded cell grid (`gridFor`: 192 x 256 for ranked 1v1). Cell indexes everywhere
+  are grid indexes y x W + x; padding cells hold no tiles.
+- Records store only non-empty turns: expand them with `decompressGameRecord` (`bridge/replay.ts: readRecord`).
 - Replays: archived records contain only human intents; nations and bots re-simulate from the game seed. A record
   replays in sync when no simulation code changed between its `gitCommit` and the pin (v0.34.17-v0.34.21 are
   identical); the hashes it carries every 10 turns decide, not the commit string.
