@@ -265,7 +265,10 @@ p.hint { color: var(--muted); font-size: 13px; }
 .chart-bar { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; justify-content: space-between; }
 .chart-bar label { font-size: 13px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
 .charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 6px; }
-.chart-head { font-size: 13px; font-weight: 600; }
+.chart-head { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px;
+  align-items: baseline; }
+.goal { font-size: 11px; font-weight: 500; color: var(--muted); white-space: nowrap; }
+.chart-note { margin: 6px 0 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
 .chart-last { font: 12px/1.5 ui-monospace, monospace; display: flex; flex-wrap: wrap; gap: 0 10px; min-height: 18px; }
 .chart-box { position: relative; height: 160px; }
 </style></head><body><main>
@@ -287,6 +290,8 @@ p.hint { color: var(--muted); font-size: 13px; }
   <div class="chart-bar"><h2>Curves</h2>
     <label>Smoothing <input type="range" id="smoothing" min="0" max="0.99" step="0.01" value="0.8">
     <output id="smoothing-out">0.80</output></label></div>
+  <p class="hint" style="margin: 0">Bold lines are smoothed, faint ones are the raw values. X axis: training updates.
+  Hover a chart to read its values.</p>
   <div id="charts" class="charts"></div>
 </section>
 <section style="margin-top:12px"><h2>Events</h2><div id="log"></div></section>
@@ -332,23 +337,41 @@ async function refresh() {
     document.getElementById("state").textContent = "not responding (training stopped?)";
   }
 }
-// [title, [[tag, label], ...], optional [dashed line, its meaning]]; a chart shows when the run logs its tags.
+// A chart shows when the run logs its tags. goal: which way is good; ref: [height of a dashed line, its name].
 const CHARTS = [
-  ["Win rate, last 200 games", [["episodes/win_rate", "win rate"]], [0.545, "Gate B bar vs the frozen clone"]],
-  ["KL to the initial policy", [["loss/kl_ref", "KL"]]],
-  ["Entropy", [["loss/entropy", "entropy"]]],
-  ["Value vs outcome correlation", [["value/outcome_corr_early", "early"], ["value/outcome_corr_mid", "mid"],
-    ["value/outcome_corr_late", "late"]]],
-  ["Commands, share of decisions", [["actions/attack", "attack"], ["actions/boat", "boat"],
-    ["actions/build_city", "city"], ["actions/spawn", "spawn"]]],
-  ["Decisions / s", [["perf/decisions_per_s", "decisions/s"]]],
-  ["Loss", [["bc/nll", "training"], ["val/bc/nll", "held-out"]]],
-  ["Value vs outcome correlation, held-out", [["val/value_outcome_corr", "held-out"]], [0.5, "Gate A bar"]],
-  ["Attack target accuracy", [["bc/attack_target_acc", "training"], ["val/bc/attack_target_acc", "held-out"]]],
-  ["Windows with a command", [["bc/act_rate_human", "humans"], ["bc/act_rate_policy", "clone"]]],
-  ["Rows / s", [["perf/samples_per_s", "rows/s"]]],
+  { title: "Win rate", lines: [["episodes/win_rate", "win rate"]], goal: "higher is better", ref: [0.545, "Gate B bar"],
+    note: "Share of the last 200 games the learner won. Against a copy of itself, 0.5 is a draw. Dashed: the Gate B " +
+      "bar, for games against the frozen clone." },
+  { title: "KL to the initial policy", lines: [["loss/kl_ref", "KL"]], goal: "keep it small",
+    note: "How far the policy has moved from where it started, per decision. If it keeps growing while the win rate " +
+      "stays flat, resume with a higher --kl-coef." },
+  { title: "Entropy", lines: [["loss/entropy", "entropy"]], goal: "a slow fall is normal",
+    note: "How random the policy's choices are. A steady rise means it is playing more randomly." },
+  { title: "Value vs outcome correlation", lines: [["value/outcome_corr_early", "early"],
+    ["value/outcome_corr_mid", "mid"], ["value/outcome_corr_late", "late"]], goal: "higher is better",
+    note: "How well the value head predicts the winner, by game phase (1 = perfect). It should be highest late in " +
+      "the game." },
+  { title: "Commands", lines: [["actions/attack", "attack"], ["actions/boat", "boat"], ["actions/build_city", "city"],
+    ["actions/spawn", "spawn"]], goal: "watch for sudden swings",
+    note: "Share of decisions where the learner attacks, launches a boat, builds a city or picks a spawn point. The " +
+      "rest are waits." },
+  { title: "Decisions / s", lines: [["perf/decisions_per_s", "decisions/s"]], goal: "higher is better",
+    note: "Training speed. It drops when the PC is busy or the run is throttled." },
+  { title: "Loss", lines: [["bc/nll", "training"], ["val/bc/nll", "held-out"]], goal: "lower is better",
+    note: "How unlikely the clone finds the command the human actually gave. Trust the held-out line: those games " +
+      "are never trained on." },
+  { title: "Value vs outcome correlation", lines: [["val/value_outcome_corr", "held-out"]], goal: "higher is better",
+    ref: [0.5, "Gate A bar"],
+    note: "How well the value head predicts the winner of games it never trained on. Dashed: the Gate A bar." },
+  { title: "Attack target accuracy", lines: [["bc/attack_target_acc", "training"],
+    ["val/bc/attack_target_acc", "held-out"]], goal: "higher is better",
+    note: "How often the clone's likeliest attack target is the one the human chose." },
+  { title: "Windows with a command", lines: [["bc/act_rate_human", "humans"], ["bc/act_rate_policy", "clone"]],
+    goal: "the lines should match", note: "How often humans give a command, and how often the clone would." },
+  { title: "Rows / s", lines: [["perf/samples_per_s", "rows/s"]], goal: "higher is better",
+    note: "Training speed: replay rows learned per second." },
 ];
-const charts = {}, smoothing = document.getElementById("smoothing");
+const smoothing = document.getElementById("smoothing");
 let curves = {}, perUpdate = 1;  // TensorBoard steps per update, from /status
 function points(pts, w) {  // TensorBoard's smoothing: a debiased moving average
   let last = 0, n = 0;
@@ -372,8 +395,8 @@ function drawCharts() {
   const css = getComputedStyle(document.documentElement), color = name => css.getPropertyValue(name).trim();
   const colors = ["--accent", "--second", "--third", "--fourth"].map(color), muted = color("--muted");
   const grid = color("--line"), w = Number(smoothing.value);
-  for (const [title, lines, ref] of CHARTS) {
-    const shown = lines.filter(([tag]) => (curves[tag] || []).length);
+  for (const spec of CHARTS) {
+    const shown = spec.lines.filter(([tag]) => (curves[tag] || []).length), ref = spec.ref;
     if (!shown.length) continue;
     const datasets = shown.flatMap(([tag, label], i) => [
       { label, faint: true, data: points(curves[tag], 0), borderColor: colors[i] + "40", borderWidth: 1 },
@@ -383,17 +406,20 @@ function drawCharts() {
       datasets.push({ label: ref[1], faint: true, borderColor: muted, borderDash: [4, 4], borderWidth: 1,
         data: [{ x: Math.min(...xs), y: ref[0] }, { x: Math.max(...xs), y: ref[0] }] });
     }
-    let chart = charts[title];
+    let chart = spec.chart;
     if (chart) {
       chart.data.datasets = datasets;
       chart.update("none");
     } else {
       const card = document.createElement("div");
-      card.innerHTML = '<div class="chart-head"></div><div class="chart-last"></div><div class="chart-box"><canvas></canvas></div>';
-      card.querySelector(".chart-head").textContent = ref ? `${title} (dashed: ${ref[1]})` : title;
+      card.innerHTML = '<div class="chart-head"><span></span><span class="goal"></span></div>' +
+        '<div class="chart-last"></div><div class="chart-box"><canvas></canvas></div><p class="chart-note"></p>';
+      card.querySelector(".chart-head span").textContent = spec.title;
+      card.querySelector(".goal").textContent = spec.goal;
+      card.querySelector(".chart-note").textContent = spec.note;
       box.append(card);
       const font = { size: 10 };
-      chart = charts[title] = new Chart(card.querySelector("canvas"), { type: "line", data: { datasets }, options: {
+      chart = spec.chart = new Chart(card.querySelector("canvas"), { type: "line", data: { datasets }, options: {
         animation: false, parsing: false, normalized: true, responsive: true, maintainAspectRatio: false,
         interaction: { mode: "nearestPerLine", intersect: false }, elements: { point: { radius: 0, hoverRadius: 3 } },
         plugins: { legend: { display: false },
