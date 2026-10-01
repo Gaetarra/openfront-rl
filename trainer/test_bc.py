@@ -33,6 +33,12 @@ class LabelTest(unittest.TestCase):
         self.assertTrue(60 < len(val) < 140)
         self.assertEqual(val, [i for i in ids if is_val(i, 0.05)])
 
+    def test_the_control_page_says_what_is_training(self):
+        info = bc.run_info(bc.parse_args(["--workers", "14", "--games-per-worker", "6"]), ["r"] * 3, ["v"])
+        self.assertEqual(info["Method"], "behaviour cloning (imitating humans)")
+        self.assertEqual(info["Data"], "3 ranked 1v1 replays, 1 held out")
+        self.assertEqual(info["Games at once"], "84 (14 workers x 6)")
+
     def test_meter_averages_and_resets(self):
         m = Meter()
         m.add("a", torch.tensor(3.0), 2)

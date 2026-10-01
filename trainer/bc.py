@@ -58,6 +58,14 @@ def is_val(game_id, share):
     return zlib.crc32(game_id.encode()) % 10_000 < share * 10_000
 
 
+def run_info(a, train, val):
+    """What the control page says about the run."""
+    return {"Name": a.run, "Method": "behaviour cloning (imitating humans)",
+            "Data": f"{len(train):,} ranked 1v1 replays, {len(val):,} held out",
+            "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
+            "Updates": f"{a.updates:,}"}
+
+
 def label_legal(obs, labels):
     """Rows whose label can enter the loss: an action type (not a command outside the set) that the observation's
     masks allow, with a legal cell or target."""
@@ -176,6 +184,7 @@ def main(argv=None):
         torch.set_rng_state(state["rng"]["torch"])
         torch.cuda.set_rng_state_all(state["rng"]["cuda"])
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
+    control.update(run=run_info(a, train, val))
     server = serve(control, a.port, log_dir=run_dir)
     control.note(f"control page on http://127.0.0.1:{server.server_address[1]}")
     writer = SummaryWriter(run_dir)

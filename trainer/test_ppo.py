@@ -5,7 +5,22 @@ import torch
 
 from trainer.env import ROOT
 from trainer.model import Policy
-from trainer.ppo import Outcomes, gae, main
+from trainer.ppo import Outcomes, gae, main, parse_args, run_info
+
+
+class RunInfoTest(unittest.TestCase):
+    def test_the_control_page_says_what_is_training(self):
+        ranked = run_info(parse_args(["--run", "ppo-bc", "--setup", "ranked1v1", "--init", "bc.pt", "--opponent",
+                                      "bc.pt", "--kl-coef", "0.05", "--workers", "16", "--games-per-worker", "2"]))
+        self.assertEqual(ranked["Method"], "PPO (reinforcement learning)")
+        self.assertEqual(ranked["Game"], "ranked 1v1 (the official playlist)")
+        self.assertEqual((ranked["Against"], ranked["Starts from"]), ("frozen bc.pt", "bc.pt"))
+        self.assertEqual(ranked["KL penalty to the start"], 0.05)
+        self.assertEqual(ranked["Games at once"], "32 (16 workers x 2)")
+        onion = run_info(parse_args([]))
+        self.assertEqual(onion["Game"], "Onion, Compact, 5 min")
+        self.assertEqual(onion["Against"], "3 Easy nations")
+        self.assertEqual((onion["Starts from"], onion["KL penalty to the start"]), ("random weights", "none"))
 
 
 class OutcomesTest(unittest.TestCase):

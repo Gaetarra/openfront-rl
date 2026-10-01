@@ -283,6 +283,7 @@ p.hint { color: var(--muted); font-size: 13px; }
   <button onclick="send('throttle/low')">Low speed</button>
 </div>
 <div class="grid">
+  <section><h2>Run</h2><table id="run"></table></section>
   <section><h2>Training</h2><table id="training"></table></section>
   <section><h2>Computer</h2><table id="system"></table></section>
 </div>
@@ -315,6 +316,7 @@ async function refresh() {
   try {
     const s = await (await fetch("/status")).json();
     if (s.update) perUpdate = s.global_step / s.update;
+    rows("run", Object.entries(s.run || {}));
     const m = s.metrics || {}, sys = s.system || {}, g = sys.gpu || {};
     document.getElementById("state").textContent = s.state + (s.auto_paused ? " (GPU too hot)" : "") +
       (s.duty < 1 ? ` · throttled to ${Math.round(s.duty * 100)}%` : "");

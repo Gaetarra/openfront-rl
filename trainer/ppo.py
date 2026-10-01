@@ -73,6 +73,21 @@ def env_config(a):
             "bots": a.bots, "timerMinutes": a.timer, "seats": a.seats}
 
 
+def run_info(a):
+    """What the control page says about the run."""
+    if a.setup == "ranked1v1":
+        game, rivals = "ranked 1v1 (the official playlist)", f"frozen {a.opponent}"
+    else:
+        game = f"{a.map}, {'Normal' if a.normal_size else 'Compact'}, {a.timer} min"
+        rivals = f"{a.nations} {a.difficulty} nations" + (f" and {a.bots} bots" if a.bots else "")
+        if a.seats > 1:
+            rivals += f"; frozen {a.opponent} in the other seats"
+    return {"Name": a.run, "Method": "PPO (reinforcement learning)", "Game": game, "Against": rivals,
+            "Starts from": a.init or "random weights", "KL penalty to the start": a.kl_coef or "none",
+            "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
+            "Updates": f"{a.updates:,}"}
+
+
 def gae(rewards, values, dones, last_value, gamma, lam):
     """Generalised advantage estimation. rewards, values, dones: [T, N]; dones[t] = the episode ended after step t
     (the next observation already belongs to a new game). last_value: [N], the value after the last step."""
@@ -194,6 +209,7 @@ def main(argv=None):
     others = [learner + s for s in range(1, S)]
     rows = lambda o, r: {k: v[r] for k, v in o.items()}
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
+    control.update(run=run_info(a))
     server = serve(control, a.port, log_dir=run_dir)
     control.note(f"control page on http://127.0.0.1:{server.server_address[1]}")
     writer = SummaryWriter(run_dir)
