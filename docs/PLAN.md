@@ -317,7 +317,7 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   KL-to-BC beats a frozen BC copy. The trainer speed fix (overlapping worker groups) only if profiling on ranked maps
   (8–11× Onion's cells) still shows the Python thread as the bottleneck.
 
-**Phase 2 results so far (2026-10-01): Gate A passed, Gate B pending.** Plan:
+**Phase 2 results (2026-10-02): Gate A and Gate B passed.** Plan:
 `docs/superpowers/plans/2026-10-01-phase2-bc-slice.md`; branch `phase2` (local, not merged).
 - Data: 16,107 usable ranked 1v1 records started 2026-09-23 18:00 to 2026-09-30 23:10 UTC; 2,355 void ones dropped
   (13%); 765 held out (5%, by a hash of the game ID). BC replayed 7,242 records with 0 errors and 0 desyncs. Labels:
@@ -342,21 +342,26 @@ becomes optional); games are watched in the game's own client; BC imitates all p
 - PPO run `ppo-bc` (16 workers × 2 games, 48 steps, lr 2.5e-4, entropy bonus 0.01, KL to the clone 0.05 from a
   one-sample estimate, learner always in seat 0): ~190 decisions/s (8 × 4: ~166). The training win rate (last 200 games)
   rose to ~0.6 at updates 480–600, then collapsed to ~0.2 over the last ~60 games by update 718, while the KL estimate
-  spiked (31, 82, 300+). Gate B on update 500 (512 games, seats swapped): 0.471 (SE 0.022), FAILED. The ~0.6 overstated
-  it: update 500 was picked at the top of a noisy curve, and a window of the most recently finished games
-  over-represents short ones (if the learner wins its quick games, it looks stronger than over Gate B's fixed games).
-  Seat is unlikely to matter: the game is real-time and symmetric, the latency queue shuffles each tick's intents,
-  and the model cannot tell which seat it plays (player rows are read by their features, not their position).
+  spiked (31, 82, 300+). Gate B on update 500 (512 games, seats swapped): 0.471 (SE 0.022), FAILED: the training curve
+  overstates Gate B (run 2 shows it again) and update 500 was picked at its top.
 - Fixes (2026-10-01): the KL penalty is the exact joint KL (`ActionDist.kl`; the one-sample estimate explodes when the
   learner samples a map cell it gives almost no probability that the clone favours); the learner plays both seats, half
-  the games each, with the win rate logged per seat (cheap insurance: the two lines should match); checkpoints keep the
-  win-rate window across resumes; the control
-  page charts the key curves and says what is training. PPO run `ppo-bc2` started 2026-10-01 evening: from the clone,
-  exact KL 0.2, lr 1e-4, no entropy bonus, 16 × 2, 5,000 updates (~10 h, ~210 decisions/s, GPU peak 10.9 of 12 GB).
-- Open: Gate B on `ppo-bc2`, on several snapshots rather than at the training curve's peak (the curve is
-  length-biased; the saved window keeps each game's length and result, so win rate by game length can be checked);
-  BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and overwrite each other in
-  `replays/` (Gate B's replaced Gate A's).
+  the games each, with the win rate logged per seat; checkpoints keep the win-rate window across resumes; the control
+  page charts the key curves and says what is training; eval reports the win rate per seat and prints its progress.
+- PPO run `ppo-bc2` (from the clone: exact KL 0.2, lr 1e-4, no entropy bonus, 16 × 2, ~190 decisions/s; 5,000 updates
+  from 2026-10-01 21:26 to 2026-10-02 10:42): the training win rate rose from ~0.6 to ~0.8 in the first ~500 updates
+  (~1 h) and stayed there (200-game windows 0.74–0.885), with the KL to the clone at 0.05–0.06 and entropy at the
+  clone's ~0.43 throughout. Gate B PASSED on the same 512 games, seats swapped: update 1000 0.730 (SE 0.020), update
+  5000 0.773 (SE 0.019). Seat does not matter, as expected in a real-time symmetric game: 0.727 / 0.734 and
+  0.770 / 0.777 per seat. The training curve reads ~0.1 above Gate B (0.885 at update 1000) and its swings do not rank
+  snapshots (update 5000 sat lower on it and scored higher): snapshots are picked by Gate B only. A GPU driver error
+  (System event nvlddmkm 153, also logged on this PC before the project) killed the run at update 1157; it resumed from
+  the update-1150 checkpoint, and long runs now go in a restart loop (CLAUDE.md).
+- Plateau: against a frozen opponent the KL penalty likely sets the ceiling: the policy leaves the clone only while the
+  extra wins outweigh the penalty, which also holds it near the clone's randomness. Test: updates 5000–6000 with KL 0.05
+  (same anchor); in its first 20 updates the KL rose to 0.10–0.16 and attacks from 17% to 22–29% of decisions.
+- Open: the KL-0.05 test (its result informs Phase 4's KL schedule); the BC plateau fix; evaluations replay fixed seeds,
+  so their recordings reuse game IDs and overwrite each other in `replays/` (now update 5000's Gate B games).
 
 **Phase 3 — Full environment + BC refresh**
 - Full v1 actions + masks, spawn head, observation channels for every unit type, nukes in flight and SAM coverage,

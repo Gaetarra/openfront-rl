@@ -77,6 +77,11 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   stderr=log, creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)`, or the user's own
   terminal. Detached runs are still controlled via the page / `trainer.ctl`. (Surviving a session restart is not yet
   verified.)
+- The PC's NVIDIA driver occasionally fails (System event nvlddmkm 153) and kills every CUDA program. Checkpoints are
+  atomic, and the trainer exits 0 on stop, Save & quit or Ctrl+C and 1 on a crash, so long runs go in a PowerShell
+  restart loop: `for ($i = 1; $i -le 5; $i++) { .venv/Scripts/python -m trainer.ppo --run <name> --resume --updates <N>;
+  if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 60 }` (a new run starts once without `--resume`; it checkpoints
+  every 25 updates).
 - `--resume` keeps the checkpoint's settings except `KEEP_ON_RESUME` (`trainer/ppo.py`, `trainer/bc.py`) and, for PPO,
   a given `--kl-coef`; other flags are ignored.
 - Training runs and `trainer.watch` all serve on port 8787: stop `trainer.watch` before starting a run (a running
