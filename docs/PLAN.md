@@ -357,11 +357,15 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   snapshots (update 5000 sat lower on it and scored higher): snapshots are picked by Gate B only. A GPU driver error
   (System event nvlddmkm 153, also logged on this PC before the project) killed the run at update 1157; it resumed from
   the update-1150 checkpoint, and long runs now go in a restart loop (CLAUDE.md).
-- Plateau: against a frozen opponent the KL penalty likely sets the ceiling: the policy leaves the clone only while the
-  extra wins outweigh the penalty, which also holds it near the clone's randomness. Test: updates 5000–6000 with KL 0.05
-  (same anchor); in its first 20 updates the KL rose to 0.10–0.16 and attacks from 17% to 22–29% of decisions.
-- Open: the KL-0.05 test (its result informs Phase 4's KL schedule); the BC plateau fix; evaluations replay fixed seeds,
-  so their recordings reuse game IDs and overwrite each other in `replays/` (now update 5000's Gate B games).
+- Plateau and the KL-0.05 test: against a frozen opponent the KL penalty looked like the ceiling, so updates 5000–6000
+  ran with KL 0.05 (same anchor). The KL levelled at ~0.15, attacks rose from 17% to 19% of decisions, games got ~7%
+  shorter, and the training win rate stayed at ~0.81; but Gate B on update 6000 fell to 0.576 (SE 0.022; seats
+  0.566 / 0.586) on the same games where update 5000 scored 0.773. The looser leash made the bot worse against the
+  clone, and the training curve did not show it. The Phase 2 bot is `checkpoints/ppo-bc2/update005000.pt`.
+- Open: the training curve read 0.06–0.19 above Gate B on all three snapshots tested and missed update 6000's drop, so
+  RL needs a measure of the current policy's strength during training (e.g. some game slots playing a frozen copy of
+  it on fixed seeds); the BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and
+  overwrite each other in `replays/` (now update 6000's Gate B games).
 
 **Phase 3 — Full environment + BC refresh**
 - Full v1 actions + masks, spawn head, observation channels for every unit type, nukes in flight and SAM coverage,
