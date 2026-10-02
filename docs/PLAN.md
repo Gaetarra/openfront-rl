@@ -361,10 +361,14 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   ran with KL 0.05 (same anchor). The KL levelled at ~0.15, attacks rose from 17% to 19% of decisions, games got ~7%
   shorter, and the training win rate stayed at ~0.81; but Gate B on update 6000 fell to 0.576 (SE 0.022; seats
   0.566 / 0.586) on the same games where update 5000 scored 0.773. The looser leash made the bot worse against the
-  clone, and the training curve did not show it. The Phase 2 bot is `checkpoints/ppo-bc2/update005000.pt`.
-- Open: the training curve read 0.06–0.19 above Gate B on all three snapshots tested and missed update 6000's drop, so
-  RL needs a measure of the current policy's strength during training (e.g. some game slots playing a frozen copy of
-  it on fixed seeds); the BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and
+  clone, and the training curve did not show it. Updates 5500 and 5750 scored 0.578 and 0.633 (128 games each) where
+  the curve read 0.83–0.84: the whole stretch was worse. The Phase 2 bot is `checkpoints/ppo-bc2/update005000.pt`.
+- Open: the training curve reads 0.05–0.25 above frozen snapshots (5 of 5 tested) and missed the weaker-KL decline.
+  Likely cause: a game lasts ~20 updates and the learner trains on the 32 games it is playing, so it adapts to those
+  games while it plays them; a frozen copy facing new games cannot, and a looser leash allows more of it. Test: the
+  training loop with lr 0 from update 5750 (if its curve drops to Gate B's level, the cause is confirmed). For RL:
+  measure strength only with frozen copies on fixed seeds, during training too; more games per update and smaller
+  steps. Also open: the BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and
   overwrite each other in `replays/` (now update 6000's Gate B games).
 
 **Phase 3 — Full environment + BC refresh**
@@ -382,6 +386,10 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   (self, ally, enemy, bot); the attack pointer reads the transformer outputs. All players first (masked: attention is
   small next to the CNN); the ≤64-slot selection rule only if decisions/s drop too far. Compared with the current mean
   in the BC model experiments below: held-out NLL and attack-target accuracy (36% in Phase 2).
+- Map channels per owner: the CNN sees land only as mine / ally / enemy / bot plus each owner's troops per tile, so it
+  cannot tell a 500k-troop neighbour's border from a 10k one's when their densities match, and buildings are only mine
+  or not mine. Paint each owner's total troops (log), troops ÷ max, gold (log) and troops attacking me onto its cells
+  (the same gather as the density channel), and split building channels by relation (mine / ally / enemy / bot).
 - Model experiments on the same data (cheap, supervised): dense vs Soft-MoE and S/M/L sizes; held-out accuracy per
   bucket (spawn, early, mid, late-many, late-few, ranked, modifiers) plus decisions/s → pick the RL architecture.
 - Gate: 1,000 games across modes without errors; invalid-action rate < 1%; throughput within the Phase 0 budget; the
