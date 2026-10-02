@@ -9,6 +9,7 @@ policies swap seats from one game slot to the next.
 """
 import argparse
 import json
+import sys
 
 import numpy as np
 import torch
@@ -104,6 +105,8 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
                 if info["seat"] == seats[e][0] and counts[e] < per_slot:
                     counts[e] += 1
                     results.append(info)
+                    if len(results) % E == 0:  # no control page here: show signs of life
+                        print(f"{len(results)}/{per_slot * E} games", file=sys.stderr, flush=True)
     finally:
         envs.close()
     return {**summarize(results), "recorded": sorted({i["recorded"] for i in seen if i.get("recorded")})}
