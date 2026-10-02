@@ -364,9 +364,10 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   clone, and the training curve did not show it. Updates 5500 and 5750 scored 0.578 and 0.633 (128 games each) where
   the curve read 0.83–0.84: the whole stretch was worse. The Phase 2 bot is `checkpoints/ppo-bc2/update005000.pt`.
 - Open: the training curve reads 0.05–0.25 above frozen snapshots (5 of 5 tested) and missed the weaker-KL decline.
-  Likely cause: a game lasts ~20 updates and the learner trains on the 32 games it is playing, so it adapts to those
-  games while it plays them; a frozen copy facing new games cannot, and a looser leash allows more of it. Test: the
-  training loop with lr 0 from update 5750 (if its curve drops to Gate B's level, the cause is confirmed). For RL:
+  Cause: a game lasts ~20 updates and the learner trains on the 32 games it is playing, so it adapts to those games
+  while it plays them; a frozen copy facing new games cannot, and a looser leash allows more of it. Confirmed by a
+  probe: the same training loop with learning off (lr 0) measured update 5750 at 0.705 (SE 0.032), against 0.84 while
+  learning and 0.633 (SE 0.043) in Gate B. For RL:
   measure strength only with frozen copies on fixed seeds, during training too; more games per update and smaller
   steps. Also open: the BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and
   overwrite each other in `replays/` (now update 6000's Gate B games).
