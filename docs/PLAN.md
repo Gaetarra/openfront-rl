@@ -49,6 +49,11 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
   every 10 turns (sync check). Deleted-players endpoint must be honoured.
 - Official servers require a Turnstile anti-bot token on first join (src/server/JoinVerify.ts) → self-hosted server.
 - Stats give each clientID player a `deathPosition` (StatsImpl.ts:463-467) → agent rank is built in.
+- Troop growth (`Config.troopIncreaseRate`, applied every tick by `PlayerExecution`, v0.34.21): (10 + troops^0.73 / 4) ×
+  (1 − troops / cap), so it peaks at ~42% of the cap (0.73 / 1.73) and is about a third of the peak at 5% and at 90%;
+  cap = 2 × (tiles^0.6 × 1000 + 50,000) + 250,000 per city level (bots: half the growth, a third of the cap; nations
+  0.9–1.05× by difficulty). The model sees troops ÷ cap for itself (scalar 6) and for every player (player feature 9);
+  the formulas stay in the game's Config, never in our code.
 
 ## Key decisions
 1. **No C++ port.** Measured in Phase 0: PPO learner ≈0.7–1k decisions/s (~6M-param net), while ~10 cores of TS sim
@@ -363,21 +368,49 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   0.566 / 0.586) on the same games where update 5000 scored 0.773. The looser leash made the bot worse against the
   clone, and the training curve did not show it. Updates 5500 and 5750 scored 0.578 and 0.633 (128 games each) where
   the curve read 0.83–0.84: the whole stretch was worse. The Phase 2 bot is `checkpoints/ppo-bc2/update005000.pt`.
-- Open: the training curve reads 0.05–0.25 above frozen snapshots (5 of 5 tested) and missed the weaker-KL decline.
-  Cause: a game lasts ~20 updates and the learner trains on the 32 games it is playing, so it adapts to those games
-  while it plays them; a frozen copy facing new games cannot, and a looser leash allows more of it. Confirmed by a
-  probe: the same training loop with learning off (lr 0) measured update 5750 at 0.705 (SE 0.032), against 0.84 while
-  learning and 0.633 (SE 0.043) in Gate B. For RL:
-  measure strength only with frozen copies on fixed seeds, during training too; more games per update and smaller
-  steps. Also open: the BC plateau fix; evaluations replay fixed seeds, so their recordings reuse game IDs and
-  overwrite each other in `replays/` (now update 6000's Gate B games).
+- Every evaluation against the frozen clone (`checkpoints/bc/update0060000.pt`; fixed seed `eval`, seats swapped; the
+  128-game runs are the first 4 games of each slot of the 512):
+
+  | Snapshot | KL coef | Training curve there | Gate B (games) |
+  |---|---|---|---|
+  | `ppo-bc` update 500 | 0.05, one-sample | ~0.6 | 0.471 ± 0.022 (512) |
+  | `ppo-bc2` update 1000 | 0.2 | 0.885 | 0.730 ± 0.020 (512) |
+  | `ppo-bc2` update 5000 (the Phase 2 bot) | 0.2 | 0.825 | 0.773 ± 0.019 (512) |
+  | `ppo-bc2` update 5500 | 0.05 | 0.830 | 0.578 ± 0.044 (128) |
+  | `ppo-bc2` update 5750 | 0.05 | 0.840 | 0.633 ± 0.043 (128) |
+  | `ppo-bc2` update 6000 | 0.05 | 0.770 | 0.576 ± 0.022 (512) |
+
+  Frozen probe (run `probe-frozen`): update 5750 in the same training loop with lr 0 for 250 updates read 0.705 ± 0.032.
+- Reading the training curve: each point is the last 200 finished games, ~170 updates at ~1.2 finished games per
+  update, so it lags the policy by that much and swings ±0.055 (95%) from luck alone; after a start or resume all 32
+  games restart together and short games finish first. It also includes the learner adapting to the games in progress
+  (below), so it is a trend line, not a strength measure: snapshots are ranked with `trainer.eval` on the same fixed
+  games (paired comparisons).
+- Open, for the next planning session:
+  - The training curve reads 0.05–0.25 above frozen snapshots (all 5 tested) and missed the weaker-KL decline. Cause,
+    confirmed by the frozen probe: a game lasts ~20 updates and the learner trains on the 32 games it is playing, so it
+    adapts to them while it plays them; a frozen copy facing new games cannot, and a looser leash allows more of it.
+    Ruled out: the eval seeds' map mix (Australia Normal 27% vs 32% expected, Compact 24.5% vs 20%), repeated games
+    (512 of 512 and 8,000 of 8,000 distinct) and code differences between eval and training (same seat rows, bf16,
+    sampling). For RL: frozen copies on fixed seeds measure strength, during training too; more games per update and
+    smaller steps.
+  - Why PPO stalled at ~0.77 against the clone: not the KL leash alone (loosening it made Gate B worse). Candidates: the
+    within-game adaptation above (the gradient rewards fitting the current games over general play), a single frozen
+    opponent (exploits rather than skill), a terminal reward with ~1 finished game per update (at 80% wins, one loss
+    every ~4 updates), the 5 actions, and the player-encoder and map weaknesses that Phase 3 fixes.
+  - The BC plateau fix (a decaying learning rate, several windows per update), for Phase 3's BC refresh.
+  - Evaluations replay fixed seeds, so their recordings reuse game IDs and overwrite each other in `replays/` (now
+    update 6000's Gate B games).
+  - Branch `phase2` is not merged into `main` yet (the user's choice, 2026-10-02). The detailed run log, with every
+    ruling and probe number, is the local, git-ignored `.superpowers/sdd/2026-10-01-phase2-bc-slice/progress.md`.
 
 **Phase 3 — Full environment + BC refresh**
 - Full v1 actions + masks, spawn head, observation channels for every unit type, nukes in flight and SAM coverage,
   added by network surgery (zero-init heads, decision 14); the extractor maps every intent type. `Configs.ts`: ranked
   2v2 (`get2v2Config`), public sampler (playlist map weights, team configs, modifier pool and exclusions); `Maps.ts`:
   in-memory loader + dihedral augmentation; eval suite (fixed seeds, held-out maps) + TrueSkill table.
-- Crawl ranked 2v2, then top public FFA/Team games; BC refresh with every action.
+- Crawl ranked 2v2, then top public FFA/Team games; BC refresh with every action and the plateau fix (a decaying
+  learning rate, several windows per update).
 - Player encoder as designed above, never built so far: Phase 1 averaged all player rows into one vector, harmless with
   4 players on Onion, but in ranked 1v1 the opponent is one row among ~400 bots, so its troops, gold and troops ÷ max
   barely reach the decision (user decision 2026-10-02: fix it here). Each player token = its features, its relation and
@@ -401,6 +434,10 @@ becomes optional); games are watched in the game's own client; BC imitates all p
 - 4A ranked 1v1: self-play league from BC init — current policy vs pool (past checkpoints + BC), prioritized fictitious
   self-play, KL-to-BC annealed. 4B ranked 2v2: teammates = copies of the current policy.
 - Stall protocol: reverse curriculum → shaping. Gate: ≥70% vs BC policy and a rising TrueSkill vs past checkpoints.
+- From Phase 2: gate and rank snapshots with frozen copies on fixed seeds, also during training (the training curve
+  includes the learner adapting to the games in progress); more games per update and smaller steps; keep a KL leash to
+  the clone (0.2 held, 0.05 made the bot worse in Gate B); the exact KL, never a one-sample estimate; a restart loop
+  for long runs (the PC's GPU driver occasionally fails).
 
 **Phase 5 — Exact nuke-interception predictor (≈1–2 weeks)**: silo choice as `PlayerImpl.nukeSpawn`,
 `UniversalPathFinding.Parabola`, targetable window, copied SAM targeting (slots, cooldowns, upgrade ramp, stacked-launch
