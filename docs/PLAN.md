@@ -353,8 +353,9 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   learner samples a map cell it gives almost no probability that the clone favours); the learner plays both seats, half
   the games each, with the win rate logged per seat; checkpoints keep the win-rate window across resumes; the control
   page charts the key curves and says what is training; eval reports the win rate per seat and prints its progress.
-- PPO run `ppo-bc2` (from the clone: exact KL 0.2, lr 1e-4, no entropy bonus, 16 × 2, ~190 decisions/s; 5,000 updates
-  from 2026-10-01 21:26 to 2026-10-02 10:42): the training win rate rose from ~0.6 to ~0.8 in the first ~500 updates
+- PPO run `ppo-bc2` (from the clone: exact KL 0.2, lr 1e-4, no entropy bonus, 16 × 2, ~190 decisions/s with the GPU at
+  ~97% and 10.7 of 12 GB, the user's apps holding ~2 GB, CPU ~22%; 5,000 updates from 2026-10-01 21:26 to 2026-10-02
+  10:42): the training win rate rose from ~0.6 to ~0.8 in the first ~500 updates
   (~1 h) and stayed there (200-game windows 0.74–0.885), with the KL to the clone at 0.05–0.06 and entropy at the
   clone's ~0.43 throughout. Gate B PASSED on the same 512 games, seats swapped: update 1000 0.730 (SE 0.020), update
   5000 0.773 (SE 0.019). Seat does not matter, as expected in a real-time symmetric game: 0.727 / 0.734 and
@@ -399,6 +400,8 @@ becomes optional); games are watched in the game's own client; BC imitates all p
     opponent (exploits rather than skill), a terminal reward with ~1 finished game per update (at 80% wins, one loss
     every ~4 updates), the 5 actions, and the player-encoder and map weaknesses that Phase 3 fixes.
   - The BC plateau fix (a decaying learning rate, several windows per update), for Phase 3's BC refresh.
+  - Phase 4's gate (≥70% against the BC policy) is already met by Phase 2's PPO against its own clone (0.773): set a
+    new bar (e.g. against the Phase 2 PPO agent and the Phase 3 clone, or a league rating).
   - Evaluations replay fixed seeds, so their recordings reuse game IDs and overwrite each other in `replays/` (now
     update 6000's Gate B games).
   - Branch `phase2` is not merged into `main` yet (the user's choice, 2026-10-02). The detailed run log, with every
