@@ -369,6 +369,15 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   2v2 (`get2v2Config`), public sampler (playlist map weights, team configs, modifier pool and exclusions); `Maps.ts`:
   in-memory loader + dihedral augmentation; eval suite (fixed seeds, held-out maps) + TrueSkill table.
 - Crawl ranked 2v2, then top public FFA/Team games; BC refresh with every action.
+- Player encoder as designed above, never built so far: Phase 1 averaged all player rows into one vector, harmless with
+  4 players on Onion, but in ranked 1v1 the opponent is one row among ~400 bots, so its troops, gold and troops ÷ max
+  barely reach the decision (user decision 2026-10-02: fix it here). Each player token = its features, its relation and
+  the CNN features pooled over its cells (where it is, what it borders); a 2-layer transformer over the tokens;
+  attention pooling from the core with several heads (so it can focus on the biggest threats in FFA, where one mean over
+  all enemies would bury a strong neighbour among weak distant ones), plus the self token and one mean per relation
+  (self, ally, enemy, bot); the attack pointer reads the transformer outputs. All players first (masked: attention is
+  small next to the CNN); the ≤64-slot selection rule only if decisions/s drop too far. Compared with the current mean
+  in the BC model experiments below: held-out NLL and attack-target accuracy (36% in Phase 2).
 - Model experiments on the same data (cheap, supervised): dense vs Soft-MoE and S/M/L sizes; held-out accuracy per
   bucket (spawn, early, mid, late-many, late-few, ranked, modifiers) plus decisions/s → pick the RL architecture.
 - Gate: 1,000 games across modes without errors; invalid-action rate < 1%; throughput within the Phase 0 budget; the
