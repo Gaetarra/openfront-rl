@@ -10,6 +10,7 @@ policies swap seats from one game slot to the next.
 import argparse
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -32,6 +33,24 @@ def summarize(results):
     by_seat = {f"win_rate_seat{s}": float(win[seat == s].mean()) for s in np.unique(seat)} if len(set(seat)) > 1 else {}
     return {"episodes": n, "win_rate": float(win.mean()), "win_rate_se": se(win), **by_seat,
             "mean_reward": float(reward.mean()), "mean_reward_se": se(reward), "mean_rank": float(rank.mean())}
+
+
+def label(spec):
+    """A policy's name for the players it plays in recorded games (letters, digits and spaces: the game's username
+    rules)."""
+    if spec in ("random", "scripted"):
+        return spec.capitalize()
+    ckpt = torch.load(spec, map_location="cpu", weights_only=False)
+    return f"{'PPO' if 'kl_coef' in ckpt['args'] else 'Clone'} {ckpt['update']}"
+
+
+def name_players(path, by_seat):
+    """Renames a recorded game's players by seat (clientID AGENT000 is seat 0). Names do not enter the game's hashes,
+    so the record still replays in sync."""
+    rec = json.loads(Path(path).read_text(encoding="utf-8"))
+    for p in rec["info"]["players"]:
+        p["username"] = by_seat[int(p["clientID"].removeprefix("AGENT"))]
+    Path(path).write_text(json.dumps(rec, separators=(",", ":")), encoding="utf-8")
 
 
 class Scripted:
@@ -109,7 +128,12 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
                         print(f"{len(results)}/{per_slot * E} games", file=sys.stderr, flush=True)
     finally:
         envs.close()
-    return {**summarize(results), "recorded": sorted({i["recorded"] for i in seen if i.get("recorded")})}
+    recorded = {i["recorded"]: seats[i["env"]] for i in seen if i.get("recorded")}
+    if recorded:
+        names = [label(s) for s in specs]
+        for game_id, slot_seats in recorded.items():
+            name_players(Path(record["dir"]) / f"{game_id}.json", {s: names[p] for p, s in enumerate(slot_seats)})
+    return {**summarize(results), "recorded": sorted(recorded)}
 
 
 def main(argv=None):

@@ -3,8 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import torch
+
 from trainer.env import ONION
-from trainer.eval import play, seats_for, summarize
+from trainer.eval import label, name_players, play, seats_for, summarize
 
 ONION2 = {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1}
 
@@ -25,6 +27,19 @@ class EvalTest(unittest.TestCase):
     def test_policies_swap_seats_between_slots(self):
         self.assertEqual(seats_for(4, 2), [[0, 1], [1, 0], [0, 1], [1, 0]])
         self.assertEqual(seats_for(2, 1), [[0], [0]])
+
+    def test_recorded_players_are_named_after_their_policies(self):
+        with tempfile.TemporaryDirectory() as d:
+            ppo, clone, rec = Path(d) / "ppo.pt", Path(d) / "bc.pt", Path(d) / "game.json"
+            torch.save({"args": {"kl_coef": 0.2}, "update": 5000}, ppo)
+            torch.save({"args": {}, "update": 60000}, clone)
+            self.assertEqual([label(s) for s in (str(ppo), str(clone), "random", "scripted")],
+                             ["PPO 5000", "Clone 60000", "Random", "Scripted"])
+            rec.write_text(json.dumps({"info": {"players": [{"clientID": "AGENT000", "username": "agent0"},
+                                                            {"clientID": "AGENT001", "username": "agent1"}]}}))
+            name_players(rec, {0: "Clone 60000", 1: "PPO 5000"})
+            players = json.loads(rec.read_text())["info"]["players"]
+            self.assertEqual([p["username"] for p in players], ["Clone 60000", "PPO 5000"])
 
     def test_one_seat_on_fixed_seeds_is_reproducible(self):
         run = lambda: play(["random"], {**ONION, "timerMinutes": 1}, episodes=2, workers=1, games_per_worker=2,
