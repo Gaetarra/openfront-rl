@@ -367,7 +367,8 @@ becomes optional); games are watched in the game's own client; BC imitates all p
 - Model experiments on the same data (cheap, supervised): dense vs Soft-MoE and S/M/L sizes; held-out accuracy per
   bucket (spawn, early, mid, late-many, late-few, ranked, modifiers) plus decisions/s → pick the RL architecture.
 - Gate: 1,000 games across modes without errors; invalid-action rate < 1%; throughput within the Phase 0 budget; the
-  refreshed BC agent beats the Phase 2 agent in ranked 1v1 and Easy/Medium nations in Compact FFA.
+  refreshed BC agent beats the Phase 2 clone (`checkpoints/bc/update0060000.pt`) in ranked 1v1 and Easy/Medium nations
+  in Compact FFA. Beating the Phase 2 PPO agent is left to Phase 4's RL: a clone is not expected to.
 
 **Phase 4 — RL on Ranked (ongoing)**
 - 4A ranked 1v1: self-play league from BC init — current policy vs pool (past checkpoints + BC), prioritized fictitious
