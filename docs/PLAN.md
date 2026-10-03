@@ -481,6 +481,39 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - lower held-out NLL and higher attack-target accuracy (36% now) than the Phase 2 clone, on the same 224 games;
     - beats the Phase 2 clone ≥ 0.545 over 512 fixed games;
     - a 10-update PPO probe keeps ≥ 75% of Phase 2's decisions/s.
+  - **3A progress (2026-10-03): code done, speed check open.** Task list:
+    `docs/superpowers/plans/2026-10-03-phase3a-encoder.md`; branch `phase3`; 77 trainer and 32 bridge tests green.
+    - Built:
+      - 49 map channels as uint8 64ths, with the cell owners and the players' buildings in each row;
+      - `PolicyV1`, which keeps the Phase 2 bots playing (inputs rebuilt within 1/128 of the Phase 2 code);
+      - the Phase 3 network: the player transformer and a dense or Soft-MoE core;
+      - `--init`, `--core`, and `--resume` that refuses ignored flags;
+      - BC: 8 windows per step and warmup + cosine over one pass;
+      - `trainer.bc --score`, recordings per matchup, and `scripts/speed_check.py`.
+    - Sizes: the Phase 2 network 3.0M parameters, Phase 3 dense 3.8M, Phase 3 MoE 5.7M.
+    - Rulings:
+      - 49 channels, not 48: PLAN's own lists add up to 49.
+      - The scoring set is the held-out records of games started before 2026-10-01 (766), 12 workers × 6 games,
+        seed "score", 2,000 steps (~288k rows). The Phase 2 script's 224 games depended on the old record list and
+        cannot be rebuilt.
+      - A structure counts its level, while the Phase 2 network still counts it as 1. Structures stay ≥ 15 tiles
+        apart, so a cell holds at most one.
+      - One BC pass over today's 19,140 training records is ~32M rows, ~12 h.
+    - **BC speed:** 758 rows/s (Phase 2 network) and 751 (MoE network), peak 7.9 GB. The refresh stays
+      worker-bound at ~12 h per pass.
+    - **PPO speed and memory** (16 × 2 games, 48 steps, `scripts/speed_check.py`):
+      - The Phase 2 network: 174 decisions/s at 8 minibatches (11.5 GB peak with 2.5 GB of other programs) and 161
+        at 12.
+      - The Phase 3 networks overflow the 12 GB card at 8 minibatches by ~1.7 GB. Windows pages that into system
+        RAM, and speed falls to 36–44 decisions/s.
+      - At 12 minibatches they fit (11.6 GB): dense 120, MoE 128 decisions/s (the two cores cost the same). That is
+        74–79% of the Phase 2 network at the same settings, but 63–67% of Phase 2's 190: short of the gate.
+      - One 128-row training minibatch: the Phase 2 network 62–64 ms, the Phase 3 network 93 ms. The player
+        transformer over all 403 players is the largest extra cost (~16 ms); with 1 layer: 85 ms; with 64 tokens:
+        72 ms.
+    - Open: the user decides between all 403 tokens at ~65% of Phase 2's speed, or a ≤64-player attention with
+      every player keeping a token. The decision comes before the BC refresh nights. The BC plateau probe (Phase 2
+      network) does not depend on it.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
   - **Actions**, as flat types:
     - today's 5;

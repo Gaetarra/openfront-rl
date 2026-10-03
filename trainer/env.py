@@ -41,6 +41,7 @@ def quantize_(x):
     several warships in one cell) saturate."""
     return x.mul_(64).round_().clamp_(0, 255).to(torch.uint8)
 
+
 # The Phase 1 gate setup, and ranked 1v1 games (the worker draws map, size, bots and timer from the official ranked 1v1
 # playlist, bridge/setups.ts; of the other fields only "seats" is used).
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
