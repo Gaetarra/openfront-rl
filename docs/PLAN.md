@@ -323,7 +323,8 @@ becomes optional); games are watched in the game's own client; BC imitates all p
   (8–11× Onion's cells) still shows the Python thread as the bottleneck.
 
 **Phase 2 results (2026-10-02): Gate A and Gate B passed.** Plan:
-`docs/superpowers/plans/2026-10-01-phase2-bc-slice.md`; branch `phase2` (local, not merged).
+`docs/superpowers/plans/2026-10-01-phase2-bc-slice.md`; branch `phase2`, merged into `main` on 2026-10-03 after a review
+(32 bridge and 50 trainer tests green).
 - Data: 16,107 usable ranked 1v1 records started 2026-09-23 18:00 to 2026-09-30 23:10 UTC; 2,355 void ones dropped
   (13%); 765 held out (5%, by a hash of the game ID). BC replayed 7,242 records with 0 errors and 0 desyncs. Labels:
   no-op in 83.4% of windows, a command in 16.6%; commands outside the 5 actions 1.0%, labels our masks forbid 0.6%
@@ -404,8 +405,8 @@ becomes optional); games are watched in the game's own client; BC imitates all p
     new bar (e.g. against the Phase 2 PPO agent and the Phase 3 clone, or a league rating).
   - Evaluations replay fixed seeds, so their recordings reuse game IDs and overwrite each other in `replays/` (now
     update 6000's Gate B games).
-  - Branch `phase2` is not merged into `main` yet (the user's choice, 2026-10-02). The detailed run log, with every
-    ruling and probe number, is the local, git-ignored `.superpowers/sdd/2026-10-01-phase2-bc-slice/progress.md`.
+  - The detailed run log, with every ruling and probe number, is the local, git-ignored
+    `.superpowers/sdd/2026-10-01-phase2-bc-slice/progress.md`.
 
 **Phase 3 — Full environment + BC refresh**
 - Full v1 actions + masks, spawn head, observation channels for every unit type, nukes in flight and SAM coverage,
