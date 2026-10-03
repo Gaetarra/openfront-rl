@@ -121,6 +121,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
     Log: v0.34.17 → **v0.34.21** (2026-10-01): 32 commits of lobby, telemetry, auth, record metadata and npm changes, no
     simulation change (nothing in `src/core/game`, `execution`, `configuration`); ranked 1v1 records from v0.34.17,
     v0.34.20 and v0.34.21 replay in sync at v0.34.21 (5/5, every hash). v0.34.21 requires npm ≥ 12.1 (`engine-strict`).
+    v0.34.21 → **v0.34.22** (2026-10-03; live since 2026-10-01): 6 commits of client, server, telemetry and payments
+    changes; the only core file is `src/core/ApiSchemas.ts` (an account API field), no simulation change and no
+    dependency change; 5/5 recent v0.34.22 ranked 1v1 records replay in sync at v0.34.22 (2,519 hash checkpoints).
 
 ## Architecture
 ```

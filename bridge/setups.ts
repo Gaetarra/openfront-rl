@@ -35,7 +35,7 @@ export const RANKED_1V1_MAPS: GameMapType[] = [
 ];
 
 /**
- * A ranked 1v1 game as the official servers create it: a copy of get1v1Config in src/server/MapPlaylist.ts (v0.34.21),
+ * A ranked 1v1 game as the official servers create it: a copy of get1v1Config in src/server/MapPlaylist.ts (v0.34.22),
  * which draws with Math.random. Compare it with the game's on every upgrade.
  */
 export function ranked1v1Config(random: PseudoRandom): GameConfig {

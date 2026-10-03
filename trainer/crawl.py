@@ -28,7 +28,7 @@ INDEX = DATA / "index.jsonl"
 SKIPPED = DATA / "skipped.txt"  # IDs of void records, so they are not fetched again
 PURGED_AT = DATA / "purged_at.txt"  # time of the last deleted-players sync
 WINDOW = dt.timedelta(days=2)  # the games listing takes at most 2-day windows
-# v0.34.17 reached the servers between 14:23 and 18:00 UTC that day; v0.34.17-v0.34.21 share one simulation.
+# v0.34.17 reached the servers between 14:23 and 18:00 UTC that day; v0.34.17-v0.34.22 share one simulation.
 SINCE = "2026-09-23T18:00:00Z"
 
 
