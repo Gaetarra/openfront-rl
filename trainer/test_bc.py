@@ -10,7 +10,8 @@ import torch
 from trainer import bc, crawl
 from trainer.bc import Meter, bc_loss, is_val, label_legal, main
 from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import PolicyV1
+from trainer.model import Policy, PolicyV1
+from trainer.test_model import DIMS
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
 
@@ -34,8 +35,12 @@ class LabelTest(unittest.TestCase):
         self.assertEqual(val, [i for i in ids if is_val(i, 0.05)])
 
     def test_the_control_page_says_what_is_training(self):
-        info = bc.run_info(bc.parse_args(["--workers", "14", "--games-per-worker", "6"]), ["r"] * 3, ["v"])
+        a = bc.parse_args(["--workers", "14", "--games-per-worker", "6"])
+        a.arch = "v2"
+        info = bc.run_info(a, ["r"] * 3, ["v"])
         self.assertEqual(info["Method"], "behaviour cloning (imitating humans)")
+        self.assertEqual(info["Network"], "player transformer, Soft-MoE core (8 experts)")
+        self.assertEqual(info["Starts from"], "random weights")
         self.assertEqual(info["Data"], "3 ranked 1v1 replays, 1 held out")
         self.assertEqual(info["Games at once"], "84 (14 workers x 6)")
 
@@ -63,7 +68,7 @@ class CloneTest(unittest.TestCase):
         legal = label_legal(obs, labels)
         self.assertGreater(int(legal.sum()), 40)
         torch.manual_seed(0)
-        model = PolicyV1(dims).cuda().to(memory_format=torch.channels_last)
+        model = Policy(dims, core="moe").cuda().to(memory_format=torch.channels_last)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
         target = torch.zeros(len(labels), device="cuda")
         losses = []
@@ -79,34 +84,54 @@ class CloneTest(unittest.TestCase):
 class MainTest(unittest.TestCase):
     RUN = "unittest-bc"
 
+    def setUp(self):
+        self.data = Path(tempfile.mkdtemp())
+        (self.data / "records").mkdir()
+        shutil.copy(FIXTURE, self.data / "records" / "fixture.json.gz")
+        entry = {"id": "fixture", "start": 0, "commit": None, "map": "x", "size": "Compact", "turns": 1,
+                 "players": [{"clientID": "a", "publicID": None}, {"clientID": "b", "publicID": None}], "winner": "a"}
+        (self.data / "index.jsonl").write_text(json.dumps(entry) + "\n")
+        self.common = ["--run", self.RUN, "--workers", "1", "--games-per-worker", "1", "--val-workers", "0",
+                       "--val-share", "0", "--port", "0", "--log-every", "1", "--save-every", "2"]
+        self.seeds = []
+
     def tearDown(self):
         for d in ("checkpoints", "runs"):
             shutil.rmtree(ROOT / d / self.RUN, ignore_errors=True)
+        shutil.rmtree(self.data, ignore_errors=True)
 
-    def test_train_save_and_resume(self):
-        data = Path(tempfile.mkdtemp())
-        (data / "records").mkdir()
-        shutil.copy(FIXTURE, data / "records" / "fixture.json.gz")
-        entry = {"id": "fixture", "start": 0, "commit": None, "map": "x", "size": "Compact", "turns": 1,
-                 "players": [{"clientID": "a", "publicID": None}, {"clientID": "b", "publicID": None}], "winner": "a"}
-        (data / "index.jsonl").write_text(json.dumps(entry) + "\n")
-        common = ["--run", self.RUN, "--workers", "1", "--games-per-worker", "1", "--val-workers", "0",
-                  "--val-share", "0", "--port", "0", "--log-every", "1", "--save-every", "2"]
-        seeds, real = [], bc.VecEnv
+    def run_main(self, argv):
+        real = bc.VecEnv
 
         def spy(*args, **kwargs):
-            seeds.append(kwargs["seed"])
+            self.seeds.append(kwargs["seed"])
             return real(*args, **kwargs)
 
-        with mock.patch.multiple(crawl, DATA=data, RECORDS=data / "records", INDEX=data / "index.jsonl"),                 mock.patch.object(bc, "VecEnv", spy):
-            main(common + ["--updates", "3"])
-            first = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
-            self.assertEqual((first["kind"], first["update"]), ("bc", 3))
-            main(common + ["--updates", "4", "--resume"])
-        self.assertEqual(torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)["update"], 4)
-        self.assertTrue((ROOT / "runs" / self.RUN).is_dir())
-        self.assertNotEqual(seeds[0], seeds[1], "a resumed run replays the records in a new order, not the same one")
+        with mock.patch.multiple(crawl, DATA=self.data, RECORDS=self.data / "records",
+                                 INDEX=self.data / "index.jsonl"), mock.patch.object(bc, "VecEnv", spy):
+            main(argv)
 
+    def latest(self):
+        return torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
+
+    def test_train_save_and_resume(self):
+        self.run_main(self.common + ["--updates", "3"])
+        first = self.latest()
+        self.assertEqual((first["kind"], first["update"]), ("bc", 3))
+        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v2", "moe"))
+        self.run_main(self.common + ["--updates", "4", "--resume"])
+        self.assertEqual(self.latest()["update"], 4)
+        self.assertTrue((ROOT / "runs" / self.RUN).is_dir())
+        self.assertNotEqual(self.seeds[0], self.seeds[1], "a resumed run replays the records in a new order")
+
+    def test_fine_tuning_keeps_the_checkpoints_network(self):
+        init = ROOT / "checkpoints" / self.RUN / "init.pt"
+        init.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"model": PolicyV1(DIMS).state_dict(), "args": {"widths": "64,128,192"}}, init)
+        self.run_main(self.common + ["--init", str(init), "--updates", "1"])
+        self.assertEqual(self.latest()["args"]["arch"], "v1")
+        with self.assertRaisesRegex(SystemExit, "drop --core"):
+            self.run_main(self.common + ["--init", str(init), "--core", "moe", "--updates", "1"])
 
 if __name__ == "__main__":
     unittest.main()

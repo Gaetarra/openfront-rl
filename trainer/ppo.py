@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from trainer.control import Control, serve
 from trainer.env import GAME_DIR, RANKED_1V1, ROOT, VecEnv
-from trainer.model import ACT_NAMES, ActionDist, PolicyV1, load_net
+from trainer.model import ACT_NAMES, ActionDist, arch_of, load_net, new_net
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
 
@@ -54,6 +54,7 @@ def parser():
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--widths", default="64,128,192", help="CNN stage widths")
+    p.add_argument("--core", choices=("dense", "moe"), default="moe", help="the core of a new network (not with --init)")
     p.add_argument("--init", help="start from this checkpoint's weights, e.g. checkpoints/bc/latest.pt")
     p.add_argument("--opponent", help="frozen checkpoint that plays every seat but the learner's (2-seat setups)")
     p.add_argument("--kl-coef", type=float, default=None,
@@ -88,6 +89,23 @@ def resume_args(p, argv, saved, may_change):
                          f"run from its weights: --run <new name> --init checkpoints/{a.run}/latest.pt")
     return argparse.Namespace(**{**vars(p.parse_args([])), **saved, **{k: getattr(a, k) for k in SESSION},
                                  **{k: given[k] for k in may_change if k in given}, "resume": True})
+
+
+def network_args(p, argv, a):
+    """A new run's network settings. With --init they are the checkpoint's: its weights decide the network, and a
+    different --core or --widths given alongside is refused. Without it, a Phase 3 network from --core and
+    --widths."""
+    if not a.init:
+        a.arch = "v2"
+        return a
+    spec = arch_of(torch.load(a.init, map_location="cpu", weights_only=False)["args"])
+    given = given_flags(p, argv)
+    clash = [k for k in ("core", "widths") if k in given and given[k] != spec[k]]
+    if clash:
+        raise SystemExit(f"--init {a.init} holds a {spec['arch']} network ({spec['core']} core, widths "
+                         f"{spec['widths']}): drop {', '.join('--' + k for k in clash)}")
+    vars(a).update(spec)
+    return a
 
 
 def env_config(a):
@@ -208,6 +226,8 @@ def main(argv=None):
     if a.resume:
         state = torch.load(ckpt_dir / "latest.pt", map_location="cpu", weights_only=False)
         a = resume_args(parser(), argv, state["args"], ("updates", "kl_coef"))
+    else:
+        a = network_args(parser(), argv, a)
     a.kl_coef = a.kl_coef or 0.0
     ranked = a.setup == "ranked1v1"
     a.steps = a.steps or (48 if ranked else 128)
@@ -221,7 +241,7 @@ def main(argv=None):
 
     envs = VecEnv(env_config(a), a.workers, a.games_per_worker, seed=f"{a.run}-{a.seed}", device=device,
                   episodes=state["episodes"] if state else None, log_dir=run_dir / "workers")
-    model = PolicyV1(envs.dims, tuple(int(w) for w in a.widths.split(","))).to(device)
+    model = new_net(envs.dims, vars(a)).to(device)
     model = model.to(memory_format=torch.channels_last)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr, eps=1e-5)
     update = global_step = 0

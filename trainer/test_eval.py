@@ -8,6 +8,8 @@ import torch
 from trainer.control import REPLAYS
 from trainer.env import ONION
 from trainer.eval import label, name_players, play, replay_dir, seats_for, summarize, tag
+from trainer.model import new_net
+from trainer.test_model import DIMS
 
 ONION2 = {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1}
 
@@ -51,6 +53,17 @@ class EvalTest(unittest.TestCase):
             self.assertEqual(tag(str(ckpt)), "bc 60000")
             self.assertEqual(tag(str(old)), f"{Path(d).name} 7")  # no run in its settings: its folder
             self.assertEqual(replay_dir([str(ckpt), "random"]), REPLAYS / "bc 60000 vs random")
+
+    def test_old_and_new_networks_play_each_other(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for name, args in (("new", {"arch": "v2", "core": "moe", "widths": "64,128,192"}),
+                               ("old", {"widths": "64,128,192"})):
+                path = Path(d) / f"{name}.pt"
+                torch.save({"model": new_net(DIMS, args).state_dict(), "args": args, "update": 1}, path)
+                paths.append(str(path))
+            r = play(paths, ONION2, episodes=2, workers=1, games_per_worker=2, seed="mix")
+        self.assertEqual(r["episodes"], 2)
 
     def test_one_seat_on_fixed_seeds_is_reproducible(self):
         run = lambda: play(["random"], {**ONION, "timerMinutes": 1}, episodes=2, workers=1, games_per_worker=2,

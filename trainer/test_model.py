@@ -1,10 +1,13 @@
 import math
+import tempfile
 import unittest
+from pathlib import Path
 
 import torch
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, v1_spatial
+from trainer.model import (ATTACK, BOAT, BUILD, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, load_net,
+                           new_net, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5,
         "troopBins": [0.1, 0.25, 0.5, 0.75, 1.0]}
@@ -216,6 +219,23 @@ class SoftMoETest(unittest.TestCase):
         y.pow(2).sum().backward()
         self.assertTrue(all(float(moe.w.grad[e].abs().sum()) > 0 for e in range(4)))
         self.assertGreater(float(moe.router.weight.grad.abs().sum()), 0)
+
+
+
+class LoadTest(unittest.TestCase):
+    def test_checkpoints_load_as_the_network_they_hold(self):
+        obs = fake_obs()
+        with tempfile.TemporaryDirectory() as d:
+            for args, kind in (({"widths": "64,128,192"}, PolicyV1),  # Phase 2 checkpoints have no "arch"
+                               ({"arch": "v2", "core": "dense", "widths": "64,128,192"}, Policy),
+                               ({"arch": "v2", "core": "moe", "widths": "64,128,192"}, Policy)):
+                path = Path(d) / "net.pt"
+                torch.save({"model": new_net(DIMS, args).state_dict(), "args": args}, path)
+                net = load_net(path, DIMS)
+                self.assertIsInstance(net, kind)
+                self.assertEqual(getattr(net, "moe", False), args.get("core") == "moe")
+                with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+                    self.assertEqual(tuple(net(obs)["value"].shape), (N,))
 
 
 if __name__ == "__main__":

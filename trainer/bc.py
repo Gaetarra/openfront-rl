@@ -19,8 +19,8 @@ from torch.utils.tensorboard import SummaryWriter
 from trainer import crawl
 from trainer.control import Control, serve
 from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, PolicyV1
-from trainer.ppo import game_commit, resume_args, save_checkpoint
+from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, new_net
+from trainer.ppo import game_commit, network_args, resume_args, save_checkpoint
 
 CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes from (trainer/model.py)
 PHASES = ("spawn", "early", "mid", "late")
@@ -30,6 +30,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", default="bc", help="name for checkpoints/<run> and runs/<run>")
     p.add_argument("--resume", action="store_true", help="continue from checkpoints/<run>/latest.pt")
+    p.add_argument("--init", help="start from this checkpoint's weights and network, with a fresh optimizer")
+    p.add_argument("--core", choices=("dense", "moe"), default="moe", help="the core of a new network (not with --init)")
     p.add_argument("--workers", type=int, default=10)
     p.add_argument("--games-per-worker", type=int, default=8)
     p.add_argument("--val-workers", type=int, default=2, help="0 = no validation")
@@ -63,7 +65,10 @@ def is_val(game_id, share):
 
 def run_info(a, train, val):
     """What the control page says about the run."""
-    return {"Name": a.run, "Method": "behaviour cloning (imitating humans)",
+    network = "the Phase 2 network" if a.arch == "v1" else (
+        "player transformer, " + ("Soft-MoE core (8 experts)" if a.core == "moe" else "dense core"))
+    return {"Name": a.run, "Method": "behaviour cloning (imitating humans)", "Network": network,
+            "Starts from": a.init or "random weights",
             "Data": f"{len(train):,} ranked 1v1 replays, {len(val):,} held out",
             "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
             "Updates": f"{a.updates:,}"}
@@ -153,6 +158,8 @@ def main(argv=None):
     if a.resume:
         state = torch.load(ckpt_dir / "latest.pt", map_location="cpu", weights_only=False)
         a = resume_args(parser(), argv, state["args"], ("updates",))
+    else:
+        a = network_args(parser(), argv, a)
     random.seed(a.seed)
     np.random.seed(a.seed)
     torch.manual_seed(a.seed)
@@ -174,7 +181,7 @@ def main(argv=None):
     if a.val_workers:
         val_envs = VecEnv(RANKED_1V1, a.val_workers, a.games_per_worker, seed="val", device=device, records=val,
                           log_dir=run_dir / "val_workers")
-    model = PolicyV1(envs.dims, tuple(int(w) for w in a.widths.split(","))).to(device)
+    model = new_net(envs.dims, vars(a)).to(device)
     model = model.to(memory_format=torch.channels_last)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr, eps=1e-5)
     update = global_step = 0
@@ -186,6 +193,8 @@ def main(argv=None):
         np.random.set_state(state["rng"]["numpy"])
         torch.set_rng_state(state["rng"]["torch"])
         torch.cuda.set_rng_state_all(state["rng"]["cuda"])
+    elif a.init:
+        model.load_state_dict(torch.load(a.init, map_location="cpu", weights_only=False)["model"])
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
     control.update(run=run_info(a, train, val))
     server = serve(control, a.port, log_dir=run_dir)

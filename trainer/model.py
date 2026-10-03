@@ -303,9 +303,21 @@ def _kl(p, q):
     return (p.probs * (p.logits - q.logits)).sum(-1)
 
 
+def arch_of(args):
+    """The network a run's settings describe. Phase 2 checkpoints predate "arch": they are PolicyV1."""
+    return {"arch": args.get("arch", "v1"), "core": args.get("core", "dense"), "widths": args["widths"]}
+
+
+def new_net(dims, args):
+    """A fresh network of the kind a run's settings (a dict like a checkpoint's "args") describe."""
+    spec = arch_of(args)
+    widths = tuple(int(w) for w in spec["widths"].split(","))
+    return PolicyV1(dims, widths) if spec["arch"] == "v1" else Policy(dims, widths, spec["core"])
+
+
 def load_net(path, dims, device="cuda"):
-    """A frozen policy from a trainer.bc or trainer.ppo checkpoint, in eval mode."""
+    """A frozen policy from a trainer.bc or trainer.ppo checkpoint, in eval mode: the network it holds."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    net = PolicyV1(dims, tuple(int(w) for w in ckpt["args"]["widths"].split(",")))
+    net = new_net(dims, ckpt["args"])
     net.load_state_dict(ckpt["model"])
     return net.to(device).to(memory_format=torch.channels_last).eval().requires_grad_(False)
