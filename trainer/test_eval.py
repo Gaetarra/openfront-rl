@@ -5,8 +5,9 @@ from pathlib import Path
 
 import torch
 
+from trainer.control import REPLAYS
 from trainer.env import ONION
-from trainer.eval import label, name_players, play, seats_for, summarize
+from trainer.eval import label, name_players, play, replay_dir, seats_for, summarize, tag
 
 ONION2 = {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1}
 
@@ -40,6 +41,16 @@ class EvalTest(unittest.TestCase):
             name_players(rec, {0: "Clone 60000", 1: "PPO 5000"})
             players = json.loads(rec.read_text())["info"]["players"]
             self.assertEqual([p["username"] for p in players], ["Clone 60000", "PPO 5000"])
+
+    def test_recordings_go_to_a_folder_per_matchup(self):
+        with tempfile.TemporaryDirectory() as d:
+            ckpt, old = Path(d) / "bc" / "update0060000.pt", Path(d) / "x.pt"
+            ckpt.parent.mkdir()
+            torch.save({"args": {"run": "bc"}, "update": 60000}, ckpt)
+            torch.save({"args": {}, "update": 7}, old)
+            self.assertEqual(tag(str(ckpt)), "bc 60000")
+            self.assertEqual(tag(str(old)), f"{Path(d).name} 7")  # no run in its settings: its folder
+            self.assertEqual(replay_dir([str(ckpt), "random"]), REPLAYS / "bc 60000 vs random")
 
     def test_one_seat_on_fixed_seeds_is_reproducible(self):
         run = lambda: play(["random"], {**ONION, "timerMinutes": 1}, episodes=2, workers=1, games_per_worker=2,

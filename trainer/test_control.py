@@ -136,5 +136,18 @@ class ControlTest(unittest.TestCase):
             path.unlink(missing_ok=True)
 
 
+    def test_games_are_served_from_the_given_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "Test0002.json").write_text('{"info": {"x": 1}}')
+            server = serve(Control(), 0, sampler=False, replays=Path(d))
+            try:
+                url = f"http://127.0.0.1:{server.server_address[1]}/game/Test0002"
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    self.assertEqual(json.load(r), {"info": {"x": 1}})
+            finally:
+                server.shutdown()
+                server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

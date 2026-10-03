@@ -44,6 +44,20 @@ def label(spec):
     return f"{'PPO' if 'kl_coef' in ckpt['args'] else 'Clone'} {ckpt['update']}"
 
 
+def tag(spec):
+    """A policy's short name in folder names: a checkpoint's run and update (runs reuse update numbers)."""
+    if spec in ("random", "scripted"):
+        return spec
+    ckpt = torch.load(spec, map_location="cpu", weights_only=False)
+    return f"{ckpt['args'].get('run', Path(spec).parent.name)} {ckpt['update']}"
+
+
+def replay_dir(specs):
+    """Where a match's recorded games go: one folder per matchup, since fixed seeds give every match the same game
+    IDs."""
+    return REPLAYS / " vs ".join(tag(s) for s in specs)
+
+
 def name_players(path, by_seat):
     """Renames a recorded game's players by seat (clientID AGENT000 is seat 0). Names do not enter the game's hashes,
     so the record still replays in sync."""
@@ -145,17 +159,20 @@ def main(argv=None):
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--games-per-worker", type=int, default=4)
     p.add_argument("--seed", default="eval")
-    p.add_argument("--record", type=int, default=0, help="games saved to replays/ per worker, to watch them")
+    p.add_argument("--record", type=int, default=0, help="games saved per worker into replays/<A> vs <B>/, to watch them")
     a = p.parse_args(argv)
     config = SETUPS[a.setup]
     if config["seats"] == 2 and a.b is None:
         p.error("--b is required in 2-seat setups")
-    record = {"dir": str(REPLAYS), "gitCommit": game_commit(), "games": a.record} if a.record > 0 else None
-    result = play([a.a, a.b][:config["seats"]], config, a.episodes, a.workers, a.games_per_worker, seed=a.seed,
-                  record=record)
+    specs = [a.a, a.b][:config["seats"]]
+    folder = replay_dir(specs)
+    record = {"dir": str(folder), "gitCommit": game_commit(), "games": a.record} if a.record > 0 else None
+    result = play(specs, config, a.episodes, a.workers, a.games_per_worker, seed=a.seed, record=record)
     print(json.dumps({"a": a.a, "b": a.b, "setup": a.setup, **result}, indent=2))
-    for game_id in result["recorded"]:
-        print(f"watch: python -m trainer.watch (or a running trainer), then http://localhost:9000/game/{game_id}")
+    if result["recorded"]:
+        print(f'watch: python -m trainer.watch --dir "{folder.name}", then open')
+        for game_id in result["recorded"]:
+            print(f"  http://localhost:9000/game/{game_id}")
 
 
 if __name__ == "__main__":

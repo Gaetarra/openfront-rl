@@ -1,6 +1,7 @@
 """Watch saved games (replays/<id>.json) in the game's own client: starts the game's dev client and serves the games.
 
-  .venv/Scripts/python -m trainer.watch                    then open http://localhost:9000/game/<id>; Ctrl+C stops both
+  .venv/Scripts/python -m trainer.watch --dir "bc 60000 vs random"   then open http://localhost:9000/game/<id>; Ctrl+C stops both
+  .venv/Scripts/python -m trainer.watch                    (the games saved directly in replays/, e.g. by --fetch)
   .venv/Scripts/python -m trainer.watch --fetch <gameID>   (first download a public game, e.g. to compare with humans)
 
 On localhost the game's dev client (npm run dev in the game folder, http://localhost:9000) loads archived games from
@@ -73,6 +74,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--fetch", help="download this public game into replays/ first")
     p.add_argument("--port", type=int, default=8787)
+    p.add_argument("--dir", help='serve this folder of replays/ (one per matchup, e.g. "bc 60000 vs random")')
     a = p.parse_args(argv)
     REPLAYS.mkdir(exist_ok=True)
     if a.fetch:
@@ -80,19 +82,24 @@ def main(argv=None):
         if record is None:
             raise SystemExit(f"game {a.fetch} not found")
         (REPLAYS / f"{a.fetch}.json").write_text(json.dumps(crawl.blank(record)), encoding="utf-8")
+    folder = REPLAYS / a.dir if a.dir else REPLAYS
+    if not folder.is_dir():
+        saved = sorted(d.name for d in REPLAYS.iterdir() if d.is_dir())
+        raise SystemExit(f"no folder {folder}. Matchups saved so far: {', '.join(saved) or 'none'}")
     try:
-        server = serve(Control(), a.port, sampler=False)
-        print(f"serving {REPLAYS} on http://127.0.0.1:{a.port}")
+        server = serve(Control(), a.port, sampler=False, replays=folder)
+        print(f"serving {folder} on http://127.0.0.1:{a.port}")
     except OSError:
         server = None
-        print(f"port {a.port} is taken: a running trainer's control server already serves {REPLAYS}")
+        print(f"port {a.port} is taken: a running trainer's control server serves {REPLAYS} (not --dir); stop it to "
+              f"use --dir")
     log = ROOT / "runs" / "watch-client.log"
     print(f"starting the game client (npm run dev, log: {log}); the first start takes up to a minute ...")
     client = None
     try:
         client = start_client(log)
         print(f"the game client is ready on {CLIENT}. Open a game (newest last), and press Ctrl+C here to stop:")
-        for f in sorted(REPLAYS.glob("*.json"), key=lambda f: f.stat().st_mtime)[-10:]:
+        for f in sorted(folder.glob("*.json"), key=lambda f: f.stat().st_mtime)[-10:]:
             print(f"  {CLIENT}/game/{f.stem}")
         while True:
             time.sleep(1)  # short naps: a stop request (Ctrl+C) is seen within a second however it arrives

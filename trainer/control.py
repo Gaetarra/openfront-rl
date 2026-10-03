@@ -17,7 +17,7 @@ import torch
 from tensorboard.backend.event_processing.directory_watcher import DirectoryDeletedError
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-REPLAYS = Path(__file__).resolve().parents[1] / "replays"  # saved games (trainer.eval --record), served at /game/<id>
+REPLAYS = Path(__file__).resolve().parents[1] / "replays"  # saved games: trainer.eval keeps one folder per matchup
 GAME_PATH = re.compile(r"^/game/([A-Za-z0-9]{8,10})$")
 
 THROTTLE = {"full": 1.0, "half": 0.5, "low": 0.2}
@@ -158,9 +158,9 @@ def sample_system():
             "training_rss_gb": rss / 2**30, "gpu": gpu_status(), "cpu_temp": cpu_temp()}
 
 
-def serve(control, port, sampler=True, log_dir=None):
+def serve(control, port, sampler=True, log_dir=None, replays=REPLAYS):
     """Starts the control server on 127.0.0.1:port (0 = any free port) in a daemon thread. With the run's TensorBoard
-    `log_dir`, the page charts its curves."""
+    `log_dir`, the page charts its curves. Saved games are served from `replays`."""
     # At most 1,000 points per curve, sampled the way TensorBoard samples them.
     curves = EventAccumulator(str(log_dir), size_guidance={"scalars": 1000}) if log_dir else None
     lock = threading.Lock()
@@ -194,7 +194,7 @@ def serve(control, port, sampler=True, log_dir=None):
             game = GAME_PATH.match(self.path)
             if game:
                 # For the game's own client: in dev mode it loads archived games from localhost:8787/game/<id>.
-                path = REPLAYS / f"{game[1]}.json"
+                path = replays / f"{game[1]}.json"
                 if not path.exists():
                     return self._send(404, "{}", cors=True)
                 return self._send(200, path.read_text(encoding="utf-8"), cors=True)

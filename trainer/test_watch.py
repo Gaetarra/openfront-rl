@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import psutil
 
@@ -31,6 +32,16 @@ class ClientTest(unittest.TestCase):
             watch.stop(proc)
             self.assertFalse(watch.answers(url))
             self.assertFalse(any(c.is_running() for c in children))
+
+
+
+class DirTest(unittest.TestCase):
+    def test_a_missing_folder_stops_before_anything_starts(self):
+        with mock.patch.object(watch, "start_client") as start, mock.patch.object(watch, "serve") as serve:
+            with self.assertRaisesRegex(SystemExit, "no folder .*no such matchup"):
+                watch.main(["--dir", "no such matchup"])
+        start.assert_not_called()
+        serve.assert_not_called()
 
 
 if __name__ == "__main__":
