@@ -4,7 +4,7 @@ import unittest
 import torch
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, PolicyV1, RandomPolicy, v1_spatial
+from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, v1_spatial
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5,
         "troopBins": [0.1, 0.25, 0.5, 0.75, 1.0]}
@@ -38,7 +38,18 @@ def fake_obs(device="cuda", seed=0):
 
 def nets():
     """One network of every kind."""
-    return {"v1": PolicyV1(DIMS)}
+    return {"v1": PolicyV1(DIMS), "dense": Policy(DIMS, core="dense"), "moe": Policy(DIMS, core="moe")}
+
+
+def randomized(net):
+    """net with random weights everywhere, scaled by fan-in: the zero-initialised heads would hide what the inputs
+    do."""
+    with torch.no_grad():
+        for p in net.parameters():
+            if p.dim() > 1:
+                fan_in = p.shape[-1] if p.dim() == 3 else p[0].numel()  # SoftMoE's experts: [experts, out, in]
+                p.normal_(0, fan_in ** -0.5)
+    return net
 
 
 class ModelTest(unittest.TestCase):
@@ -143,6 +154,68 @@ class V1InputsTest(unittest.TestCase):
         self.assertEqual(float(v[0, 21, 1, 0]), 2.0)  # warship, other
         self.assertEqual(float(v[0, 18, 1, 1]), 40 / 64)  # transport, own
         self.assertEqual(float(v[0, 12:].sum()), 1 + 1 + 2 + 40 / 64)
+
+
+
+class PolicyTest(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(0)
+        self.obs = fake_obs()
+
+    def test_absent_players_change_nothing(self):
+        net = randomized(Policy(DIMS)).cuda().eval()
+        noisy = dict(self.obs, players=self.obs["players"].clone())
+        noisy["players"][:, 4, 1:] = 3.0  # the absent row (feature 0 = 0) holds garbage, relation flags included
+        with torch.no_grad():
+            a, b = net(self.obs), net(noisy)
+        self.assertGreater(float(a["ptr"][:, :4].std()), 1e-2, "the pointer depends on the players")
+        for k in ("type", "maps", "bins", "value", "gates"):
+            self.assertTrue(torch.allclose(a[k], b[k], rtol=1e-4, atol=1e-5), k)
+        self.assertTrue(torch.allclose(a["ptr"][:, :4], b["ptr"][:, :4], rtol=1e-4, atol=1e-5))
+
+    def test_players_can_come_in_any_order(self):
+        net = randomized(Policy(DIMS)).cuda().eval()
+        perm = torch.tensor([0, 3, 1, 4, 2], device="cuda")  # new row i holds old row perm[i]
+        moved = dict(self.obs, players=self.obs["players"][:, perm], attack_mask=self.obs["attack_mask"][:, perm],
+                     owners=torch.argsort(perm)[self.obs["owners"].long()].to(torch.int16))
+        with torch.no_grad():
+            a, b = net(self.obs), net(moved)
+        for k in ("type", "maps", "bins", "value", "gates"):
+            self.assertTrue(torch.allclose(a[k], b[k], rtol=1e-4, atol=1e-4), k)
+        self.assertTrue(torch.allclose(a["ptr"][:, perm], b["ptr"], rtol=1e-4, atol=1e-4))
+
+    def test_the_two_cores_start_alike_everywhere_else(self):
+        torch.manual_seed(3)
+        dense = Policy(DIMS, core="dense").state_dict()
+        torch.manual_seed(3)
+        moe = Policy(DIMS, core="moe").state_dict()
+        for k, v in dense.items():
+            if not k.startswith("core."):
+                self.assertTrue(torch.equal(v, moe[k]), k)
+
+    def test_64ths_are_exact_in_bf16(self):
+        k = torch.arange(256)
+        self.assertTrue(torch.equal(k.to(torch.uint8).to(torch.bfloat16).mul(1 / 64).float(), k.float() / 64))
+
+
+class SoftMoETest(unittest.TestCase):
+    def test_the_output_blends_the_experts_by_the_routers_weights(self):
+        torch.manual_seed(0)
+        moe = SoftMoE(16, experts=4)
+        torch.nn.init.normal_(moe.router.weight)  # a router that already prefers some experts
+        x = torch.randn(5, 16)
+        y, gates = moe(x)
+        self.assertTrue(torch.allclose(gates.sum(1), torch.ones(5)))
+        experts = torch.stack([x @ moe.w[e].T + moe.b[e] for e in range(4)], 1)  # [5, experts, 16]
+        self.assertTrue(torch.allclose(y, (gates[..., None] * experts).sum(1), atol=1e-5))
+
+    def test_every_expert_learns(self):
+        torch.manual_seed(0)
+        moe = SoftMoE(16, experts=4)
+        y, _ = moe(torch.randn(5, 16))
+        y.pow(2).sum().backward()
+        self.assertTrue(all(float(moe.w.grad[e].abs().sum()) > 0 for e in range(4)))
+        self.assertGreater(float(moe.router.weight.grad.abs().sum()), 0)
 
 
 if __name__ == "__main__":

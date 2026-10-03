@@ -1,4 +1,5 @@
-"""Policy networks (PLAN "Architecture"). PolicyV1 is the Phase 2 network, kept for its checkpoints."""
+"""Policy networks (PLAN "Architecture"): Policy, the Phase 3 network (ResNet map encoder, U-Net-lite heat maps, a
+transformer over the players, a dense or Soft-MoE core), and PolicyV1, the Phase 2 network, kept for its checkpoints."""
 import math
 
 import torch
@@ -13,6 +14,7 @@ SPAWN, ATTACK, BOAT, BUILD = 1, 2, 3, 4
 N_MAPS = 3  # heat maps: spawn, boat landing, city
 MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
 V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
+D = 128  # width of the player tokens
 
 
 def v1_spatial(spatial):
@@ -38,6 +40,49 @@ def _spatial_input(x, weight):
     return x.contiguous(memory_format=torch.channels_last).to(dtype).mul_(1 / 64)
 
 
+def masked_mean(x, mask):
+    """Mean of x [N, P, D] over the rows where mask [N, P] holds; zeros where none does."""
+    m = mask.to(x.dtype).unsqueeze(-1)
+    return (x * m).sum(1) / m.sum(1).clamp(min=1)
+
+
+def land_features(obs, f):
+    """Per player, the mean of the feature map f [N, C, h, w] over its land, at f's resolution (h x w blocks of the
+    cell grid). It comes from each cell's two largest owners and their shares of it (obs "owners", "owner_land" in
+    64ths). Players without land get zeros."""
+    n, _, h, w = f.shape
+    H, W = obs["spatial"].shape[-2:]
+    r = H // h  # cells per block side
+    cell = torch.arange(H * W, device=f.device)
+    block = cell // W // r * w + cell % W // r
+    index = (obs["owners"].long() * (h * w) + block).flatten(1)
+    weight = torch.zeros(n, obs["players"].shape[1] * h * w, device=f.device)
+    weight = weight.scatter_add_(1, index, obs["owner_land"].flatten(1).float()).unflatten(1, (-1, h * w))
+    weight = weight / weight.sum(2, keepdim=True).clamp(min=1)
+    return torch.bmm(weight.to(f.dtype), f.flatten(2).transpose(1, 2))
+
+
+class SoftMoE(nn.Module):
+    """Soft-MoE (PLAN decision 5c) for one vector per row. With a single token, every expert's slot receives the row's
+    vector, and the combine weights are a softmax over the experts: the layer blends the experts' outputs by
+    situation. Each expert is one d x d layer, so running them all costs little next to the CNN. More experts can be
+    added later by copying trained ones (upcycling)."""
+
+    def __init__(self, d, experts=8):
+        super().__init__()
+        self.router = nn.Linear(d, experts)
+        nn.init.zeros_(self.router.weight)  # every expert weighs the same at the start
+        nn.init.zeros_(self.router.bias)
+        layers = [nn.Linear(d, d) for _ in range(experts)]
+        self.w = nn.Parameter(torch.stack([layer.weight.detach() for layer in layers]))  # [experts, out, in]
+        self.b = nn.Parameter(torch.stack([layer.bias.detach() for layer in layers]))  # [experts, out]
+
+    def forward(self, x):
+        gates = self.router(x).softmax(-1)  # [N, experts]
+        y = torch.einsum("ni,eoi->neo", x, self.w) + self.b  # every expert's output [N, experts, out]
+        return torch.einsum("ne,neo->no", gates, y), gates
+
+
 class Res(nn.Module):
     """IMPALA-style residual block: two 3x3 convs, no norm, zero-init residual branch."""
 
@@ -49,6 +94,83 @@ class Res(nn.Module):
 
     def forward(self, x):
         return x + self.c2(F.relu(self.c1(F.relu(x))))
+
+
+class Policy(nn.Module):
+    """The Phase 3 network (PLAN Phase 3A).
+    - The map encoder, heat-map decoder and heads are PolicyV1's.
+    - Each player becomes a token: its features, its buildings by type, and the map features (1/8 resolution)
+      averaged over its land.
+    - A 2-layer transformer runs over all the tokens; absent players are masked out.
+    - The core reads an attention summary queried by the map and the scalars, the seat's own token, and the means over
+      its friends, its enemies and the bots.
+    - The attack pointer reads the tokens.
+    - core: "dense" (one 512 x 512 layer) or "moe" (a Soft-MoE layer of 8 experts in its place)."""
+
+    def __init__(self, dims, widths=(64, 128, 192), core="moe"):
+        super().__init__()
+        c_in, n_feat, n_scal = dims["channels"], dims["playerFeatures"], dims["scalars"]
+        self.n_bins = len(dims["troopBins"])
+        c1, c2, c3 = widths
+        self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
+        self.s1 = nn.Sequential(Res(c1), Res(c1))
+        self.d2, self.s2 = nn.Conv2d(c1, c2, 2, stride=2), nn.Sequential(Res(c2), Res(c2))
+        self.d3, self.s3 = nn.Conv2d(c2, c3, 2, stride=2), nn.Sequential(Res(c3), Res(c3))
+        self.embed = nn.Linear(n_feat + c2, D)
+        self.encoder = nn.ModuleList(nn.TransformerEncoderLayer(D, 4, 4 * D, dropout=0.0, batch_first=True,
+                                                                norm_first=True) for _ in range(2))
+        self.encoder_norm = nn.LayerNorm(D)
+        self.scalars = nn.Sequential(nn.Linear(n_scal, D), nn.ReLU())
+        self.ask = nn.Linear(2 * c3 + D, D)
+        self.pool = nn.MultiheadAttention(D, 4, batch_first=True)
+        self.trunk = nn.Sequential(nn.Linear(2 * c3 + 6 * D, 512), nn.ReLU())
+        self.film = nn.Linear(512, 2 * c1)
+        self.u3, self.u2 = nn.Conv2d(c3, c2, 1), nn.Conv2d(c2, c1, 1)
+        self.shuffle = nn.Conv2d(c1, N_MAPS * 16, 1)
+        self.skip = nn.Conv2d(c_in, N_MAPS, 1)
+        self.type_head = nn.Linear(512, dims["acts"])
+        self.bin_head = nn.Linear(512, 2 * self.n_bins)
+        self.query, self.key = nn.Linear(512, D), nn.Linear(D, D)
+        self.value_head = nn.Linear(512, 1)
+        # Policy outputs start at zero: a uniform policy over legal actions.
+        for layer in (self.type_head, self.bin_head, self.shuffle, self.skip, self.query):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+        # Built last, so for a given seed both cores start every other layer from the same weights (the A/B).
+        self.moe = core == "moe"
+        self.core = SoftMoE(512) if self.moe else nn.Linear(512, 512)
+
+    def forward(self, obs):
+        x = _spatial_input(obs["spatial"], self.stem.weight)
+        f1 = self.s1(self.stem(x))
+        f2 = self.s2(self.d2(F.relu(f1)))
+        f3 = self.s3(self.d3(F.relu(f2)))
+        pooled = torch.cat([f3.mean((2, 3)), f3.amax((2, 3))], 1)
+        players = obs["players"]
+        exists = players[..., 0] > 0
+        t = self.embed(torch.cat([players, land_features(obs, f2).to(players.dtype)], 2))
+        for layer in self.encoder:
+            t = layer(t, src_key_padding_mask=~exists)
+        tokens = self.encoder_norm(t)
+        s = self.scalars(obs["scalars"])
+        ask = self.ask(torch.cat([pooled, s], 1)).unsqueeze(1)
+        attended = self.pool(ask, tokens, tokens, key_padding_mask=~exists, need_weights=False)[0].squeeze(1)
+        groups = [masked_mean(tokens, (players[..., k] > 0) & exists) for k in (2, 3, 4, 5)]  # self, friends, enemies, bots
+        h = self.trunk(torch.cat([pooled, attended, *groups, s], 1))
+        out = {}
+        if self.moe:
+            h, out["gates"] = self.core(h)
+        else:
+            h = self.core(h)
+        h = F.relu(h)
+        g = f2 + F.interpolate(self.u3(F.relu(f3)), scale_factor=2)
+        g = f1 + F.interpolate(self.u2(F.relu(g)), scale_factor=2)
+        gamma, beta = self.film(h).chunk(2, 1)
+        g = g * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]
+        maps = F.pixel_shuffle(self.shuffle(F.relu(g)), 4) + self.skip(x)
+        ptr = torch.einsum("nd,npd->np", self.query(h), self.key(tokens)) / math.sqrt(D)
+        return {**out, "type": self.type_head(h), "maps": maps.flatten(2),
+                "bins": self.bin_head(h).view(-1, 2, self.n_bins), "ptr": ptr, "value": self.value_head(h).squeeze(1)}
 
 
 class PolicyV1(nn.Module):
