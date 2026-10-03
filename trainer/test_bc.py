@@ -15,7 +15,7 @@ from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, l
                         table)
 from trainer.env import RANKED_1V1, ROOT, VecEnv
 from trainer.model import Policy, PolicyV1, new_net
-from trainer.test_model import DIMS, N as ROWS, fake_obs, randomized
+from trainer.test_model import DIMS, N as ROWS, exact_fp32, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
 
@@ -77,10 +77,7 @@ class AccumulationTest(unittest.TestCase):
     def test_accumulated_windows_give_the_gradient_of_one_batch(self):
         # In exact fp32 (no bf16 autocast, no TF32): rounding would move the max-pool's argmax between batch sizes and
         # bury the comparison in noise (15% on a small gradient in bf16, 4e-6 in exact fp32).
-        tf32 = torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32
-        torch.backends.cudnn.allow_tf32 = torch.backends.cuda.matmul.allow_tf32 = False
-        self.addCleanup(lambda: (setattr(torch.backends.cudnn, "allow_tf32", tf32[0]),
-                                 setattr(torch.backends.cuda.matmul, "allow_tf32", tf32[1])))
+        exact_fp32(self)
         torch.manual_seed(0)
         model = randomized(Policy(DIMS, core="moe")).cuda().to(memory_format=torch.channels_last)
         windows = []

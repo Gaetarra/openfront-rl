@@ -55,6 +55,15 @@ def randomized(net):
     return net
 
 
+def exact_fp32(test):
+    """Turns TF32 off for the rest of a test. By default this GPU's fp32 convolutions round to 10 mantissa bits, which
+    turns last-bit differences between two equivalent inputs into errors far above a tight tolerance (up to 12x)."""
+    flags = torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cudnn.allow_tf32 = torch.backends.cuda.matmul.allow_tf32 = False
+    test.addCleanup(lambda: (setattr(torch.backends.cudnn, "allow_tf32", flags[0]),
+                             setattr(torch.backends.cuda.matmul, "allow_tf32", flags[1])))
+
+
 class ModelTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
@@ -166,6 +175,7 @@ class PolicyTest(unittest.TestCase):
         self.obs = fake_obs()
 
     def test_absent_players_change_nothing(self):
+        exact_fp32(self)
         net = randomized(Policy(DIMS)).cuda().eval()
         noisy = dict(self.obs, players=self.obs["players"].clone())
         noisy["players"][:, 4, 1:] = 3.0  # the absent row (feature 0 = 0) holds garbage, relation flags included
@@ -177,6 +187,7 @@ class PolicyTest(unittest.TestCase):
         self.assertTrue(torch.allclose(a["ptr"][:, :4], b["ptr"][:, :4], rtol=1e-4, atol=1e-5))
 
     def test_players_can_come_in_any_order(self):
+        exact_fp32(self)
         net = randomized(Policy(DIMS)).cuda().eval()
         perm = torch.tensor([0, 3, 1, 4, 2], device="cuda")  # new row i holds old row perm[i]
         moved = dict(self.obs, players=self.obs["players"][:, perm], attack_mask=self.obs["attack_mask"][:, perm],
