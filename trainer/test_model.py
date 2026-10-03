@@ -6,8 +6,8 @@ from pathlib import Path
 import torch
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import (ATTACK, BOAT, BUILD, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, load_net,
-                           new_net, v1_spatial)
+from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE,
+                           load_net, new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5,
         "troopBins": [0.1, 0.25, 0.5, 0.75, 1.0]}
@@ -210,6 +210,40 @@ class PolicyTest(unittest.TestCase):
     def test_64ths_are_exact_in_bf16(self):
         k = torch.arange(256)
         self.assertTrue(torch.equal(k.to(torch.uint8).to(torch.bfloat16).mul(1 / 64).float(), k.float() / 64))
+
+
+class AttentionTest(unittest.TestCase):
+    def test_relevance_puts_the_seat_unowned_land_and_rivals_first(self):
+        f = torch.zeros(1, 7, 25)
+        f[0, :6, 0] = 1  # rows 0-5 exist, row 6 is absent
+        f[0, 0, 12] = 1  # unowned land, attackable
+        f[0, 1, 2] = 1  # the seat
+        f[0, 2, 4] = 1  # an enemy
+        f[0, 3, 5] = f[0, 3, 12] = 1  # a bot the seat can attack
+        f[0, 4, 5], f[0, 4, 7] = 1, 0.2  # a big bot
+        f[0, 5, 5], f[0, 5, 7] = 1, 0.1  # a smaller bot
+        self.assertEqual(relevance(f)[0].argsort(descending=True).tolist(), [0, 1, 2, 3, 4, 5, 6])
+
+    def test_players_beyond_the_attended_64_keep_their_token(self):
+        exact_fp32(self)
+        obs = fake_obs()
+        extra = 70 - P  # bots beyond the 64 slots, each smaller than the last
+        bots = torch.zeros(N, extra, 25, device="cuda")
+        bots[..., 0] = bots[..., 5] = 1
+        bots[..., 7] = torch.linspace(0.05, 0.001, extra, device="cuda")
+        obs["players"] = torch.cat([obs["players"], bots], 1)
+        obs["attack_mask"] = torch.cat([obs["attack_mask"], torch.ones(N, extra, dtype=torch.bool, device="cuda")], 1)
+        net = randomized(Policy(DIMS)).cuda().eval()
+        attended = []
+        net.encoder[0].register_forward_pre_hook(lambda module, args: attended.append(args[0].shape[1]))
+        changed = dict(obs, players=obs["players"].clone())
+        changed["players"][:, -1, 8] = 1.0  # the least relevant bot gets troops
+        with torch.no_grad():
+            a, b = net(obs), net(changed)
+        self.assertEqual(attended, [ATTENDED, ATTENDED])
+        self.assertEqual(tuple(a["ptr"].shape), (N, 70))
+        self.assertTrue(torch.isfinite(a["ptr"]).all())
+        self.assertGreater(float((a["ptr"][:, -1] - b["ptr"][:, -1]).abs().min()), 1e-4, "its own card counts")
 
 
 class SoftMoETest(unittest.TestCase):

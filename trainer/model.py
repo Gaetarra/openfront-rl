@@ -15,6 +15,22 @@ N_MAPS = 3  # heat maps: spawn, boat landing, city
 MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
 V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
 D = 128  # width of the player tokens
+ATTENDED = 64  # players the transformer attends to (the most relevant ones); every player keeps a token
+
+
+def relevance(players):
+    """How much each player matters to the seat, from its features (bridge/obs.ts), for the transformer's ATTENDED
+    slots, in tiers:
+    - the seat and unowned land (row 0);
+    - the other non-bot players (friends, enemies);
+    - the players the seat can attack, or that are attacking it or being attacked by it;
+    - then by share of the land.
+    Absent players come last."""
+    f = players
+    score = (8 * f[..., 2] + 4 * (f[..., 3] + f[..., 4]) + 2 * f[..., 12] + 2 * ((f[..., 13] > 0) | (f[..., 14] > 0))
+             + f[..., 7])
+    score[:, 0] += 8
+    return torch.where(f[..., 0] > 0, score, -1.0)
 
 
 def v1_spatial(spatial):
@@ -101,7 +117,8 @@ class Policy(nn.Module):
     - The map encoder, heat-map decoder and heads are PolicyV1's.
     - Each player becomes a token: its features, its buildings by type, and the map features (1/8 resolution)
       averaged over its land.
-    - A 2-layer transformer runs over all the tokens; absent players are masked out.
+    - A 2-layer transformer runs over the ATTENDED most relevant players (relevance); absent players are masked out.
+      The other players keep their tokens, so the pointer, the attention summary and the means still see everyone.
     - The core reads an attention summary queried by the map and the scalars, the seat's own token, and the means over
       its friends, its enemies and the bots.
     - The attack pointer reads the tokens.
@@ -149,9 +166,12 @@ class Policy(nn.Module):
         players = obs["players"]
         exists = players[..., 0] > 0
         t = self.embed(torch.cat([players, land_features(obs, f2).to(players.dtype)], 2))
+        top = relevance(players).topk(min(ATTENDED, players.shape[1]), dim=1).indices  # [N, ATTENDED]
+        index = top.unsqueeze(-1).expand(-1, -1, D)
+        attended = t.gather(1, index)
         for layer in self.encoder:
-            t = layer(t, src_key_padding_mask=~exists)
-        tokens = self.encoder_norm(t)
+            attended = layer(attended, src_key_padding_mask=~exists.gather(1, top))
+        tokens = self.encoder_norm(t.scatter(1, index, attended.to(t.dtype)))  # back in place; the rest unattended
         s = self.scalars(obs["scalars"])
         ask = self.ask(torch.cat([pooled, s], 1)).unsqueeze(1)
         attended = self.pool(ask, tokens, tokens, key_padding_mask=~exists, need_weights=False)[0].squeeze(1)
