@@ -145,7 +145,7 @@ Python trainer (GPU)                                    Node env workers (CPU, ~
 |---|---|---|
 | CNN encoder | ~48 ch × cell grid; 4×4 stride-4 stem; 3 IMPALA-style ResNet stages (2 blocks of 3×3 convs, no norm, zero-init residual) 96/192/256 ch to 1/16 res; avg+max pool | ~4.3M |
 | Heat-map decoder | U-Net-lite back to 1/4 res, pixel shuffle to cell res + 1×1 skip from the input, FiLM on action/unit type; separate spawn head | ~0.3M |
-| Player encoder | 2-layer transformer d=128 over all players, ≤64 only if too slow (features + building counts + spatial features pooled over their cells) | ~0.4M |
+| Player encoder | a token for every player (features + building counts + spatial features pooled over their cells); 2-layer transformer d=128 attending to the 64 most relevant | ~0.4M |
 | Scalars + core | MLPs → 512-d (dense or Soft-MoE) | ~0.8M |
 | Heads | action type, player pointer, bins, arc, value | ~0.3M |
 | Total (v1) | ≈2 GMAC per decision on a 32k-cell grid, ~95% of it in the CNN; measured ~6.5k decisions/s inference, ~2.3k/s training (4070 Ti, bf16) | ~6M |
@@ -452,13 +452,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - **Player encoder** (the design above, user decision 2026-10-02):
     - one token per player: its 17 features, its building counts by type, and the CNN features (1/8 resolution)
       averaged over its land;
-    - a 2-layer transformer (d 128, 4 heads, absent players masked);
+    - a 2-layer transformer (d 128, 4 heads, absent players masked) over the 64 most relevant players: the seat and
+      unowned land, the other non-bot players, the players it can attack or that fight it, then the biggest;
     - 4-head attention pooling queried by the map and scalar summary, plus the self token and one mean each over
       allies, enemies and bots, into the core;
     - the attack pointer reads the tokens.
-    - In 1v1 the enemy mean is the opponent itself; in FFA, attention can single out the strong neighbour. All players
-      are tokens: on paper ~+25% compute per decision (~0.3 GMAC next to the CNN's ~1.4). The ≤64-token selection comes
-      in only if the speed check fails.
+    - In 1v1 the enemy mean is the opponent itself; in FFA, attention can single out the strong neighbour.
+    - Every player keeps its token. With all 403 tokens in the transformer, the speed check failed (120–128
+      decisions/s), so it attends to the 64 most relevant (user decision 2026-10-03). The other players skip only the
+      attention step: the pointer, the pooling and the means still read them.
   - **MoE core** (decision 5c; user decision 2026-10-03):
     - a switch between a dense core and a Soft-MoE core with 8 experts. With one fused vector per decision it works as
       a router that blends the experts by situation. It costs well under 1% more compute, since the core is tiny next
@@ -481,8 +483,12 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - lower held-out NLL and higher attack-target accuracy (36% now) than the Phase 2 clone, on the same 224 games;
     - beats the Phase 2 clone ≥ 0.545 over 512 fixed games;
     - a 10-update PPO probe keeps ≥ 75% of Phase 2's decisions/s.
-  - **3A progress (2026-10-03): code done, speed check open.** Task list:
-    `docs/superpowers/plans/2026-10-03-phase3a-encoder.md`; branch `phase3`; 77 trainer and 32 bridge tests green.
+  - **3A progress (2026-10-03): code done, speed check passed with the 64-player attention; the training runs are
+    next.** Task lists:
+    - `docs/superpowers/plans/2026-10-03-phase3a-encoder.md`;
+    - `docs/superpowers/plans/2026-10-03-phase3a-attention64.md`.
+    Branch `phase3`; 79 trainer and 32 bridge tests green. Ledgers with every ruling:
+    `.superpowers/sdd/2026-10-03-phase3a-*/progress.md`.
     - Built:
       - 49 map channels as uint8 64ths, with the cell owners and the players' buildings in each row;
       - `PolicyV1`, which keeps the Phase 2 bots playing (inputs rebuilt within 1/128 of the Phase 2 code);
@@ -511,9 +517,24 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - One 128-row training minibatch: the Phase 2 network 62–64 ms, the Phase 3 network 93 ms. The player
         transformer over all 403 players is the largest extra cost (~16 ms); with 1 layer: 85 ms; with 64 tokens:
         72 ms.
-    - Open: the user decides between all 403 tokens at ~65% of Phase 2's speed, or a ≤64-player attention with
-      every player keeping a token. The decision comes before the BC refresh nights. The BC plateau probe (Phase 2
-      network) does not depend on it.
+    - **User decision (2026-10-03): attention over the 64 most relevant players, every player keeping its token.**
+      Tribes are harmless fillers, so they never need a slot.
+    - **Speed with it** (one run, 12 minibatches, 0.8 GB of other programs):
+      - the Phase 2 network 172 decisions/s; Phase 3 dense 142 and MoE 138: 80–82% of the Phase 2 network, and
+        73–75% of Phase 2's recorded 190;
+      - peak 10.9 GB, no spill. At 8 minibatches the Phase 3 networks still overflow (1.2–1.9 GB);
+      - MoE is 2.7% slower than dense, within the MoE rule's 5%.
+    - **Ruling:** Gate 3A's speed criterion counts as passed. The same-run comparison (80–82%) is the controlled
+      one; the old 190 was measured with the old observation code, and the Phase 2 network itself ranged 134–174 on
+      this PC today.
+    - **Next, in order:**
+      1. Crawl and purge before the first training night, never between the two (purge due by ~2026-10-10).
+      2. The BC plateau probe (~1 h, `trainer.bc --run bc-probe --init checkpoints/bc/update0060000.pt --workers 14
+         --games-per-worker 6 --updates 2000 --warmup 100`), then score it against the Phase 2 clone.
+      3. The two refresh nights, dense and MoE (`--run bc3-dense --core dense` and `--run bc3-moe --core moe`, both
+         `--workers 14 --games-per-worker 6`, in the restart loop).
+      4. The A/B scoring and the MoE rule.
+      5. The 512-game match against the Phase 2 clone.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
   - **Actions**, as flat types:
     - today's 5;
@@ -584,6 +605,12 @@ stagger). Gate A: frozen-world harness matches 100% per nuke. Gate B (metric): i
 - nations join the league as opponents;
 - per-mode specialist fine-tunes if they win;
 - a bigger model: the S/M/L CNN picked from BC scaling curves, and more MoE experts by upcycling;
+- the player transformer's attention cap (64 players, Phase 3A) revisited for FFA and Team:
+  - Casual lobbies often hold more than 64 real players (the user, 2026-10-03).
+  - Tribes are fillers: harmless, and usually extinct before the end, so they never need a slot. The relevance rule
+    already ranks every real player above every tribe.
+  - Options: a larger cap for those modes, or ranking real players by threat and distance. The transformer's weights
+    do not depend on the cap, so raising it keeps the trained network (a short fine-tune at most).
 - an optional rented GPU run.
 
 The sampler, augmentation and CNN sizes were moved here from Phase 3 on 2026-10-03.

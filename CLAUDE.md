@@ -95,9 +95,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - Networks: new runs record theirs in the checkpoint (`args["arch"]`, `"core"`); `--init` keeps the checkpoint's. A
   checkpoint without `"arch"` (Phase 2) loads as `PolicyV1`, which rebuilds its 22 input channels from today's 49
   (`v1_spatial`), so the Phase 2 bots still play.
-- GPU memory: ranked PPO with a Phase 3 network needs `--minibatches 12` on the 12 GB card. At the default 8 it
-  overflows by ~1.7 GB, Windows pages the rest into system RAM without an error, and the run gets 3–4× slower (watch
-  "Shared GPU memory" in Task Manager).
+- GPU memory: ranked PPO with a Phase 3 network needs `--minibatches 12` on the 12 GB card (peak ~10.9 GB). At the
+  default 8 it overflows by 1.2–1.9 GB, Windows pages the rest into system RAM without an error, and the run gets 2–4×
+  slower (watch "Shared GPU memory" in Task Manager).
 - `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and includes the learner
