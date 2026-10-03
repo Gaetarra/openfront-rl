@@ -10,7 +10,7 @@ import torch
 from trainer import bc, crawl
 from trainer.bc import Meter, bc_loss, is_val, label_legal, main
 from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import Policy
+from trainer.model import PolicyV1
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
 
@@ -63,7 +63,7 @@ class CloneTest(unittest.TestCase):
         legal = label_legal(obs, labels)
         self.assertGreater(int(legal.sum()), 40)
         torch.manual_seed(0)
-        model = Policy(dims).cuda().to(memory_format=torch.channels_last)
+        model = PolicyV1(dims).cuda().to(memory_format=torch.channels_last)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
         target = torch.zeros(len(labels), device="cuda")
         losses = []

@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from trainer.env import ROOT
-from trainer.model import Policy
+from trainer.model import PolicyV1
 from trainer.ppo import Outcomes, gae, main, parse_args, parser, resume_args, run_info, seat_rows
 
 
@@ -141,7 +141,7 @@ class SmokeTest(unittest.TestCase):
         init = ROOT / "checkpoints" / self.RUN / "init.pt"
         init.parent.mkdir(parents=True, exist_ok=True)
         dims = {"channels": 22, "playerFeatures": 17, "scalars": 16, "acts": 5, "troopBins": [0.1, 0.25, 0.5, 0.75, 1.0]}
-        torch.save({"model": Policy(dims).state_dict(), "args": {"widths": "64,128,192"}}, init)
+        torch.save({"model": PolicyV1(dims).state_dict(), "args": {"widths": "64,128,192"}}, init)
         main(["--run", self.RUN, "--workers", "1", "--games-per-worker", "2", "--steps", "8", "--minibatches", "2",
               "--epochs", "1", "--port", "0", "--timer", "1", "--nations", "0", "--seats", "2",
               "--init", str(init), "--opponent", str(init), "--kl-coef", "0.1", "--updates", "2"])

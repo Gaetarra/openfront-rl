@@ -1,4 +1,4 @@
-"""Policy network (PLAN "Architecture"): ResNet map encoder, U-Net-lite heat maps, player and scalar encoders, heads."""
+"""Policy networks (PLAN "Architecture"). PolicyV1 is the Phase 2 network, kept for its checkpoints."""
 import math
 
 import torch
@@ -6,10 +6,36 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
+from trainer.env import BUILDING_TYPES, BUILDINGS, OWNER
+
 ACT_NAMES = ["noop", "spawn", "attack", "boat", "build_city"]
 SPAWN, ATTACK, BOAT, BUILD = 1, 2, 3, 4
 N_MAPS = 3  # heat maps: spawn, boat landing, city
 MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
+V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
+
+
+def v1_spatial(spatial):
+    """The Phase 2 network's 22 input channels, in 64ths (int16), from the N_CHANNELS of trainer/env.py.
+    - The first 12 channels are the same.
+    - Its unit channels were (city, port, other structure, transport, warship) x (own, other), and a structure counted
+      1 whatever its level.
+    - The game keeps structures structureMinDist = 15 tiles apart and a cell spans at most 8 x 8 tiles, so a cell holds
+      at most one structure: its count is whether its channel is non-zero."""
+    total = lambda t: t.sum(1, dtype=torch.int16)
+    b = spatial[:, BUILDINGS:].unflatten(1, (len(BUILDING_TYPES), 4))  # [N, type, relation, H, W]
+    built = (b[:, :6] > 0).to(torch.int16) * 64
+    ships = b[:, 6:].to(torch.int16)
+    groups = (built[:, 0], built[:, 1], total(built[:, 2:]), ships[:, 0], ships[:, 1])  # each [N, relation, H, W]
+    units = torch.stack([torch.stack([g[:, 0], total(g[:, 1:])], 1) for g in groups], 1).flatten(1, 2)
+    return torch.cat([spatial[:, :OWNER].to(torch.int16), units], 1)
+
+
+def _spatial_input(x, weight):
+    """Channels in 64ths (uint8 or int16) as the conv input, channels-last. Under autocast it is bf16: k/64 is exact
+    for k < 256, and larger sums round as the bf16 cast of the Phase 2 values did. Otherwise it is the weights' dtype."""
+    dtype = torch.bfloat16 if torch.is_autocast_enabled("cuda") else weight.dtype
+    return x.contiguous(memory_format=torch.channels_last).to(dtype).mul_(1 / 64)
 
 
 class Res(nn.Module):
@@ -25,23 +51,26 @@ class Res(nn.Module):
         return x + self.c2(F.relu(self.c1(F.relu(x))))
 
 
-class Policy(nn.Module):
+class PolicyV1(nn.Module):
+    """The Phase 2 network, kept for its checkpoints (those without "arch"). It reads its 22 input channels and 17
+    player features, rebuilt from today's observations."""
+
     def __init__(self, dims, widths=(64, 128, 192)):
         super().__init__()
-        c_in, n_feat, n_scal = dims["channels"], dims["playerFeatures"], dims["scalars"]
+        n_scal = dims["scalars"]
         self.n_bins = len(dims["troopBins"])
         c1, c2, c3 = widths
-        self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
+        self.stem = nn.Conv2d(V1_CHANNELS, c1, 4, stride=4)
         self.s1 = nn.Sequential(Res(c1), Res(c1))
         self.d2, self.s2 = nn.Conv2d(c1, c2, 2, stride=2), nn.Sequential(Res(c2), Res(c2))
         self.d3, self.s3 = nn.Conv2d(c2, c3, 2, stride=2), nn.Sequential(Res(c3), Res(c3))
-        self.players = nn.Sequential(nn.Linear(n_feat, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU())
+        self.players = nn.Sequential(nn.Linear(V1_FEATURES, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU())
         self.scalars = nn.Sequential(nn.Linear(n_scal, 128), nn.ReLU())
         self.core = nn.Sequential(nn.Linear(2 * c3 + 256, 512), nn.ReLU(), nn.Linear(512, 512), nn.ReLU())
         self.film = nn.Linear(512, 2 * c1)
         self.u3, self.u2 = nn.Conv2d(c3, c2, 1), nn.Conv2d(c2, c1, 1)
         self.shuffle = nn.Conv2d(c1, N_MAPS * 16, 1)
-        self.skip = nn.Conv2d(c_in, N_MAPS, 1)
+        self.skip = nn.Conv2d(V1_CHANNELS, N_MAPS, 1)
         self.type_head = nn.Linear(512, dims["acts"])
         self.bin_head = nn.Linear(512, 2 * self.n_bins)
         self.query, self.key = nn.Linear(512, 128), nn.Linear(128, 128)
@@ -52,13 +81,14 @@ class Policy(nn.Module):
             nn.init.zeros_(layer.bias)
 
     def forward(self, obs):
-        x = obs["spatial"].contiguous(memory_format=torch.channels_last)
+        x = _spatial_input(v1_spatial(obs["spatial"]), self.stem.weight)
+        players = obs["players"][..., :V1_FEATURES]
         f1 = self.s1(self.stem(x))
         f2 = self.s2(self.d2(F.relu(f1)))
         f3 = self.s3(self.d3(F.relu(f2)))
         pooled = torch.cat([f3.mean((2, 3)), f3.amax((2, 3))], 1)
-        emb = self.players(obs["players"])
-        exists = obs["players"][..., :1]
+        emb = self.players(players)
+        exists = players[..., :1]
         p_pool = (emb * exists).sum(1) / exists.sum(1).clamp(min=1)
         h = self.core(torch.cat([pooled, p_pool, self.scalars(obs["scalars"])], 1))
         g = f2 + F.interpolate(self.u3(F.relu(f3)), scale_factor=2)
@@ -154,6 +184,6 @@ def _kl(p, q):
 def load_net(path, dims, device="cuda"):
     """A frozen policy from a trainer.bc or trainer.ppo checkpoint, in eval mode."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    net = Policy(dims, tuple(int(w) for w in ckpt["args"]["widths"].split(",")))
+    net = PolicyV1(dims, tuple(int(w) for w in ckpt["args"]["widths"].split(",")))
     net.load_state_dict(ckpt["model"])
     return net.to(device).to(memory_format=torch.channels_last).eval().requires_grad_(False)

@@ -4,9 +4,14 @@ import unittest
 import numpy as np
 import torch
 
-from trainer.env import LAND, N_CHANNELS, OWN, RANKED_1V1, ROOT, VALID, VecEnv
+from trainer.env import (BUILDING_TYPES, BUILDINGS, LAND, N_CHANNELS, OWN, OWNER, OWNER_FEATURES, RANKED_1V1, ROOT,
+                         VALID, VecEnv, quantize_)
+from trainer.model import v1_spatial
 
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
+FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
+UNIT_GROUP_V1 = {"City": 0, "Port": 1, "Factory": 2, "Missile Silo": 2, "SAM Launcher": 2, "Defense Post": 2,
+                 "Transport": 3, "Warship": 4}
 
 
 def random_legal(obs, rng):
@@ -22,20 +27,78 @@ def random_legal(obs, rng):
     return np.array(rows, np.int64)
 
 
+def watch_observations(env, keep):
+    """Wraps env._observe so keep(args, obs) sees every observation with its inputs, while the env's cell state still
+    matches them."""
+    observe = env._observe
+
+    def spy(*args):
+        obs = observe(*args)
+        keep(args, obs)
+        return obs
+
+    env._observe = spy
+
+
+def phase2_spatial(env, players, rel, units):
+    """The 22 channels Phase 2's VecEnv._observe built (copied from it at commit b6c05ea), to check v1_spatial."""
+    N, S, P, hw, dev = env.N, env.S, env.P, env.H * env.W, env.device
+    row_env = torch.arange(N, device=dev) // S
+    area = env.area[row_env][:, None]
+    rel_t = torch.from_numpy(rel.reshape(N, P).astype(np.int64)).to(dev)
+    pl = torch.from_numpy(players.reshape(N, P, env.F)).to(dev)
+    x = torch.zeros(N, 22, hw, device=dev)
+    terr = env.terrain[row_env]
+    x[:, 0:3] = terr[:, 0:3] / area[:, None]
+    x[:, 3] = terr[:, 3] / 31
+    x[:, 4] = (terr[:, 4] > 0).float()
+    flat = row_env[:, None] * hw + torch.arange(hw, device=dev)
+    own = torch.zeros(N, 4, hw, device=dev)
+    for o, n in ((env.o1, env.n1), (env.o2, env.n2)):
+        owner = o[flat]
+        frac = n[flat] / area
+        r = torch.gather(rel_t, 1, owner)
+        own.scatter_add_(1, (r - 1).clamp(min=0).unsqueeze(1), (frac * (r > 0)).unsqueeze(1))
+        x[:, 10] += frac * torch.gather(pl[..., 16], 1, owner)
+    x[:, 5:9] = own
+    x[:, 9] = (x[:, 0] - own.sum(1)).clamp(min=0)
+    x[:, 11] = env.fo[flat] / area
+    rec = np.concatenate([u for _, u in units])
+    if len(rec):
+        group_of = torch.tensor([UNIT_GROUP_V1.get(t, -1) for t in env.dims["unitTypes"]], device=dev)
+        transport = env.dims["unitTypes"].index("Transport")
+        e = torch.from_numpy(np.concatenate([np.full(len(u), i, np.int64) for i, u in units])).to(dev)
+        typ = torch.from_numpy(rec["type"].astype(np.int64)).to(dev)
+        owner = torch.from_numpy(rec["owner"].astype(np.int64)).to(dev)
+        cell = torch.from_numpy(rec["cell"].astype(np.int64)).to(dev)
+        troops = torch.from_numpy(rec["troops"].astype(np.float32)).to(dev)
+        group = group_of[typ]
+        value = torch.where(typ == transport, torch.log1p(troops) / 10, torch.ones_like(troops))
+        for s in range(S):
+            row = e * S + s
+            r = rel_t[row, owner]
+            keep = (group >= 0) & (r > 0)
+            ch = 12 + 2 * group + (r != 1).long()
+            x.index_put_((row[keep], ch[keep], cell[keep]), value[keep], accumulate=True)
+    return x.view(N, 22, env.H, env.W)
+
+
 class VecEnvTest(unittest.TestCase):
     def test_observations_during_random_play(self):
         env = VecEnv(ONION, workers=1, games_per_worker=2, seed="t")
         try:
             obs = env.obs
             self.assertEqual(obs["spatial"].shape, (2, N_CHANNELS, 64, 64))
-            self.assertEqual(obs["spatial"].dtype, torch.bfloat16)
-            self.assertEqual(obs["players"].shape, (2, 5, 17))
+            self.assertEqual(obs["spatial"].dtype, torch.uint8)
+            self.assertEqual(obs["players"].shape, (2, 5, 25))
+            self.assertEqual((obs["owners"].shape, obs["owners"].dtype), ((2, 2, 64 * 64), torch.int16))
+            self.assertEqual(obs["owner_land"].dtype, torch.uint8)
             self.assertEqual(obs["cell_mask"].shape, (2, 3, 64 * 64))
             self.assertTrue(obs["cell_mask"][:, 0].any(), "spawn cells exist at the start")
             rng = np.random.default_rng(0)
             for _ in range(80):
                 obs, rew, done, infos, invalid = env.step(random_legal(obs, rng))
-                x = obs["spatial"].float()
+                x = obs["spatial"].float() / 64
                 self.assertTrue(torch.isfinite(x).all())
                 self.assertLessEqual(float(x[:, LAND:OWN + 4].max()), 1.0 + 1e-3)
             self.assertGreater(float(obs["spatial"][:, OWN].float().sum()), 0, "the seats own land")
@@ -112,6 +175,72 @@ class VecEnvTest(unittest.TestCase):
             self.assertEqual(len(env.seats_of[0]), 2)
         finally:
             env.close()
+
+
+
+class QuantizeTest(unittest.TestCase):
+    def test_values_are_rounded_to_64ths_and_saturate(self):
+        q = quantize_(torch.tensor([0.0, 0.004, 0.0079, 0.5, 1.0, 3.99, 5.0]))
+        self.assertEqual(q.dtype, torch.uint8)
+        self.assertEqual(q.tolist(), [0, 0, 1, 32, 64, 255, 255])  # 5.0 saturates: it does not wrap to 64
+
+
+class ChannelTest(unittest.TestCase):
+    """One replay of the fixture record, checked against the channel definitions and against the Phase 2 code."""
+
+    @classmethod
+    def setUpClass(cls):
+        env = VecEnv(RANKED_1V1, workers=1, games_per_worker=1, seed="channels", records=[FIXTURE])
+        cls.seen, cls.legacy_error = None, 0.0
+        structures = [env.dims["unitTypes"].index(t) for t in BUILDING_TYPES[:6]]
+
+        def keep(args, obs):
+            players, rel, _, _, _, units = args
+            old = phase2_spatial(env, players, rel, units).to(torch.bfloat16).float()
+            new = v1_spatial(obs["spatial"]).to(torch.bfloat16).float() / 64  # what PolicyV1 reads
+            cls.legacy_error = max(cls.legacy_error, float((new - old).abs().max()))
+            rec = np.concatenate([u for _, u in units])
+            n = int(np.isin(rec["type"], structures).sum())
+            if cls.seen is None or n >= cls.seen["structures"]:  # keep the observation with the most structures
+                cls.seen = {"structures": n, "players": players[0].copy(), "rel": rel[0].copy(), "units": rec.copy(),
+                            "spatial": obs["spatial"].cpu().numpy(),
+                            "features": obs["players"][:, :, 17:].cpu().numpy(),
+                            "cells": [t[:env.H * env.W].cpu().numpy() for t in (env.o1, env.n1, env.o2, env.n2)],
+                            "area": float(env.area[0])}
+
+        try:
+            watch_observations(env, keep)
+            for _ in range(560):  # past the end of the record (552 windows), whatever window it started at
+                env.step()
+            cls.names, cls.hw, cls.P = env.dims["unitTypes"], env.H * env.W, env.P
+        finally:
+            env.close()
+
+    def test_old_networks_get_the_phase2_inputs(self):
+        self.assertLessEqual(self.legacy_error, 1 / 32)  # 1/64 rounding of up to 3 summed channels, then bf16
+
+    def test_owner_and_building_channels_follow_their_definitions(self):
+        s = self.seen
+        self.assertGreaterEqual(s["structures"], 5, "the record's structures were seen")
+        o1, n1, o2, n2 = s["cells"]
+        for seat in range(2):
+            players, rel = s["players"][seat], s["rel"][seat]
+            want = np.zeros((N_CHANNELS, self.hw))
+            for o, n in ((o1, n1), (o2, n2)):
+                share = n / s["area"] * (rel[o] > 0)
+                for i, f in enumerate(OWNER_FEATURES):
+                    want[OWNER + i] += share * players[o, f]
+            levels = np.zeros((self.P, len(BUILDING_TYPES)))
+            for u in s["units"]:
+                name = self.names[u["type"]]
+                if name in BUILDING_TYPES:
+                    k = BUILDING_TYPES.index(name)
+                    value = np.log1p(u["troops"]) / 10 if name == "Transport" else max(int(u["level"]), 1)
+                    want[BUILDINGS + 4 * k + int(rel[u["owner"]]) - 1, u["cell"]] += value
+                    levels[u["owner"], k] += value
+            got = s["spatial"][seat].reshape(N_CHANNELS, -1)[OWNER:].astype(np.int64)
+            self.assertLessEqual(np.abs(got - np.clip(np.round(want[OWNER:] * 64), 0, 255)).max(), 1)
+            np.testing.assert_allclose(s["features"][seat], np.log1p(levels) / 3, atol=1e-5)
 
 
 if __name__ == "__main__":

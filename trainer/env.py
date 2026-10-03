@@ -22,15 +22,24 @@ CELL = np.dtype([("idx", "<u4"), ("o1", "<u2"), ("o2", "<u2"), ("n1", "u1"), ("n
 UNIT = np.dtype([("type", "u1"), ("level", "u1"), ("owner", "<u2"), ("cell", "<u4"), ("troops", "<f4")])
 assert CELL.itemsize == 11 and UNIT.itemsize == 12
 
-# Spatial channels (tile counts are divided by the tiles per cell)
+# Spatial channels. They reach the model as uint8 in 64ths of a unit (quantize_; trainer/model.py divides by 64): tile
+# shares stay exact, other values move by at most 1/128, and PPO stores its rollouts as 8 bits. Tile counts are divided
+# by the tiles per cell.
 LAND, SHORE, OCEAN, HEIGHT, VALID = 0, 1, 2, 3, 4
 OWN = 5  # 5..8: land owned by self, friendly, enemy, bot (relation codes 1..4 from the worker)
 UNOWNED, DENSITY, FALLOUT = 9, 10, 11
-UNITS = 12  # 12..21: (city, port, other structure, transport, warship) x (own, other)
-N_CHANNELS = 22
-UNIT_GROUP = {"City": 0, "Port": 1, "Factory": 2, "Missile Silo": 2, "SAM Launcher": 2, "Defense Post": 2,
-              "Transport": 3, "Warship": 4}
+OWNER = 12  # 12..16: the cell's owners' player features OWNER_FEATURES, weighted by their shares of its land
+OWNER_FEATURES = (8, 9, 10, 13, 14)  # log troops, troops / max, log gold, troops attacking the seat, sent at it
+BUILDINGS = 17  # 17..48: BUILDING_TYPES x relation (self, friendly, enemy, bot), see VecEnv._add_units
+BUILDING_TYPES = ("City", "Port", "Factory", "Missile Silo", "SAM Launcher", "Defense Post", "Transport", "Warship")
+N_CHANNELS = BUILDINGS + 4 * len(BUILDING_TYPES)
 DENSITY_FEATURE = 16  # player feature: log troops per tile
+
+
+def quantize_(x):
+    """x in 64ths as uint8 (x itself is overwritten on the way). Values above 255/64 (a structure above level 3,
+    several warships in one cell) saturate."""
+    return x.mul_(64).round_().clamp_(0, 255).to(torch.uint8)
 
 # The Phase 1 gate setup, and ranked 1v1 games (the worker draws map, size, bots and timer from the official ranked 1v1
 # playlist, bridge/setups.ts; of the other fields only "seats" is used).
@@ -133,9 +142,11 @@ class VecEnv:
         self.P, self.S = d["slots"], d["seats"]
         self.F, self.K, self.T = d["playerFeatures"], d["scalars"], d["acts"]
         self.N = self.E * self.S
-        self.dims = {**d, "channels": N_CHANNELS, "H": self.H, "W": self.W}
+        self.dims = {**d, "channels": N_CHANNELS, "playerFeatures": self.F + len(BUILDING_TYPES), "H": self.H,
+                     "W": self.W}
         dev, hw = self.device, self.H * self.W
-        self.unit_group = torch.tensor([UNIT_GROUP.get(t, -1) for t in d["unitTypes"]], device=dev)
+        self.building = torch.tensor([BUILDING_TYPES.index(t) if t in BUILDING_TYPES else -1 for t in d["unitTypes"]],
+                                     device=dev)
         self.transport = d["unitTypes"].index("Transport")
         self.terrain = torch.zeros(self.E, 5, hw, device=dev)  # land, shore, ocean, height, inside the map
         self.area = torch.full((self.E,), 64.0, device=dev)  # tiles per cell of each game
@@ -243,6 +254,13 @@ class VecEnv:
             t[idx] = torch.from_numpy(rec[name].astype(np.int64 if name[0] == "o" else np.float32)).to(dev)
 
     def _observe(self, players, rel, scalars, types, attack, units):
+        """The model's inputs, one row per seat:
+        - "spatial": uint8 [N, N_CHANNELS, H, W], in 64ths;
+        - "players": [N, P, F + len(BUILDING_TYPES)], the worker's features, then the player's buildings by type
+          (log1p of their summed values, / 3);
+        - "owners" (int16) and "owner_land" (uint8) [N, 2, H * W]: each cell's two largest owners and their shares of
+          it in 64ths, for the model's per-player map features;
+        - the scalars and the masks."""
         N, S, P, hw, dev = self.N, self.S, self.P, self.H * self.W, self.device
         row_env = torch.arange(N, device=dev) // S
         area = self.area[row_env][:, None]  # [N, 1]
@@ -256,44 +274,58 @@ class VecEnv:
         x[:, VALID] = valid.float()
         flat = row_env[:, None] * hw + torch.arange(hw, device=dev)
         own = torch.zeros(N, 4, hw, device=dev)
-        dens = pl[..., DENSITY_FEATURE]
+        owners, shares = [], []
         for o, n in ((self.o1, self.n1), (self.o2, self.n2)):
             owner = o[flat]
             frac = n[flat] / area
             r = torch.gather(rel_t, 1, owner)
-            own.scatter_add_(1, (r - 1).clamp(min=0).unsqueeze(1), (frac * (r > 0)).unsqueeze(1))
-            x[:, DENSITY] += frac * torch.gather(dens, 1, owner)
+            held = frac * (r > 0)  # owner 0 (no owner) holds nothing
+            own.scatter_add_(1, (r - 1).clamp(min=0).unsqueeze(1), held.unsqueeze(1))
+            x[:, DENSITY] += frac * torch.gather(pl[..., DENSITY_FEATURE], 1, owner)
+            for i, f in enumerate(OWNER_FEATURES):
+                x[:, OWNER + i] += held * torch.gather(pl[..., f], 1, owner)
+            owners.append(owner)
+            shares.append(frac)
         x[:, OWN:OWN + 4] = own
         x[:, UNOWNED] = (x[:, LAND] - own.sum(1)).clamp(min=0)
         x[:, FALLOUT] = self.fo[flat] / area
-        self._add_units(x, units, rel_t)
+        buildings = self._add_units(x, units, rel_t)
         cell_mask = torch.stack([x[:, UNOWNED] > 0,
                                  (x[:, SHORE] > 0) & (x[:, LAND] - x[:, OWN] > 1e-6),
                                  x[:, OWN] > 0], 1) & valid[:, None]
         return {
-            "spatial": x.view(N, N_CHANNELS, self.H, self.W).to(torch.bfloat16),
+            "spatial": quantize_(x).view(N, N_CHANNELS, self.H, self.W),
             "scalars": torch.from_numpy(scalars.reshape(N, self.K)).to(dev),
-            "players": pl,
+            "players": torch.cat([pl, torch.log1p(buildings[row_env]) / 3], 2),
+            "owners": torch.stack(owners, 1).to(torch.int16),
+            "owner_land": quantize_(torch.stack(shares, 1)),
             "type_mask": torch.from_numpy(types.reshape(N, self.T)).to(dev),
             "attack_mask": torch.from_numpy(attack.reshape(N, P)).to(dev),
             "cell_mask": cell_mask,
         }
 
     def _add_units(self, x, units, rel_t):
+        """Paints each seat's buildings into x by type and relation, and returns every player's buildings by type
+        [E, P, len(BUILDING_TYPES)]. A structure counts its level (under construction: 1), a transport its log troops
+        / 10, a warship 1."""
+        buildings = torch.zeros(self.E, self.P, len(BUILDING_TYPES), device=self.device)
         rec = np.concatenate([u for _, u in units])
         if len(rec) == 0:
-            return
+            return buildings
         dev = self.device
         env = torch.from_numpy(np.concatenate([np.full(len(u), e, np.int64) for e, u in units])).to(dev)
         typ = torch.from_numpy(rec["type"].astype(np.int64)).to(dev)
         owner = torch.from_numpy(rec["owner"].astype(np.int64)).to(dev)
         cell = torch.from_numpy(rec["cell"].astype(np.int64)).to(dev)
+        level = torch.from_numpy(rec["level"].astype(np.float32)).to(dev)
         troops = torch.from_numpy(rec["troops"].astype(np.float32)).to(dev)
-        group = self.unit_group[typ]
-        value = torch.where(typ == self.transport, torch.log1p(troops) / 10, torch.ones_like(troops))
+        kind = self.building[typ]
+        value = torch.where(typ == self.transport, torch.log1p(troops) / 10, level.clamp(min=1))
+        keep = kind >= 0
+        buildings.index_put_((env[keep], owner[keep], kind[keep]), value[keep], accumulate=True)
         for s in range(self.S):
             row = env * self.S + s
             r = rel_t[row, owner]
-            keep = (group >= 0) & (r > 0)
-            ch = UNITS + 2 * group + (r != 1).long()
-            x.index_put_((row[keep], ch[keep], cell[keep]), value[keep], accumulate=True)
+            k = keep & (r > 0)
+            x.index_put_((row[k], BUILDINGS + 4 * kind[k] + r[k] - 1, cell[k]), value[k], accumulate=True)
+        return buildings

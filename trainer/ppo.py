@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from trainer.control import Control, serve
 from trainer.env import GAME_DIR, RANKED_1V1, ROOT, VecEnv
-from trainer.model import ACT_NAMES, ActionDist, Policy, load_net
+from trainer.model import ACT_NAMES, ActionDist, PolicyV1, load_net
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
 
@@ -221,7 +221,7 @@ def main(argv=None):
 
     envs = VecEnv(env_config(a), a.workers, a.games_per_worker, seed=f"{a.run}-{a.seed}", device=device,
                   episodes=state["episodes"] if state else None, log_dir=run_dir / "workers")
-    model = Policy(envs.dims, tuple(int(w) for w in a.widths.split(","))).to(device)
+    model = PolicyV1(envs.dims, tuple(int(w) for w in a.widths.split(","))).to(device)
     model = model.to(memory_format=torch.channels_last)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr, eps=1e-5)
     update = global_step = 0

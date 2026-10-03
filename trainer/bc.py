@@ -19,7 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 from trainer import crawl
 from trainer.control import Control, serve
 from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, Policy
+from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, PolicyV1
 from trainer.ppo import game_commit, resume_args, save_checkpoint
 
 CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes from (trainer/model.py)
@@ -174,7 +174,7 @@ def main(argv=None):
     if a.val_workers:
         val_envs = VecEnv(RANKED_1V1, a.val_workers, a.games_per_worker, seed="val", device=device, records=val,
                           log_dir=run_dir / "val_workers")
-    model = Policy(envs.dims, tuple(int(w) for w in a.widths.split(","))).to(device)
+    model = PolicyV1(envs.dims, tuple(int(w) for w in a.widths.split(","))).to(device)
     model = model.to(memory_format=torch.channels_last)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr, eps=1e-5)
     update = global_step = 0
