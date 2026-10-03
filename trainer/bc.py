@@ -20,14 +20,13 @@ from trainer import crawl
 from trainer.control import Control, serve
 from trainer.env import RANKED_1V1, ROOT, VecEnv
 from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, Policy
-from trainer.ppo import game_commit, save_checkpoint
+from trainer.ppo import game_commit, resume_args, save_checkpoint
 
-KEEP_ON_RESUME = ("resume", "port", "duty", "gpu_temp_limit", "updates")
 CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes from (trainer/model.py)
 PHASES = ("spawn", "early", "mid", "late")
 
 
-def parse_args(argv=None):
+def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", default="bc", help="name for checkpoints/<run> and runs/<run>")
     p.add_argument("--resume", action="store_true", help="continue from checkpoints/<run>/latest.pt")
@@ -50,7 +49,11 @@ def parse_args(argv=None):
     p.add_argument("--port", type=int, default=8787, help="control page port (0 = any free port)")
     p.add_argument("--duty", type=float, default=1.0, help="start throttled: fraction of time spent working")
     p.add_argument("--gpu-temp-limit", type=int, default=0, help="auto-pause at this GPU temperature in C (0 = off)")
-    return p.parse_args(argv)
+    return p
+
+
+def parse_args(argv=None):
+    return parser().parse_args(argv)
 
 
 def is_val(game_id, share):
@@ -149,7 +152,7 @@ def main(argv=None):
     state = None
     if a.resume:
         state = torch.load(ckpt_dir / "latest.pt", map_location="cpu", weights_only=False)
-        a = argparse.Namespace(**{**state["args"], **{k: getattr(a, k) for k in KEEP_ON_RESUME}})
+        a = resume_args(parser(), argv, state["args"], ("updates",))
     random.seed(a.seed)
     np.random.seed(a.seed)
     torch.manual_seed(a.seed)

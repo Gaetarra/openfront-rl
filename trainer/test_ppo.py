@@ -6,7 +6,7 @@ import torch
 
 from trainer.env import ROOT
 from trainer.model import Policy
-from trainer.ppo import Outcomes, gae, main, parse_args, run_info, seat_rows
+from trainer.ppo import Outcomes, gae, main, parse_args, parser, resume_args, run_info, seat_rows
 
 
 class RunInfoTest(unittest.TestCase):
@@ -24,6 +24,25 @@ class RunInfoTest(unittest.TestCase):
         self.assertEqual(onion["Against"], "3 Easy nations")
         self.assertEqual((onion["Starts from"], onion["KL penalty to the start"]), ("random weights", "none"))
         self.assertNotIn("Learner seat", onion, "a single agent seat")
+
+
+class ResumeArgsTest(unittest.TestCase):
+    SAVED = vars(parse_args(["--run", "r", "--setup", "ranked1v1", "--lr", "1e-4", "--kl-coef", "0.2"]))
+
+    def resume(self, *flags):
+        return resume_args(parser(), ["--run", "r", "--resume", *flags], self.SAVED, ("updates", "kl_coef"))
+
+    def test_a_resume_keeps_the_runs_settings(self):
+        a = self.resume("--port", "0", "--updates", "9")
+        self.assertEqual((a.setup, a.lr, a.kl_coef, a.updates, a.port, a.resume), ("ranked1v1", 1e-4, 0.2, 9, 0, True))
+
+    def test_a_given_kl_coef_replaces_the_runs(self):
+        self.assertEqual(self.resume("--kl-coef", "0.05").kl_coef, 0.05)
+
+    def test_flags_a_resume_would_ignore_are_refused(self):
+        with self.assertRaisesRegex(SystemExit, r"--lr would be ignored.*--init checkpoints/r/latest\.pt"):
+            self.resume("--lr", "2.5e-4")  # the default value, but not the run's
+        self.resume("--lr", "1e-4", "--setup", "ranked1v1")  # the run's own values pass
 
 
 class SeatRowsTest(unittest.TestCase):

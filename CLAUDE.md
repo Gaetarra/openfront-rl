@@ -83,8 +83,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   restart loop: `for ($i = 1; $i -le 5; $i++) { .venv/Scripts/python -m trainer.ppo --run <name> --resume --updates <N>;
   if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 60 }` (a new run starts once without `--resume`; it checkpoints
   every 25 updates).
-- `--resume` keeps the checkpoint's settings except `KEEP_ON_RESUME` (`trainer/ppo.py`, `trainer/bc.py`) and, for PPO,
-  a given `--kl-coef`; other flags are ignored.
+- `--resume` keeps the run's settings and refuses flags it would ignore. It takes `--updates` (and, for PPO,
+  `--kl-coef`) and this sitting's `--port`, `--duty` and `--gpu-temp-limit`. To change anything else, start a new
+  run from the checkpoint with `--init`.
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and includes the learner
   adapting to the games in progress (it read 0.84 where Gate B gave 0.63). Compare snapshots with `trainer.eval` on the
   same fixed seeds.

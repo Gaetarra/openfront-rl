@@ -22,10 +22,10 @@ from trainer.control import Control, serve
 from trainer.env import GAME_DIR, RANKED_1V1, ROOT, VecEnv
 from trainer.model import ACT_NAMES, ActionDist, Policy, load_net
 
-KEEP_ON_RESUME = ("resume", "port", "duty", "gpu_temp_limit", "updates")
+SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
 
 
-def parse_args(argv=None):
+def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", default="onion", help="name for checkpoints/<run> and runs/<run>")
     p.add_argument("--resume", action="store_true", help="continue from checkpoints/<run>/latest.pt")
@@ -63,7 +63,31 @@ def parse_args(argv=None):
     p.add_argument("--port", type=int, default=8787, help="control page port (0 = any free port)")
     p.add_argument("--duty", type=float, default=1.0, help="start throttled: fraction of time spent working")
     p.add_argument("--gpu-temp-limit", type=int, default=0, help="auto-pause at this GPU temperature in C (0 = off)")
-    return p.parse_args(argv)
+    return p
+
+
+def parse_args(argv=None):
+    return parser().parse_args(argv)
+
+
+def given_flags(p, argv):
+    """The flags given on the command line, with their parsed values (an explicit value equal to the default counts)."""
+    unset = object()
+    ns = argparse.Namespace(**{k: unset for k in vars(p.parse_args([]))})
+    return {k: v for k, v in vars(p.parse_args(argv, namespace=ns)).items() if v is not unset}
+
+
+def resume_args(p, argv, saved, may_change):
+    """A resumed run's settings: the checkpoint's (`saved`), this sitting's SESSION flags and the given `may_change`
+    flags. Any other flag would be ignored, so one given with a value other than the run's is refused."""
+    given, a = given_flags(p, argv), p.parse_args(argv)
+    refused = [k for k, v in given.items() if k not in (*SESSION, *may_change, "run", "resume") and saved.get(k) != v]
+    if refused:
+        flags = ", ".join("--" + k.replace("_", "-") for k in refused)
+        raise SystemExit(f"--resume keeps the run's settings, so {flags} would be ignored. Drop them, or start a new "
+                         f"run from its weights: --run <new name> --init checkpoints/{a.run}/latest.pt")
+    return argparse.Namespace(**{**vars(p.parse_args([])), **saved, **{k: getattr(a, k) for k in SESSION},
+                                 **{k: given[k] for k in may_change if k in given}, "resume": True})
 
 
 def env_config(a):
@@ -182,12 +206,8 @@ def main(argv=None):
     ckpt_dir = ROOT / "checkpoints" / a.run
     state = None
     if a.resume:
-        given = a
         state = torch.load(ckpt_dir / "latest.pt", map_location="cpu", weights_only=False)
-        a = argparse.Namespace(**{**vars(parse_args([])), **state["args"],
-                                  **{k: getattr(given, k) for k in KEEP_ON_RESUME}})
-        if given.kl_coef is not None:
-            a.kl_coef = given.kl_coef
+        a = resume_args(parser(), argv, state["args"], ("updates", "kl_coef"))
     a.kl_coef = a.kl_coef or 0.0
     ranked = a.setup == "ranked1v1"
     a.steps = a.steps or (48 if ranked else 128)
