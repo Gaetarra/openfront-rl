@@ -8,7 +8,9 @@ then improving through self-play. The full design, phases and decisions are in [
 
 **Status:** Phase 2 done. A clone of ranked 1v1 players, trained by behaviour cloning on 16k public replays, beats
 random play 98% of the time and a scripted expander 95% of the time; PPO from the clone then beats the clone 77% of the
-time (see [docs/PLAN.md](docs/PLAN.md), "Phase 2 results"). Next: Phase 3, the full action set and more game modes.
+time (see [docs/PLAN.md](docs/PLAN.md), "Phase 2 results"). Next: Phase 3. First the bot gets a better view of the
+other players and the map, plus a fixed imitation training (3A). Then it gets every human action (3B), then ranked 2v2
+(3C).
 Training: `.venv/Scripts/python -m trainer.ppo --run <name>`, then open the control page at http://127.0.0.1:8787.
 
 ## Layout

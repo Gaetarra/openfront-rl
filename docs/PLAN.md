@@ -81,7 +81,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
    modest and is sized by the GPU benchmark (doubling its width ≈ 4× compute ≈ 4× less experience per day). The
    "brain" (core, player transformer, heads, MoE experts) costs ~1 MAC per parameter per decision, so it can grow from
    ~1.5M to ~10–30M params almost free. Start ~6M total (M width, Phase 0); pick the final size from BC scaling curves
-   (S/M/L on the same human data), since more experience usually beats a bigger net on one GPU.
+   (S/M/L on the same human data), since more experience usually beats a bigger net on one GPU. Phases 1–3 use S
+   (64/128/192): PPO is GPU-bound at ~190 decisions/s and M measured ~1.6× slower, so the CNN size experiments wait for
+   Phase 6, and the brain grows first, through the MoE core (Phase 3A).
 7. **Maps & generalisation:** official maps weighted like the real playlist + dihedral augmentation (mirror/rotate the
    bins and nation coordinates; the sim stays self-consistent) + procedural maps (TS port of the map-generator pipeline,
    validated byte-for-byte on official maps; noise continents/islands/rivers/mountains, random sizes/aspects, random
@@ -143,7 +145,7 @@ Python trainer (GPU)                                    Node env workers (CPU, ~
 |---|---|---|
 | CNN encoder | ~48 ch × cell grid; 4×4 stride-4 stem; 3 IMPALA-style ResNet stages (2 blocks of 3×3 convs, no norm, zero-init residual) 96/192/256 ch to 1/16 res; avg+max pool | ~4.3M |
 | Heat-map decoder | U-Net-lite back to 1/4 res, pixel shuffle to cell res + 1×1 skip from the input, FiLM on action/unit type; separate spawn head | ~0.3M |
-| Player encoder | 2-layer transformer d=128 over ≤64 players (features + spatial features pooled over their cells) | ~0.4M |
+| Player encoder | 2-layer transformer d=128 over all players, ≤64 only if too slow (features + building counts + spatial features pooled over their cells) | ~0.4M |
 | Scalars + core | MLPs → 512-d (dense or Soft-MoE) | ~0.8M |
 | Heads | action type, player pointer, bins, arc, value | ~0.3M |
 | Total (v1) | ≈2 GMAC per decision on a 32k-cell grid, ~95% of it in the CNN; measured ~6.5k decisions/s inference, ~2.3k/s training (4070 Ti, bf16) | ~6M |
@@ -410,49 +412,143 @@ becomes optional); games are watched in the game's own client; BC imitates all p
     update 6000's Gate B games).
   - The detailed run log, with every ruling and probe number, is the local, git-ignored
     `.superpowers/sdd/2026-10-01-phase2-bc-slice/progress.md`.
+  - Taken up by the 2026-10-03 planning session:
+    - the scoring command, the plateau fix and the recordings, in Phase 3A;
+    - the new gate, the frozen evaluations during training and the league, in Phase 4.
 
-**Phase 3 — Full environment + BC refresh**
-- Full v1 actions + masks, spawn head, observation channels for every unit type, nukes in flight and SAM coverage,
-  added by network surgery (zero-init heads, decision 14); the extractor maps every intent type. `Configs.ts`: ranked
-  2v2 (`get2v2Config`), public sampler (playlist map weights, team configs, modifier pool and exclusions); `Maps.ts`:
-  in-memory loader + dihedral augmentation; eval suite (fixed seeds, held-out maps) + TrueSkill table.
-- Crawl ranked 2v2, then top public FFA/Team games; BC refresh with every action and the plateau fix (a decaying
-  learning rate, several windows per update).
-- Player encoder as designed above, never built so far: Phase 1 averaged all player rows into one vector, harmless with
-  4 players on Onion, but in ranked 1v1 the opponent is one row among ~400 bots, so its troops, gold and troops ÷ max
-  barely reach the decision (user decision 2026-10-02: fix it here). Each player token = its features, its relation and
-  the CNN features pooled over its cells (where it is, what it borders); a 2-layer transformer over the tokens;
-  attention pooling from the core with several heads (so it can focus on the biggest threats in FFA, where one mean over
-  all enemies would bury a strong neighbour among weak distant ones), plus the self token and one mean per relation
-  (self, ally, enemy, bot); the attack pointer reads the transformer outputs. All players first (masked: attention is
-  small next to the CNN); the ≤64-slot selection rule only if decisions/s drop too far. Compared with the current mean
-  in the BC model experiments below: held-out NLL and attack-target accuracy (36% in Phase 2).
-- Map channels per owner: the CNN sees land only as mine / ally / enemy / bot plus each owner's troops per tile, so it
-  cannot tell a 500k-troop neighbour's border from a 10k one's when their densities match, and buildings are only mine
-  or not mine. Paint each owner's total troops (log), troops ÷ max, gold (log) and troops attacking me onto its cells
-  (the same gather as the density channel), and split building channels by relation (mine / ally / enemy / bot).
-- Model experiments on the same data (cheap, supervised): dense vs Soft-MoE and S/M/L sizes; held-out accuracy per
-  bucket (spawn, early, mid, late-many, late-few, ranked, modifiers) plus decisions/s → pick the RL architecture.
-- Gate: 1,000 games across modes without errors; invalid-action rate < 1%; throughput within the Phase 0 budget; the
-  refreshed BC agent beats the Phase 2 clone (`checkpoints/bc/update0060000.pt`) in ranked 1v1 and Easy/Medium nations
-  in Compact FFA. Beating the Phase 2 PPO agent is left to Phase 4's RL: a clone is not expected to.
+**Phase 3 — Ranked 1v1 in full, then 2v2 (re-planned 2026-10-03)**
+Three stages. Each changes one thing and is measured against the previous best on the same 224 held-out games and
+the same evaluation seeds. 3A needs no bridge change and tests the encoder decisions on their own; ranked 1v1 has the
+data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
+- What holds the Phase 2 bot back:
+  - the 5 actions cover 93.7% of human commands (1,500 crawled ranked 1v1 games) but miss what decides the mid and late
+    game; per game, both players together: 4.0 defense posts, 3.9 atom bombs, 3.1 silos, 2.9 factories, 1.0 port,
+    0.9 SAMs, 0.8 hydrogen bombs, 1.1 upgrades, 0.5 warships. With those and retreat, the coverage is 99.6%;
+  - the player summary is one mean over ~400 rows;
+  - BC stopped improving after ~10k updates;
+  - PPO against one frozen opponent levelled at 0.77.
+- **3A — See better, learn better** (ranked 1v1, the same 5 actions; trainer code only):
+  - **Scoring**: `trainer.bc --score <checkpoints>` scores the fixed 224 held-out games. It is committed, replacing the
+    throw-away script behind the Phase 2 snapshot table. It reports NLL overall, per head (type, attack target, attack
+    size, spawn / boat / city cell) and per bucket (spawn, early, mid, late, Compact, Normal). The Phase 2 clone is the
+    baseline.
+  - **BC plateau fix**:
+    - gradient accumulation over k consecutive windows (default 8: ~220 command rows per step instead of ~28). The
+      workers are the bottleneck, so bigger batches come from accumulation, not more games;
+    - warmup, then a cosine decay of the learning rate;
+    - `--init` (a checkpoint's weights with a fresh optimizer);
+    - `--resume` refuses the flags it would ignore.
+    - Probe: the Phase 2 clone fine-tuned with the fix (~1 h), then scored.
+  - **Map channels 22 → 48**:
+    - each owner's numbers painted onto its cells (total troops, troops ÷ max, gold, troops attacking me, troops I send
+      at it), with the same gather as the density channel;
+    - buildings by type and relation: city, port, factory, silo, SAM, defense post, transport and warship × self / ally
+      / enemy / bot. A structure's value grows with its level.
+  - **Player encoder** (the design above, user decision 2026-10-02):
+    - one token per player: its 17 features, its building counts by type, and the CNN features (1/8 resolution)
+      averaged over its land;
+    - a 2-layer transformer (d 128, 4 heads, absent players masked);
+    - 4-head attention pooling queried by the map and scalar summary, plus the self token and one mean each over
+      allies, enemies and bots, into the core;
+    - the attack pointer reads the tokens.
+    - In 1v1 the enemy mean is the opponent itself; in FFA, attention can single out the strong neighbour. All players
+      are tokens: on paper ~+25% compute per decision (~0.3 GMAC next to the CNN's ~1.4). The ≤64-token selection comes
+      in only if the speed check fails.
+  - **MoE core** (decision 5c; user decision 2026-10-03):
+    - a switch between a dense core and a Soft-MoE core with 8 experts. With one fused vector per decision it works as
+      a router that blends the experts by situation. It costs well under 1% more compute, since the core is tiny next
+      to the CNN;
+    - A/B: two BC runs that differ only in the core (same data, record order and schedule), compared on held-out NLL
+      overall and per bucket, router use per bucket, and decisions/s;
+    - keep the MoE unless it is clearly worse or >5% slower. The RL phase should run on the architecture we keep, and
+      architecture choices are cheapest in BC. Experts can be added later by copying trained ones (upcycling), when 2v2
+      and FFA arrive.
+  - **Inputs rounded to 1/64** (exact in bf16 and 8 bits; ≤1/128 change), so PPO rollouts can be stored as 8 bits. At 48
+    channels, 1,536 rows then take 3.6 GB instead of 7.2 GB in bf16 (3.3 GB today).
+  - **Old checkpoints keep working**: the Phase 2 network stays as `PolicyV1`. `load_net` recognises it and feeds it the
+    old 22 channels, rebuilt by summing the new ones (tested against the Phase 2 code). Needed for every match against
+    the Phase 2 clone and PPO bot.
+  - **Recordings**: evaluations keep their games in `replays/<A> vs <B>/`, and `trainer.watch --dir` serves one folder
+    (fixed seeds: the same games played by different bots).
+  - **BC refresh**, from scratch (BC learns in ~1 h; network surgery matters for RL-trained weights): ~20,000 records
+    after the 2026-10-03 crawl; one pass ≈ 10 h per run, one run dense and one MoE.
+  - **Gate 3A** (on the arm the MoE rule keeps):
+    - lower held-out NLL and higher attack-target accuracy (36% now) than the Phase 2 clone, on the same 224 games;
+    - beats the Phase 2 clone ≥ 0.545 over 512 fixed games;
+    - a 10-update PPO probe keeps ≥ 75% of Phase 2's decisions/s.
+- **3B — Every human action** (ranked 1v1; bridge and trainer):
+  - **Actions**, as flat types:
+    - today's 5;
+    - build defense post / silo / factory / port / SAM / warship;
+    - atom bomb and hydrogen bomb;
+    - upgrade: the own structure nearest the chosen cell;
+    - retreat: a pointer; it cancels the largest attack on that target.
+    - One heat map per cell action (12 instead of 3).
+    - Nukes use the default arc and one missile (98% of human nukes); upgrades are by one level.
+    - Left out of the loss: alliances, embargo, emoji, chat, donations, cancel boat, warship moves and MIRV (0.4% of 1v1
+      commands).
+  - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
+    GPU from the channels. The exact check stays in the worker, and failures are counted no-ops.
+  - **Observations**: nukes in flight and their targets, SAM and defense-post coverage, silo readiness, and unit costs
+    as scalars. The bridge sends nuke targets and unit levels.
+  - **Extractor**: every intent type is mapped. A wrapper masks the new types for 5-action checkpoints. Then a BC
+    refresh.
+  - **Gate 3B**:
+    - commands outside the action set < 0.5% (~6% now);
+    - invalid actions < 1%;
+    - 1,000 ranked games without errors;
+    - beats the 3A clone ≥ 0.545.
+- **3C — Ranked 2v2 and a nations check** (before Phase 4B):
+  - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
+  - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
+  - Compact FFA against Easy and Medium nations, as an evaluation only.
+  - **Gate 3C**:
+    - 1,000 2v2 games without errors;
+    - the clone team beats scripted-expander teams ≥ 0.75;
+    - against 3 Easy nations in Compact FFA it wins more often than the scripted expander (8% in Phase 1's diagnosis).
+- **Moved to Phase 6**: the public FFA/Team sampler with modifiers, dihedral augmentation, procedural maps, and the S/M/L
+  CNN sizes. The CNN does most of the compute, and the next size up (M) measured ~1.6× slower in Phase 0; PPO is already
+  limited by the GPU. The TrueSkill table moves to Phase 4, for the league.
 
 **Phase 4 — RL on Ranked (ongoing)**
-- 4A ranked 1v1: self-play league from BC init — current policy vs pool (past checkpoints + BC), prioritized fictitious
-  self-play, KL-to-BC annealed. 4B ranked 2v2: teammates = copies of the current policy.
-- Stall protocol: reverse curriculum → shaping. Gate: ≥70% vs BC policy and a rising TrueSkill vs past checkpoints.
-- From Phase 2: gate and rank snapshots with frozen copies on fixed seeds, also during training (the training curve
-  includes the learner adapting to the games in progress); more games per update and smaller steps; keep a KL leash to
-  the clone (0.2 held, 0.05 made the bot worse in Gate B); the exact KL, never a one-sample estimate; a restart loop
-  for long runs (the PC's GPU driver occasionally fails).
+- **4A, ranked 1v1** (after 3B): a self-play league from the 3B clone. The current policy plays a pool of past snapshots
+  and the clones, with prioritized fictitious self-play: opponents that beat the learner more often are picked more
+  often. The KL to the clone starts at 0.2 and is lowered only while the frozen panel keeps improving (0.05 made the
+  Phase 2 bot worse).
+- **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
+- **Gate** (re-set on 2026-10-03: Phase 2's PPO already beat its own clone 0.773, above the old ≥70% bar). A fixed panel
+  of frozen opponents on fixed seeds: the Phase 3 clone, the Phase 2 clone, and the Phase 2 PPO bot
+  (`checkpoints/ppo-bc2/update005000.pt`). Gate 4A:
+  - ≥ 0.80 against the Phase 3 clone;
+  - ≥ 0.70 against the Phase 2 PPO bot;
+  - a league rating (a TrueSkill table) that still rises over the last 5 snapshots.
+- **Frozen evaluations during training**: every 250 updates, 64–128 frozen games against the panel (~12% of the time).
+  The training curve includes the learner adapting to the games in progress, and it missed the KL-0.05 decline.
+- **Speed**: Phase 2's PPO ran at ~190 decisions/s with the GPU at ~97%. Most of it was learning (3 epochs of forward
+  and backward passes) and the KL reference's forward pass in every epoch. Levers to measure: 2 epochs, and the
+  reference computed once per rollout. Rollouts are stored as 8 bits (3A).
+- **Stall protocol**: reverse curriculum, then shaping.
+- **Also from Phase 2**:
+  - the exact KL, never a one-sample estimate;
+  - more games per update and smaller steps;
+  - a restart loop for long runs (the PC's GPU driver occasionally fails).
 
 **Phase 5 — Exact nuke-interception predictor (≈1–2 weeks)**: silo choice as `PlayerImpl.nukeSpawn`,
 `UniversalPathFinding.Parabola`, targetable window, copied SAM targeting (slots, cooldowns, upgrade ramp, stacked-launch
 stagger). Gate A: frozen-world harness matches 100% per nuke. Gate B (metric): in-game agreement, unexplained mismatches = 0.
 
-**Phase 6 — Broaden & scale**: public FFA/Team with nations (Easy→Impossible) + all modifiers (water nukes via terrain
-deltas); procedural maps (TS generator port, byte-for-byte test on official maps); Normal-size maps; league adds
-nations as opponents; per-mode specialist fine-tunes if they win; bigger model; optional rented GPU run.
+**Phase 6 — Broaden & scale**:
+- public FFA/Team with nations (Easy→Impossible) and all modifiers (water nukes via terrain deltas), through the public
+  sampler (playlist map weights, team configs, modifier pool and exclusions);
+- an in-memory map loader with dihedral augmentation;
+- procedural maps (a TS port of the generator, tested byte-for-byte on official maps);
+- Normal-size maps;
+- nations join the league as opponents;
+- per-mode specialist fine-tunes if they win;
+- a bigger model: the S/M/L CNN picked from BC scaling curves, and more MoE experts by upcycling;
+- an optional rented GPU run.
+
+The sampler, augmentation and CNN sizes were moved here from Phase 3 on 2026-10-03.
 
 **Phase 7 — Deployment**: ONNX export; headless Node bot client (core sim + onnxruntime) joining private lobbies on a
 self-hosted server at the pinned release; checkpoint chosen by lobby mode (AGPL: publish source if hosting a modified
