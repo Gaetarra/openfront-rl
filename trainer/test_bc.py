@@ -1,3 +1,5 @@
+import argparse
+import contextlib
 import json
 import shutil
 import tempfile
@@ -8,10 +10,10 @@ from unittest import mock
 import torch
 
 from trainer import bc, crawl
-from trainer.bc import Meter, bc_loss, is_val, label_legal, main
+from trainer.bc import Meter, backward_windows, bc_loss, is_val, label_legal, lr_at, main, one_pass
 from trainer.env import RANKED_1V1, ROOT, VecEnv
 from trainer.model import Policy, PolicyV1
-from trainer.test_model import DIMS
+from trainer.test_model import DIMS, N as ROWS, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
 
@@ -35,7 +37,7 @@ class LabelTest(unittest.TestCase):
         self.assertEqual(val, [i for i in ids if is_val(i, 0.05)])
 
     def test_the_control_page_says_what_is_training(self):
-        a = bc.parse_args(["--workers", "14", "--games-per-worker", "6"])
+        a = bc.parse_args(["--workers", "14", "--games-per-worker", "6", "--updates", "10"])
         a.arch = "v2"
         info = bc.run_info(a, ["r"] * 3, ["v"])
         self.assertEqual(info["Method"], "behaviour cloning (imitating humans)")
@@ -43,6 +45,7 @@ class LabelTest(unittest.TestCase):
         self.assertEqual(info["Starts from"], "random weights")
         self.assertEqual(info["Data"], "3 ranked 1v1 replays, 1 held out")
         self.assertEqual(info["Games at once"], "84 (14 workers x 6)")
+        self.assertEqual(info["Updates"], "10 of 8 windows each")
 
     def test_meter_averages_and_resets(self):
         m = Meter()
@@ -50,6 +53,48 @@ class LabelTest(unittest.TestCase):
         m.add("a", torch.tensor(1.0), 2)
         self.assertEqual(m.means(), {"a": 1.0})
         self.assertEqual(m.means(), {})
+
+
+class ScheduleTest(unittest.TestCase):
+    def test_warmup_then_cosine_to_zero(self):
+        a = argparse.Namespace(lr=1e-3, warmup=10, updates=110)
+        lrs = [lr_at(u, a) for u in range(111)]
+        self.assertAlmostEqual(lrs[0], 1e-4)
+        self.assertAlmostEqual(lrs[9], 1e-3)
+        self.assertAlmostEqual(lrs[10], 1e-3)
+        self.assertAlmostEqual(lrs[60], 5e-4)
+        self.assertAlmostEqual(lrs[110], 0.0)
+        self.assertTrue(all(x >= y for x, y in zip(lrs[10:], lrs[11:])))
+
+    def test_one_pass_counts_the_windows_of_every_record(self):
+        a = argparse.Namespace(workers=2, games_per_worker=3, accum=4)
+        self.assertEqual(one_pass([{"turns": 5 * 120}, {"turns": 5 * 360}], a), 20)  # 480 windows / 24 per update
+
+
+class AccumulationTest(unittest.TestCase):
+    def test_accumulated_windows_give_the_gradient_of_one_batch(self):
+        # In exact fp32 (no bf16 autocast, no TF32): rounding would move the max-pool's argmax between batch sizes and
+        # bury the comparison in noise (15% on a small gradient in bf16, 4e-6 in exact fp32).
+        tf32 = torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cudnn.allow_tf32 = torch.backends.cuda.matmul.allow_tf32 = False
+        self.addCleanup(lambda: (setattr(torch.backends.cudnn, "allow_tf32", tf32[0]),
+                                 setattr(torch.backends.cuda.matmul, "allow_tf32", tf32[1])))
+        torch.manual_seed(0)
+        model = randomized(Policy(DIMS, core="moe")).cuda().to(memory_format=torch.channels_last)
+        windows = []
+        for i, n_legal in enumerate((6, 2, 4)):  # unequal legal rows: a mean of window means would differ
+            labels = torch.zeros(ROWS, 4, dtype=torch.long, device="cuda")
+            legal = torch.arange(ROWS, device="cuda") < n_legal
+            windows.append((fake_obs(seed=i), labels, legal, torch.full((ROWS,), 0.5, device="cuda")))
+        with mock.patch.object(torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext()):
+            model.zero_grad()
+            backward_windows(model, windows, argparse.Namespace(accum=3, vf_coef=0.5), Meter())
+            accumulated = [p.grad.clone() for p in model.parameters()]
+            model.zero_grad()
+            obs = {k: torch.cat([w[0][k] for w in windows]) for k in windows[0][0]}
+            bc_loss(model, obs, *(torch.cat([w[i] for w in windows]) for i in (1, 2, 3)), 0.5)[0].backward()
+        for p, g in zip(model.parameters(), accumulated):
+            self.assertLessEqual(float((p.grad - g).norm()), 1e-4 * float(p.grad.norm()) + 1e-8)
 
 
 class CloneTest(unittest.TestCase):
@@ -92,7 +137,8 @@ class MainTest(unittest.TestCase):
                  "players": [{"clientID": "a", "publicID": None}, {"clientID": "b", "publicID": None}], "winner": "a"}
         (self.data / "index.jsonl").write_text(json.dumps(entry) + "\n")
         self.common = ["--run", self.RUN, "--workers", "1", "--games-per-worker", "1", "--val-workers", "0",
-                       "--val-share", "0", "--port", "0", "--log-every", "1", "--save-every", "2"]
+                       "--val-share", "0", "--port", "0", "--log-every", "1", "--save-every", "2", "--accum", "2",
+                       "--warmup", "1"]
         self.seeds = []
 
     def tearDown(self):
@@ -119,6 +165,8 @@ class MainTest(unittest.TestCase):
         first = self.latest()
         self.assertEqual((first["kind"], first["update"]), ("bc", 3))
         self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v2", "moe"))
+        self.assertEqual(first["global_step"], 3 * 2 * 2)  # 3 updates of 2 windows of 2 rows
+        self.assertEqual(self.seeds[0], "bc-1-u0", "runs with one seed replay the same records in the same order")
         self.run_main(self.common + ["--updates", "4", "--resume"])
         self.assertEqual(self.latest()["update"], 4)
         self.assertTrue((ROOT / "runs" / self.RUN).is_dir())
@@ -132,6 +180,18 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.latest()["args"]["arch"], "v1")
         with self.assertRaisesRegex(SystemExit, "drop --core"):
             self.run_main(self.common + ["--init", str(init), "--core", "moe", "--updates", "1"])
+
+    def test_a_resume_refuses_flags_it_would_ignore(self):
+        self.run_main(self.common + ["--updates", "1"])
+        with self.assertRaisesRegex(SystemExit, "--lr would be ignored"):
+            self.run_main(self.common + ["--updates", "2", "--lr", "1e-3", "--resume"])
+
+    def test_old_bc_checkpoints_cannot_resume(self):
+        path = ROOT / "checkpoints" / self.RUN / "latest.pt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"args": {"run": self.RUN, "widths": "64,128,192"}, "update": 5}, path)  # no "accum"
+        with self.assertRaisesRegex(SystemExit, "predates.*--init"):
+            self.run_main(["--run", self.RUN, "--resume"])
 
 if __name__ == "__main__":
     unittest.main()

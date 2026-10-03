@@ -1,12 +1,14 @@
-"""Behaviour cloning on ranked 1v1 replays (PLAN Phase 2): the policy learns to issue the command a human issued in
+"""Behaviour cloning on ranked 1v1 replays (PLAN Phases 2-3): the policy learns to issue the command a human issued in
 the same situation, and the value head learns who won.
 
-  Train:   .venv/Scripts/python -m trainer.bc --run bc          (needs data/ from trainer.crawl)
-  Resume:  .venv/Scripts/python -m trainer.bc --run bc --resume
+  Train:   .venv/Scripts/python -m trainer.bc --run bc3-moe --core moe   (one pass over data/ from trainer.crawl)
+  Tune:    .venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000
+  Resume:  .venv/Scripts/python -m trainer.bc --run bc3-moe --resume
   Control: http://127.0.0.1:8787 or python -m trainer.ctl pause|resume|save|stop|throttle|status
   Charts:  .venv/Scripts/tensorboard --logdir runs
 """
 import argparse
+import math
 import random
 import time
 import zlib
@@ -36,18 +38,21 @@ def parser():
     p.add_argument("--games-per-worker", type=int, default=8)
     p.add_argument("--val-workers", type=int, default=2, help="0 = no validation")
     p.add_argument("--val-share", type=float, default=0.05, help="share of the games held out")
-    p.add_argument("--val-every", type=int, default=500, help="updates between validations")
+    p.add_argument("--val-every", type=int, default=250, help="updates between validations")
     p.add_argument("--val-steps", type=int, default=100, help="replay steps per validation")
-    p.add_argument("--updates", type=int, default=200_000)
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--updates", type=int, default=None, help="optimizer steps (default: one pass over the training records)")
+    p.add_argument("--accum", type=int, default=8, help="replay windows averaged per optimizer step")
+    p.add_argument("--lr", type=float, default=3e-4, help="peak learning rate")
+    p.add_argument("--warmup", type=int, default=500, help="updates of linear warmup before the cosine decay")
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--gamma", type=float, default=0.999, help="discount of the value target, as in PPO")
     p.add_argument("--max-grad-norm", type=float, default=1.0)
     p.add_argument("--min-elo", type=float, default=0.0, help="leave players rated below this out of the loss")
     p.add_argument("--widths", default="64,128,192", help="CNN stage widths")
-    p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--log-every", type=int, default=50)
-    p.add_argument("--save-every", type=int, default=1000, help="updates between checkpoints")
+    p.add_argument("--seed", type=int, default=1,
+                   help="network init and record order: runs with one seed replay the same records in the same order")
+    p.add_argument("--log-every", type=int, default=25)
+    p.add_argument("--save-every", type=int, default=250, help="updates between checkpoints (every 10th is kept)")
     p.add_argument("--port", type=int, default=8787, help="control page port (0 = any free port)")
     p.add_argument("--duty", type=float, default=1.0, help="start throttled: fraction of time spent working")
     p.add_argument("--gpu-temp-limit", type=int, default=0, help="auto-pause at this GPU temperature in C (0 = off)")
@@ -71,7 +76,7 @@ def run_info(a, train, val):
             "Starts from": a.init or "random weights",
             "Data": f"{len(train):,} ranked 1v1 replays, {len(val):,} held out",
             "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
-            "Updates": f"{a.updates:,}"}
+            "Updates": f"{a.updates:,} of {a.accum} windows each"}
 
 
 def label_legal(obs, labels):
@@ -96,12 +101,13 @@ def value_targets(env, gamma, device):
 
 
 def bc_loss(model, obs, labels, legal, target, vf_coef):
-    """-log pi(label) over the rows that can enter the loss, plus the value loss."""
+    """-log pi(label) summed over the rows that can enter the loss and divided by all rows, plus the value loss. Every
+    window has the same rows, so k accumulated windows give the gradient of one batch of all of them."""
     with torch.autocast("cuda", torch.bfloat16):
         out = model(obs)
     dist = ActionDist(out, obs)
     logp = dist.log_prob(torch.where(legal[:, None], labels, torch.zeros_like(labels)))  # other rows: a no-op
-    nll = -(logp * legal).sum() / legal.sum().clamp(min=1)
+    nll = -(logp * legal).sum() / len(legal)
     value = out["value"].float()
     return nll + vf_coef * 0.5 * (value - target).pow(2).mean(), dist, logp, value
 
@@ -151,12 +157,40 @@ def measure(m, obs, labels, legal, dist, logp, value, target):
     m.add("bc/value_mse", (value - target).pow(2).sum(), n)
 
 
+def lr_at(update, a):
+    """The learning rate of an update: a linear warmup over a.warmup updates, then a cosine decay to 0 at a.updates."""
+    if update < a.warmup:
+        return a.lr * (update + 1) / a.warmup
+    done = min(1.0, (update - a.warmup) / max(1, a.updates - a.warmup))
+    return a.lr * 0.5 * (1 + math.cos(math.pi * done))
+
+
+def one_pass(entries, a):
+    """Updates that replay every record of `entries` about once: each update takes a.accum windows of 5 turns from every
+    game slot."""
+    windows = sum(e["turns"] for e in entries) / 5
+    return max(1, round(windows / (a.workers * a.games_per_worker * a.accum)))
+
+
+def backward_windows(model, windows, a, meter):
+    """Accumulates the gradient of a.accum windows, each (obs, labels, legal rows, value targets). Their mean loss gives
+    the gradient of one batch of all their rows."""
+    for obs, labels, legal, target in windows:
+        loss, dist, logp, value = bc_loss(model, obs, labels, legal, target, a.vf_coef)
+        (loss / a.accum).backward()
+        measure(meter, obs, labels, legal, dist, logp, value, target)
+
+
 def main(argv=None):
     a = parse_args(argv)
     ckpt_dir = ROOT / "checkpoints" / a.run
     state = None
     if a.resume:
         state = torch.load(ckpt_dir / "latest.pt", map_location="cpu", weights_only=False)
+        if "accum" not in state["args"]:
+            raise SystemExit(f"checkpoints/{a.run} predates the Phase 3 optimizer (accumulation, learning-rate "
+                             f"schedule), so it cannot resume. Start a new run from it: --run <new name> --init "
+                             f"checkpoints/{a.run}/latest.pt")
         a = resume_args(parser(), argv, state["args"], ("updates",))
     else:
         a = network_args(parser(), argv, a)
@@ -169,13 +203,17 @@ def main(argv=None):
 
     entries = [e for e in crawl.load_index() if crawl.record_path(e["id"]).exists()]
     ratings = crawl.elo(entries)
-    train = [crawl.record_path(e["id"]) for e in entries if not is_val(e["id"], a.val_share)]
+    train_entries = [e for e in entries if not is_val(e["id"], a.val_share)]
+    train = [crawl.record_path(e["id"]) for e in train_entries]
     val = [crawl.record_path(e["id"]) for e in entries if is_val(e["id"], a.val_share)]
     if len(train) < a.workers or len(val) < a.val_workers:
         raise SystemExit(f"{len(train)} training and {len(val)} held-out records: run trainer.crawl first")
-    # A resumed run draws a new record order: with the old one, every stop and resume would replay the same records.
+    if a.updates is None:
+        a.updates = one_pass(train_entries, a)
+    # Runs with one --seed replay the same records in the same order (the dense/MoE A/B), and a resumed run draws a new
+    # order: with the old one, every stop and resume would replay the same records.
     start = state["update"] if state else 0
-    envs = VecEnv(RANKED_1V1, a.workers, a.games_per_worker, seed=f"{a.run}-{a.seed}-u{start}", device=device,
+    envs = VecEnv(RANKED_1V1, a.workers, a.games_per_worker, seed=f"bc-{a.seed}-u{start}", device=device,
                   records=train, log_dir=run_dir / "workers")
     val_envs = None
     if a.val_workers:
@@ -206,6 +244,21 @@ def main(argv=None):
     def elo_rows(env):
         return torch.tensor([ratings.get(rec, {}).get(c, 1500.0) for rec, seats in zip(env.record_of, env.seats_of)
                              for c in seats], device=device)
+
+    def windows():
+        """The next a.accum windows; the workers replay each next window while the GPU trains on the current one."""
+        nonlocal global_step
+        for _ in range(a.accum):
+            obs, labels = envs.obs, envs.labels
+            target = value_targets(envs, a.gamma, device)
+            legal = label_legal(obs, labels) & (elo_rows(envs) >= a.min_elo)
+            envs.send()
+            yield obs, labels, legal, target
+            for i in envs.recv()[3]:
+                done["records"] += 1
+                done["desync"] += int(i["desync"])
+                done["errors"] += int(i["error"] is not None)
+            global_step += envs.N
 
     def checkpoint():
         s = dict(kind="bc", model=model.state_dict(), optimizer=opt.state_dict(), args=vars(a), update=update,
@@ -242,29 +295,20 @@ def main(argv=None):
             if not control.wait():
                 break
             t0 = time.perf_counter()
-            obs, labels = envs.obs, envs.labels
-            target = value_targets(envs, a.gamma, device)
-            legal = label_legal(obs, labels) & (elo_rows(envs) >= a.min_elo)
-            envs.send()  # the workers replay the next window while the GPU trains on this one
-            loss, dist, logp, value = bc_loss(model, obs, labels, legal, target, a.vf_coef)
+            for group in opt.param_groups:
+                group["lr"] = lr_at(update, a)
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            backward_windows(model, windows(), a, meter)
             nn.utils.clip_grad_norm_(model.parameters(), a.max_grad_norm)
             opt.step()
-            measure(meter, obs, labels, legal, dist, logp, value, target)
-            infos = envs.recv()[3]
-            for i in infos:
-                done["records"] += 1
-                done["desync"] += int(i["desync"])
-                done["errors"] += int(i["error"] is not None)
             update += 1
-            global_step += envs.N
             control.throttle(time.perf_counter() - t0)
             if update % a.log_every == 0:
                 metrics = meter.means()
                 metrics.update({"data/records_done": done["records"], "data/errors": done["errors"],
                                 "data/desync_share": done["desync"] / max(done["records"], 1),
-                                "perf/samples_per_s": a.log_every * envs.N / (time.perf_counter() - t_log)})
+                                "train/lr": opt.param_groups[0]["lr"],
+                                "perf/samples_per_s": a.log_every * a.accum * envs.N / (time.perf_counter() - t_log)})
                 t_log = time.perf_counter()
                 for k, v in metrics.items():
                     writer.add_scalar(k, v, global_step)
