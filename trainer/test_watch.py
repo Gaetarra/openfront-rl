@@ -43,6 +43,18 @@ class DirTest(unittest.TestCase):
         start.assert_not_called()
         serve.assert_not_called()
 
+    def test_a_taken_port_stops_a_dir_before_the_client_starts(self):
+        # A running trainer holds the port but serves only replays/ itself: the client would not find the folder's
+        # games and would fall back to its lobby page without a word.
+        with tempfile.TemporaryDirectory(dir=watch.REPLAYS) as d, socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0))
+            busy.listen()
+            with mock.patch.object(watch, "start_client", return_value=None) as start, \
+                    mock.patch.object(watch.time, "sleep", side_effect=KeyboardInterrupt):  # Ctrl+C, should it wait
+                with self.assertRaisesRegex(SystemExit, "is taken"):
+                    watch.main(["--dir", Path(d).name, "--port", str(busy.getsockname()[1])])
+            start.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -90,9 +90,10 @@ def main(argv=None):
         server = serve(Control(), a.port, sampler=False, replays=folder)
         print(f"serving {folder} on http://127.0.0.1:{a.port}")
     except OSError:
+        if a.dir:  # the client would ask the trainer, which serves only replays/, and fall back to its lobby page
+            raise SystemExit(f"port {a.port} is taken (a running trainer?), so {folder} cannot be served; stop it first")
         server = None
-        print(f"port {a.port} is taken: a running trainer's control server serves {REPLAYS} (not --dir); stop it to "
-              f"use --dir")
+        print(f"port {a.port} is taken: a running trainer's control server already serves {REPLAYS}")
     log = ROOT / "runs" / "watch-client.log"
     print(f"starting the game client (npm run dev, log: {log}); the first start takes up to a minute ...")
     client = None
