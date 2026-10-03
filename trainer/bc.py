@@ -4,10 +4,13 @@ the same situation, and the value head learns who won.
   Train:   .venv/Scripts/python -m trainer.bc --run bc3-moe --core moe   (one pass over data/ from trainer.crawl)
   Tune:    .venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000
   Resume:  .venv/Scripts/python -m trainer.bc --run bc3-moe --resume
+  Score:   .venv/Scripts/python -m trainer.bc --score checkpoints/bc/update0060000.pt checkpoints/bc3-moe/latest.pt
   Control: http://127.0.0.1:8787 or python -m trainer.ctl pause|resume|save|stop|throttle|status
   Charts:  .venv/Scripts/tensorboard --logdir runs
 """
 import argparse
+import datetime
+import json
 import math
 import random
 import time
@@ -21,11 +24,14 @@ from torch.utils.tensorboard import SummaryWriter
 from trainer import crawl
 from trainer.control import Control, serve
 from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, new_net
+from trainer.eval import tag
+from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, load_net, new_net
 from trainer.ppo import game_commit, network_args, resume_args, save_checkpoint
 
 CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes from (trainer/model.py)
 PHASES = ("spawn", "early", "mid", "late")
+SCORE_CUTOFF = 1790812800000  # 2026-10-01 00:00 UTC, in ms: the scoring set comes from the Phase 2 crawl's games
+SCORE_LAYOUT = {"workers": 12, "games_per_worker": 6, "steps": 2000}  # fixed, so every scoring run sees the same rows
 
 
 def parser():
@@ -33,6 +39,8 @@ def parser():
     p.add_argument("--run", default="bc", help="name for checkpoints/<run> and runs/<run>")
     p.add_argument("--resume", action="store_true", help="continue from checkpoints/<run>/latest.pt")
     p.add_argument("--init", help="start from this checkpoint's weights and network, with a fresh optimizer")
+    p.add_argument("--score", nargs="+", metavar="CHECKPOINT",
+                   help="score these checkpoints on the fixed held-out set (~10 min) instead of training")
     p.add_argument("--core", choices=("dense", "moe"), default="moe", help="the core of a new network (not with --init)")
     p.add_argument("--workers", type=int, default=10)
     p.add_argument("--games-per-worker", type=int, default=8)
@@ -109,7 +117,7 @@ def bc_loss(model, obs, labels, legal, target, vf_coef):
     logp = dist.log_prob(torch.where(legal[:, None], labels, torch.zeros_like(labels)))  # other rows: a no-op
     nll = -(logp * legal).sum() / len(legal)
     value = out["value"].float()
-    return nll + vf_coef * 0.5 * (value - target).pow(2).mean(), dist, logp, value
+    return nll + vf_coef * 0.5 * (value - target).pow(2).mean(), dist, logp, value, out.get("gates")
 
 
 class Meter:
@@ -129,8 +137,12 @@ class Meter:
 
 
 @torch.no_grad()
-def measure(m, obs, labels, legal, dist, logp, value, target):
-    """Label statistics, per-head accuracy and NLL per game phase of one batch."""
+def measure(m, obs, labels, legal, dist, logp, value, target, gates=None):
+    """For one batch:
+    - label statistics;
+    - accuracy and NLL per head;
+    - NLL per bucket (game phase and map size);
+    - the router's mean weight per expert and bucket, for MoE networks."""
     t, cell, tgt, b = labels.unbind(1)
     n, nl = len(t), legal.sum()
     m.add("labels/out_of_set", (t == -1).sum(), n)
@@ -138,22 +150,35 @@ def measure(m, obs, labels, legal, dist, logp, value, target):
     m.add("labels/illegal", ((t >= 0) & ~legal).sum(), n)
     m.add("labels/noop", ((t == 0) & legal).sum(), nl)
     m.add("bc/nll", -(logp * legal).sum(), nl)
+    m.add("bc/nll_type", -(dist.type.log_prob(torch.where(legal, t, 0)) * legal).sum(), nl)
     m.add("bc/type_acc", ((dist.type.logits.argmax(1) == t) & legal).sum(), nl)
     m.add("bc/act_rate_human", ((t > 0) & legal).sum(), nl)
     m.add("bc/act_rate_policy", ((1 - dist.type.probs[:, 0]) * legal).sum(), nl)
+    lc = dist.cells.log_prob(cell.clamp(0, dist.cells.logits.shape[-1] - 1)[:, None].expand(-1, 3))  # [N, maps]
+    lb = dist.bins.log_prob(b.clamp(0, dist.bins.logits.shape[-1] - 1)[:, None].expand(-1, 2))  # [N, attack/boat]
     rows = legal & (t == ATTACK)
     m.add("bc/attack_target_acc", ((dist.ptr.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
+    m.add("bc/nll_attack_target", -(dist.ptr.log_prob(torch.where(rows, tgt, 0)) * rows).sum(), rows.sum())
     m.add("bc/attack_bin_acc", ((dist.bins.logits[:, 0].argmax(1) == b) & rows).sum(), rows.sum())
+    m.add("bc/nll_attack_bin", -(lb[:, 0] * rows).sum(), rows.sum())
     rows = legal & (t == BOAT)
     m.add("bc/boat_bin_acc", ((dist.bins.logits[:, 1].argmax(1) == b) & rows).sum(), rows.sum())
+    m.add("bc/nll_boat_bin", -(lb[:, 1] * rows).sum(), rows.sum())
     for typ, name in ((SPAWN, "spawn"), (BOAT, "boat"), (BUILD, "city")):
         rows = legal & (t == typ)
         hit = dist.cells.logits[:, CELL_HEAD[typ]].argmax(1) == cell
         m.add(f"bc/{name}_cell_acc", (hit & rows).sum(), rows.sum())
+        m.add(f"bc/nll_{name}_cell", -(lc[:, CELL_HEAD[typ]] * rows).sum(), rows.sum())
     phase = torch.where(obs["scalars"][:, 1] > 0, 0, 1 + (obs["scalars"][:, 0] * 3).long().clamp(max=2))
-    for i, name in enumerate(PHASES):
-        rows = legal & (phase == i)
+    buckets = {name: phase == i for i, name in enumerate(PHASES)}
+    normal = obs["scalars"][:, 14] > 0.5  # tiles per cell / 64: Normal maps 1, Compact 0.25
+    buckets.update(compact=~normal, normal=normal)
+    for name, inside in buckets.items():
+        rows = legal & inside
         m.add(f"bc/nll_{name}", -(logp * rows).sum(), rows.sum())
+        if gates is not None:
+            for i in range(gates.shape[1]):
+                m.add(f"router/{name}_{i}", (gates[:, i].float() * inside).sum(), inside.sum())
     m.add("bc/value_mse", (value - target).pow(2).sum(), n)
 
 
@@ -176,13 +201,83 @@ def backward_windows(model, windows, a, meter):
     """Accumulates the gradient of a.accum windows, each (obs, labels, legal rows, value targets). Their mean loss gives
     the gradient of one batch of all their rows."""
     for obs, labels, legal, target in windows:
-        loss, dist, logp, value = bc_loss(model, obs, labels, legal, target, a.vf_coef)
+        loss, dist, logp, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef)
         (loss / a.accum).backward()
-        measure(meter, obs, labels, legal, dist, logp, value, target)
+        measure(meter, obs, labels, legal, dist, logp, value, target, gates)
+
+
+def score_records():
+    """The fixed scoring set: the held-out records (5%, by game ID) of games started before SCORE_CUTOFF, by game ID.
+    Later crawls do not change it; a purge can drop a record (the result counts them)."""
+    entries = [e for e in crawl.load_index() if e["start"] < SCORE_CUTOFF and is_val(e["id"], 0.05)]
+    paths = [crawl.record_path(e["id"]) for e in sorted(entries, key=lambda e: e["id"])]
+    return [p for p in paths if p.exists()]
+
+
+def score(paths, records, workers, games_per_worker, steps, device="cuda"):
+    """Every checkpoint's statistics (measure, plus the value/outcome correlation) on the same replayed rows. The rows
+    depend only on the records, the layout and the seed "score", so every comparison is paired."""
+    envs = VecEnv(RANKED_1V1, workers, games_per_worker, seed="score", device=device, records=records)
+    try:
+        nets = [load_net(p, envs.dims, device) for p in paths]
+        meters, values, outcomes, games = [Meter() for _ in nets], [[] for _ in nets], [], set()
+        with torch.no_grad():
+            for _ in range(steps):
+                obs, labels = envs.obs, envs.labels
+                target = value_targets(envs, 0.999, device)
+                legal = label_legal(obs, labels)
+                for net, m, v in zip(nets, meters, values):
+                    _, dist, logp, value, gates = bc_loss(net, obs, labels, legal, target, 0.0)
+                    measure(m, obs, labels, legal, dist, logp, value, target, gates)
+                    v.append(value.cpu().numpy())
+                outcomes.append(envs.outcome.reshape(-1).copy())
+                games.update(envs.record_of)
+                envs.step()
+    finally:
+        envs.close()
+    o = np.concatenate(outcomes)
+    metrics = []
+    for m, v in zip(meters, values):
+        stats, v = m.means(), np.concatenate(v)
+        stats["value/outcome_corr"] = float(np.corrcoef(v, o)[0, 1]) if v.std() > 0 and o.std() > 0 else float("nan")
+        metrics.append(stats)
+    return {"checkpoints": [str(p) for p in paths], "records": len(records), "games": len(games), "rows": len(o),
+            "metrics": metrics}
+
+
+def table(result):
+    """The scores as text: one row per statistic and one column per checkpoint (its run and update), then the
+    routers' mean expert weights per bucket."""
+    names = [tag(p) for p in result["checkpoints"]]
+    keys = sorted({k for s in result["metrics"] for k in s if not k.startswith("router/")})
+    w = max(len(k) for k in keys)
+    lines = [f"{result['games']} games, {result['rows']:,} rows ({result['records']} held-out records before "
+             f"2026-10-01)", " " * w + "".join(f"{n:>18}" for n in names)]
+    lines += [k.ljust(w) + "".join(f"{s.get(k, float('nan')):18.4f}" for s in result["metrics"]) for k in keys]
+    for name, s in zip(names, result["metrics"]):
+        for bucket in (*PHASES, "compact", "normal"):
+            weights = [s[k] for k in sorted(s) if k.startswith(f"router/{bucket}_")]
+            if weights:
+                lines.append(f"router {name} {bucket:>7}: " + " ".join(f"{x:.2f}" for x in weights))
+    return "\n".join(lines)
+
+
+def score_main(paths):
+    records = score_records()
+    if not records:
+        raise SystemExit("no held-out records of games before 2026-10-01 in data/: run trainer.crawl first")
+    result = score(paths, records, **SCORE_LAYOUT)
+    out = ROOT / "runs" / "score" / f"{datetime.datetime.now():%Y%m%d-%H%M%S}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, indent=1), encoding="utf-8")
+    print(table(result))
+    print(f"saved {out}")
 
 
 def main(argv=None):
     a = parse_args(argv)
+    if a.score:
+        return score_main(a.score)
     ckpt_dir = ROOT / "checkpoints" / a.run
     state = None
     if a.resume:
@@ -277,8 +372,8 @@ def main(argv=None):
                 obs, labels = val_envs.obs, val_envs.labels
                 target = value_targets(val_envs, a.gamma, device)
                 legal = label_legal(obs, labels)
-                _, dist, logp, value = bc_loss(model, obs, labels, legal, target, a.vf_coef)
-                measure(m, obs, labels, legal, dist, logp, value, target)
+                _, dist, logp, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef)
+                measure(m, obs, labels, legal, dist, logp, value, target, gates)
                 values.append(value.cpu().numpy())
                 outcomes.append(val_envs.outcome.reshape(-1).copy())
                 val_envs.step()
