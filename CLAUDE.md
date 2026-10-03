@@ -68,7 +68,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.ppo --run ppo-bc2 --setup ranked1v1 --init checkpoints/bc/update0060000.pt --opponent checkpoints/bc/update0060000.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --updates 5000   # PPO from the Gate A clone (settings: docs/PLAN.md, Phase 2 results)
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # Gate B: PPO vs the frozen clone (bar ~0.545), also per seat
 .venv/Scripts/python -m trainer.eval --a checkpoints/bc/update0060000.pt --b random --episodes 8 --record 1   # save games to replays/, players named after their policies
-.venv/Scripts/python -m trainer.watch                          # serve replays/ to the game's dev client (npm run dev)
+.venv/Scripts/python -m trainer.watch                          # watch saved games: starts the game's dev client and serves replays/; open http://localhost:9000/game/<id>, Ctrl+C stops both
 .venv/Scripts/python scripts/diag_baselines.py                  # random vs scripted expansion (Phase 1 diagnosis)
 .venv/Scripts/tensorboard --logdir runs                         # charts, incl. actions/* mix and episodes/* ranks
 ```
@@ -88,8 +88,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and includes the learner
   adapting to the games in progress (it read 0.84 where Gate B gave 0.63). Compare snapshots with `trainer.eval` on the
   same fixed seeds.
-- Training runs and `trainer.watch` all serve on port 8787: stop `trainer.watch` before starting a run (a running
-  trainer serves `replays/` itself).
+- Training runs and `trainer.watch` all serve on port 8787: stop `trainer.watch` before starting a run. During a run,
+  `trainer.watch` only starts the game client, because the trainer serves `replays/` itself. With the client running
+  but nothing on 8787, the client cannot fetch the game and silently falls back to its lobby page.
 
 ## Simulation facts the bridge relies on
 

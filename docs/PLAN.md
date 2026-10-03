@@ -338,6 +338,11 @@ becomes optional); games are watched in the game's own client; BC imitates all p
 - Watching works: public records and our recorded games play in the game's dev client (`trainer.watch`, or a running
   trainer, serves them on 8787). A download manager that intercepts the map `.bin` fetches (Internet Download Manager)
   hangs the replay at "Game is starting...".
+  - 2026-10-03: with the client running but nothing on 8787, the client cannot fetch the game and silently falls back
+    to its lobby page, where joining by game ID fails.
+  - Since then `trainer.watch` also starts the game's dev client, and Ctrl+C stops both, the client's child processes
+    included. Before, stopping `npm run dev` left vite and the game server running.
+  - All 17 saved games replay in sync at v0.34.22, and play in the client with every hash verified.
 - BC run `bc` (14 workers × 6 games): ~745 rows/s (validation every 500 updates costs ~15%). It learnt in the first
   ~10k updates (~40 min) and then stayed flat; stopped by choice at update 72,729 of 200,000 (4 h 52 min, 12.2M rows,
   7,242 games). On the same 224 held-out games every 10k-update snapshot scores within noise (NLL 1.065–1.10); 60k is
