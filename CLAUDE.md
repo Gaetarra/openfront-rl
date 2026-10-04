@@ -48,6 +48,7 @@ node node_modules/typescript/bin/tsc -p ../../tsconfig.json    # typecheck bridg
 
 ```bash
 npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a real record (run from the game dir)
+npx tsx ../../scripts/troop_shares.ts 60                    # share of their troops humans send per attack/boat, 60 replayed records (~10 min, game dir)
 .venv/Scripts/python scripts/bench_gpu.py                   # GPU encoder throughput (run from the repo root)
 .venv/Scripts/python scripts/speed_check.py                 # PPO decisions/s, BC rows/s and peak VRAM, Phase 2 vs Phase 3 networks (~15 min, PC idle)
 ```

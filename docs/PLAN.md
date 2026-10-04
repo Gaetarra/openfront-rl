@@ -66,7 +66,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
    softmax, sample (DeepMind SC2-style). Multimodal-safe, rule-enforcing (build: own land/coast; warship: connected
    water; boat: target's shore; spawn: unowned land; nuke: not teammates), explores naturally. Conditioned (FiLM) on the
    action/unit type. Inside the cell a rule picks the tile (engine snaps structures ≤15 tiles, boats ≤50).
-   Autoregressive: type → unit type → player pointer | cell → modifiers; log-prob = sum; entropy per head.
+   Autoregressive: type → unit type → player pointer | cell → modifiers; log-prob = sum; entropy per head. (Phases 1–3A
+   draw the troop share independently of the target: the Phase 1 task list dropped the order without saying so, found
+   2026-10-04. 3B restores it.)
 4. **Missiles: the policy never guesses.** SAM-coverage channels first; then an exact interception predictor (copy of
    `SAMTargetingSystem` driving a mini-sim of SAMs + nukes) → per cell and arc: interceptor slots on the path.
 5. **Many different situations** (spawn, early/mid/late, many vs few players, modifiers, ranked vs public) at 3 levels:
@@ -147,7 +149,7 @@ Python trainer (GPU)                                    Node env workers (CPU, ~
 | Heat-map decoder | U-Net-lite back to 1/4 res, pixel shuffle to cell res + 1×1 skip from the input, FiLM on action/unit type; separate spawn head | ~0.3M |
 | Player encoder | a token for every player (features + building counts + spatial features pooled over their cells); 2-layer transformer d=128 attending to the 64 most relevant | ~0.4M |
 | Scalars + core | MLPs → 512-d (dense or Soft-MoE) | ~0.8M |
-| Heads | action type, player pointer, bins, arc, value | ~0.3M |
+| Heads | action type, player pointer, troop share (1–100%, read with the chosen target), arc, value | ~0.3M |
 | Total (v1) | ≈2 GMAC per decision on a 32k-cell grid, ~95% of it in the CNN; measured ~6.5k decisions/s inference, ~2.3k/s training (4070 Ti, bf16) | ~6M |
 | Scale-up path | wider core / transformer / Soft-MoE experts, chosen from BC scaling curves; CNN widened only if it underfits | ~10–30M |
 
@@ -176,9 +178,9 @@ all modifiers, win-threshold progress, time left, tiles-per-cell.
 |---|---|---|
 | no-op | — | — (in spawn phase = wait / keep spot) |
 | spawn | cell (spawn head) | `spawn` on unowned land; re-pick allowed; forced spawn at ~tick 195; masked if random spawn |
-| attack | player ptr or unowned land, troop bin | `attack`; mask = shares land border (land-only check) + `canAttackPlayer` |
+| attack | player ptr or unowned land, then troop share 1–100% read with that target | `attack`; mask = shares land border (land-only check) + `canAttackPlayer` |
 | retreat | player ptr or unowned land | `cancel_attack` on the largest attack vs that target |
-| boat | target (player or unowned), cell, troop bin | `boat` to a tile of that target in/near the cell; ≤3 boats |
+| boat | target (player or unowned), cell, then troop share 1–100% read with that target | `boat` to a tile of that target in/near the cell; ≤3 boats |
 | build | unit type, cell | `build_unit` on an own tile; warship → water in a port's water body |
 | upgrade | unit type, cell, amount bin | `upgrade_structure` on the own unit of that type nearest the cell |
 | nuke | cell, arc bit, amount bin | `build_unit` Atom/Hydrogen; amount ≤ ready silo slots; blocked in immunity / near teammates |
@@ -551,6 +553,33 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       2. The A/B scoring, with the Phase 2 clone and the probe in the same scoring run, and the MoE rule.
       3. The 512-game match against the Phase 2 clone.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
+  - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
+    drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
+    the player it attacks; and its five sizes (10/25/50/75/100% of current troops) fit human play badly.
+    - Measured on 60 replayed ranked 1v1 games (`scripts/troop_shares.ts`): 9,405 attacks, 605 boats, and 6,852
+      follow-up clicks within a second of the player's previous command (their shares drift, so they are kept apart):
+      - attacks: 1–9% of troops 5.3%, 10% 7.4%, 11–19% 12.0%, 20% (the client's default) 41.1%, 21–49% 29.4%, 50% or
+        more 4.8% (75% or more: 1.9%);
+      - boats: 1–9% 11.4%, 10% 6.9%, 11–19% 8.8%, 20% 30.4%, 21–49% 36.0%, 50% or more 6.4%;
+      - snapping to the five sizes moves an attack by 4.7 points on average (28% of it), a boat by 5.1: the default 20%
+        is learned as 25%;
+      - follow-up clicks: 12.0% send 1–9%, 5.2% exactly 1%: humans trickle troops into a front;
+      - 84% of attacks fall within 0.25 points of a whole percent (troops change between the click and its execution).
+    - The game: the server takes any troop count; the client sends whole percents of current troops (slider 1–100,
+      keys ±10 by default, default 20%); a land attack on a target already under attack merges into it. Troop growth,
+      (10 + troops^0.73 / 4) × (1 − troops / max), peaks at 42% of max, and 38–46% keeps ≥ 99% of the peak.
+    - Design:
+      - 100 choices, 1–100% of current troops. The label is the human's share rounded to a whole percent, with soft
+        labels (a little weight on the neighbouring percents);
+      - attack: the share reads the chosen target's token (in BC, the human's target). The exact entropy and KL compute
+        the shares for every target, which is cheap next to the CNN;
+      - boat: the share reads the token of the landing cell's main owner, so the exact entropy and KL sum the boat
+        map's probabilities per owner;
+      - the bridge takes a percent; 5-size checkpoints map theirs to 10/25/50/75/100%.
+    - Measured alone: one BC night with the core 3A keeps, scored against the 3A clone (the 100 shares summed back into
+      the five sizes' ranges, for a like-for-like NLL), then 512 games against it. Then the rest of 3B.
+    - The 3A nights keep the five sizes: both arms share them, so the dense / MoE comparison stays fair, and changing
+      the heads mid-A/B would cost the running night and two more.
   - **Actions**, as flat types:
     - today's 5;
     - build defense post / silo / factory / port / SAM / warship;
