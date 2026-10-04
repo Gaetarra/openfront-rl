@@ -480,14 +480,14 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - **Recordings**: evaluations keep their games in `replays/<A> vs <B>/`, and `trainer.watch --dir` serves one folder
     (fixed seeds: the same games played by different bots).
   - **BC refresh**, from scratch (BC learns in ~1 h; network surgery matters for RL-trained weights): ~21,000 records
-    after the 2026-10-03 crawls; one pass ≈ 12.5–13 h per run, one run dense and one MoE.
+    after the 2026-10-03 crawls; one pass ≈ 14 h per run (the MoE night took 14.0 h), one run dense and one MoE.
   - **Gate 3A** (on the arm the MoE rule keeps):
     - lower held-out NLL and higher attack-target accuracy than the Phase 2 clone on the fixed scoring set
       (`trainer.bc --score`, which replaced the 224 games; the clone scores NLL 1.039, attack target 37.5%);
     - beats the Phase 2 clone ≥ 0.545 over 512 fixed games;
     - a 10-update PPO probe keeps ≥ 75% of Phase 2's decisions/s.
-  - **3A progress (2026-10-03): code done, speed check passed with the 64-player attention, and the probe broke the BC
-    plateau; the refresh nights are next.** Task lists:
+  - **3A progress (2026-10-04): code done, speed check passed with the 64-player attention, the probe broke the BC
+    plateau, and the MoE clone passed Gate 3A's scoring criterion; the dense night is next.** Task lists:
     - `docs/superpowers/plans/2026-10-03-phase3a-encoder.md`;
     - `docs/superpowers/plans/2026-10-03-phase3a-attention64.md`.
     Branch `phase3`; 79 trainer and 32 bridge tests green. Ledgers with every ruling:
@@ -546,12 +546,31 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         transformer address.
       - The probe is the reference for the nights: a new network that beats the clone but not the probe gained from
         the optimizer, not from its new inputs.
+    - **MoE night** (`bc3-moe`: 2026-10-03 20:54 to 2026-10-04 10:57, all 24,981 updates, even pace throughout), scored
+      in one run with the clone and the probe (`runs/score/20261004-113904.json`; their numbers repeat 2026-10-03's
+      exactly). Phase 2 clone → probe → MoE:
+      - NLL 1.039 → 0.989 → 0.843, lower in every head and bucket (spawn 0.73 → 0.72 → 0.67, early 1.09 → 1.03 → 0.90,
+        mid 1.09 → 1.04 → 0.84, late 0.62 → 0.61 → 0.53, Compact 0.87 → 0.82 → 0.74, Normal 1.08 → 1.03 → 0.87);
+      - attack target 2.09 → 2.07 → 1.61 (accuracy 37.5% → 38.0% → 49.2%);
+      - attack size 1.28 → 1.01 → 0.67 (accuracy 52% → 59% → 73%), boat size 1.25 → 1.03 → 0.85 (56% → 52% → 62%);
+      - spawn / boat / city cell 9.56 / 5.84 / 7.02 → 9.41 / 5.70 / 7.00 → 8.61 / 4.98 / 6.79 (accuracy 0.7 / 4.1 /
+        0.4% → 0.8 / 4.6 / 0.5% → 2.2 / 9.7 / 1.0%);
+      - value/outcome correlation 0.546 → 0.607 → 0.696;
+      - action type 0.459 → 0.454 → 0.431, accuracy 84.3% → 84.3% → 84.4%, barely above the 84.2% of rows that are
+        no-ops: when a human clicks stays mostly unpredictable at 0.5 s.
+      - Router (mean expert weights): experts 2 and 6 take 36–45% and 23–38%, experts 5 and 4 most of the rest, and
+        experts 0, 1, 3 and 7 get 2–3% each. Late game leans more on expert 6 (38%, 23% at spawn), spawn more on
+        expert 5 (18%).
+      - Reading: Gate 3A's scoring criterion holds for the MoE arm by a wide margin (NLL −0.196, attack target +11.7
+        points). Against the probe, the gain is −0.146 and +11.2 points. The attack target, which the optimizer fix
+        did not move, is where the new inputs show most. The probe fine-tuned for 2,000 updates rather than a full pass,
+        so part of the −0.146 may come from the longer training.
     - **Next, in order:**
-      1. The two refresh nights, MoE and dense (`--run bc3-moe --core moe` and `--run bc3-dense --core dense`, both
-         `--workers 14 --games-per-worker 6`, in the restart loop). No crawl or purge between them (the next purge is
-         due by ~2026-10-10).
-      2. The A/B scoring, with the Phase 2 clone and the probe in the same scoring run, and the MoE rule.
-      3. The 512-game match against the Phase 2 clone.
+      1. The dense night (`--run bc3-dense --core dense --workers 14 --games-per-worker 6`, in the restart loop). No
+         crawl or purge before the A/B scoring (the next purge is due by ~2026-10-10).
+      2. The A/B scoring, all four checkpoints in one run, and the MoE rule.
+      3. The 512-game match against the Phase 2 clone, on the arm the rule keeps. The MoE match can run before the
+         dense night: the rule keeps the MoE unless dense scores an NLL more than 0.02 lower.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to

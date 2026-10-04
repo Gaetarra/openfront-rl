@@ -64,7 +64,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.ctl pause|resume|save|stop|throttle half|status
 .venv/Scripts/python -m trainer.crawl                          # download ranked 1v1 records into data/ (hours: detach)
 .venv/Scripts/python -m trainer.crawl --purge                  # remove deleted players' records (daily while data is kept)
-.venv/Scripts/python -m trainer.bc --run bc3-moe --core moe --workers 14 --games-per-worker 6   # behaviour cloning: one pass over data/ (~12 h); same control page
+.venv/Scripts/python -m trainer.bc --run bc3-moe --core moe --workers 14 --games-per-worker 6   # behaviour cloning: one pass over data/ (~14 h); same control page
 .venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000 --warmup 100   # fine-tune a checkpoint (its network, a fresh optimizer)
 .venv/Scripts/python -m trainer.bc --score checkpoints/bc/update0060000.pt checkpoints/bc3-moe/latest.pt   # NLL per head and bucket on the fixed held-out set (~10 min); table + runs/score/*.json
 .venv/Scripts/python -m trainer.eval --a checkpoints/bc/update0060000.pt --b scripted   # ranked 1v1 match, 256 games
