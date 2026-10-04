@@ -487,7 +487,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - beats the Phase 2 clone ≥ 0.545 over 512 fixed games;
     - a 10-update PPO probe keeps ≥ 75% of Phase 2's decisions/s.
   - **3A progress (2026-10-04): code done, speed check passed with the 64-player attention, the probe broke the BC
-    plateau, and the MoE clone passed Gate 3A's scoring criterion; the dense night is next.** Task lists:
+    plateau, and the MoE clone passed Gate 3A (scoring and match); the dense night decides the core.** Task lists:
     - `docs/superpowers/plans/2026-10-03-phase3a-encoder.md`;
     - `docs/superpowers/plans/2026-10-03-phase3a-attention64.md`.
     Branch `phase3`; 79 trainer and 32 bridge tests green. Ledgers with every ruling:
@@ -565,12 +565,17 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         points). Against the probe, the gain is −0.146 and +11.2 points. The attack target, which the optimizer fix
         did not move, is where the new inputs show most. The probe fine-tuned for 2,000 updates rather than a full pass,
         so part of the −0.146 may come from the longer training.
+    - **Gate 3A match, MoE clone vs the Phase 2 clone** (512 fixed games, seats swapped, `--record 1`; run detached
+      2026-10-04 12:08–13:07, 59 min, where Phase 2 networks took 35): **0.631 (SE 0.021), PASSED** (bar 0.545). Seat 0
+      0.609, seat 1 0.652 (within noise), mean rank 1.37. For scale: on the same games, the Phase 2 PPO bot scored 0.773
+      against the same clone. Log `runs/gate3a-bc3-moe.log`; 16 games in `replays/bc3-moe 24981 vs bc 60000/`.
     - **Next, in order:**
       1. The dense night (`--run bc3-dense --core dense --workers 14 --games-per-worker 6`, in the restart loop). No
          crawl or purge before the A/B scoring (the next purge is due by ~2026-10-10).
-      2. The A/B scoring, all four checkpoints in one run, and the MoE rule.
-      3. The 512-game match against the Phase 2 clone, on the arm the rule keeps. The MoE match can run before the
-         dense night: the rule keeps the MoE unless dense scores an NLL more than 0.02 lower.
+      2. The A/B scoring, all four checkpoints in one run, and the MoE rule (keep the MoE unless dense scores an NLL
+         more than 0.02 lower). If it keeps the MoE, Gate 3A has passed and 3A is done; if not, the dense clone's
+         512-game match.
+      3. 3B, starting with the troop shares.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
