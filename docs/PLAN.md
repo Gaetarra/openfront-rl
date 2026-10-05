@@ -486,8 +486,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       (`trainer.bc --score`, which replaced the 224 games; the clone scores NLL 1.039, attack target 37.5%);
     - beats the Phase 2 clone ≥ 0.545 over 512 fixed games;
     - a 10-update PPO probe keeps ≥ 75% of Phase 2's decisions/s.
-  - **3A progress (2026-10-04): code done, speed check passed with the 64-player attention, the probe broke the BC
-    plateau, and the MoE clone passed Gate 3A (scoring and match); the dense night decides the core.** Task lists:
+  - **3A done (2026-10-05): Gate 3A passed on the MoE clone, and the MoE rule keeps it (dense tied on NLL); 3B is
+    next.** Task lists:
     - `docs/superpowers/plans/2026-10-03-phase3a-encoder.md`;
     - `docs/superpowers/plans/2026-10-03-phase3a-attention64.md`.
     Branch `phase3`; 79 trainer and 32 bridge tests green. Ledgers with every ruling:
@@ -569,13 +569,26 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       2026-10-04 12:08–13:07, 59 min, where Phase 2 networks took 35): **0.631 (SE 0.021), PASSED** (bar 0.545). Seat 0
       0.609, seat 1 0.652 (within noise), mean rank 1.37. For scale: on the same games, the Phase 2 PPO bot scored 0.773
       against the same clone. Log `runs/gate3a-bc3-moe.log`; 16 games in `replays/bc3-moe 24981 vs bc 60000/`.
-    - **Next, in order:**
-      1. The dense night (`--run bc3-dense --core dense --workers 14 --games-per-worker 6`, in the restart loop). No
-         crawl or purge before the A/B scoring (the next purge is due by ~2026-10-10).
-      2. The A/B scoring, all four checkpoints in one run, and the MoE rule (keep the MoE unless dense scores an NLL
-         more than 0.02 lower). If it keeps the MoE, Gate 3A has passed and 3A is done; if not, the dense clone's
-         512-game match.
-      3. 3B, starting with the troop shares.
+    - **Dense night and the A/B** (`bc3-dense`: 2026-10-04 13:40 to 2026-10-05 03:24, 13 h 44 min, all 24,981 updates,
+      no restart), scored with the other three in one run (`runs/score/20261005-034226.json`; the clone, probe and MoE
+      repeat 2026-10-04's numbers exactly). Dense vs MoE:
+      - NLL 0.8424 vs 0.8430 (dense 0.0006 lower), every bucket within 0.002 except spawn (0.677 vs 0.671);
+      - attack target 1.602 vs 1.607 (accuracy 49.4% vs 49.2%); action type, both sizes and the value within 0.001;
+      - the cell heads lean MoE: spawn cell 8.72 vs 8.61 (accuracy 2.0% vs 2.2%), city cell 6.84 vs 6.79 (0.4% vs
+        1.0%), boat cell 4.99 vs 4.98 (7.3% vs 9.7%). These heads score few rows (spawns, cities and boats are rare
+        commands), so this is suggestive only. It fits the router giving spawns their own expert mix;
+      - the training curves on the same windows: dense lower by up to 0.016 NLL around updates 2,000–4,000, the MoE
+        lower by at most 0.0025 from update 9,000 on.
+      - **MoE rule: keep the MoE.** Its NLL is within 0.02 of dense's, and it is 2.7% slower in PPO, within 5% (6.7%
+        faster in the speed run before, so the gap is noise). Gate 3A passed on the MoE clone on all three criteria, so
+        3A is done and the dense clone needs no match.
+      - Reading: in ranked 1v1 BC, the experts add no measurable accuracy overall and cost no measurable speed. The
+        published deep-RL gains of Soft-MoE came from feeding it the encoder's output as many tokens (Obando-Ceron et
+        al. 2024; Sokar et al., ICLR 2025, found the tokens, not the number of experts, drove them), while ours gets
+        one fused vector per decision (decision 5c allowed both). The case for the MoE rests on the mixed modes ahead
+        (3C, Phase 6), where the router can blend the experts by mode.
+    - **Next:** 3B, starting with the troop shares (below). Until their BC night is measured, run only the purge (due by
+      ~2026-10-10), not the crawl, so that night trains on the same records as the 3A clone it is compared with.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
