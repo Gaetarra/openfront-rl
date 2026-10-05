@@ -7,7 +7,7 @@ import torch
 
 from trainer.control import REPLAYS
 from trainer.env import ONION
-from trainer.eval import label, name_players, play, replay_dir, seats_for, summarize, tag
+from trainer.eval import Cooldown, label, name_players, play, replay_dir, seats_for, summarize, tag
 from trainer.model import new_net
 from trainer.test_model import DIMS
 
@@ -72,6 +72,11 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(first["episodes"], 2)
         self.assertEqual(first, second)
 
+    def test_a_cooldown_keeps_policy_a_from_acting_twice_in_a_row(self):
+        r = play(["random", "random"], ONION2, episodes=2, workers=1, games_per_worker=2, seed="cool", a_cooldown=1)
+        self.assertEqual(r["meters"]["follow_share"], 0.0)
+        self.assertGreater(r["meters"]["blocked_share"], 0.0)
+
     def test_scripted_against_random(self):
         tmp = tempfile.mkdtemp()
         r = play(["scripted", "random"], ONION2, episodes=4, workers=1, games_per_worker=4, seed="eval-2",
@@ -81,6 +86,46 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(len(r["recorded"]), 1)
         saved = json.loads((Path(tmp) / f"{r['recorded'][0]}.json").read_text())
         self.assertEqual(saved["info"]["gameID"], r["recorded"][0])
+
+
+def type_mask(spawn_phase=False):
+    """One row's legal types (no-op, spawn, attack, boat, city): the spawn phase allows only no-op and spawn."""
+    return torch.tensor([[True, True, False, False, False] if spawn_phase else [True, False, True, True, True]])
+
+
+def always(row):
+    return lambda obs: torch.tensor([row])
+
+
+class CooldownTest(unittest.TestCase):
+    """The bandwidth test (PLAN 3B): policy A's next decisions after an action become no-ops, and meters count how it
+    acts."""
+
+    def test_the_decision_after_an_action_becomes_a_no_op(self):
+        policy = Cooldown(always([2, 0, 1, 0]), 1)
+        self.assertEqual([int(policy({"type_mask": type_mask()})[0, 0]) for _ in range(4)], [2, 0, 2, 0])
+        m = policy.meters()
+        self.assertEqual((m["act_share"], m["follow_share"], m["blocked_share"]), (0.5, 0.0, 0.5))
+
+    def test_the_spawn_phase_is_left_alone(self):
+        policy = Cooldown(always([1, 7, 0, 0]), 1)
+        self.assertEqual([int(policy({"type_mask": type_mask(True)})[0, 0]) for _ in range(3)], [1, 1, 1])
+
+    def test_without_a_cooldown_the_meters_only_count(self):
+        policy = Cooldown(always([2, 0, 1, 0]), 0)
+        self.assertEqual([int(policy({"type_mask": type_mask()})[0, 0]) for _ in range(3)], [2, 2, 2])
+        m = policy.meters()
+        self.assertEqual((m["act_share"], m["blocked_share"]), (1.0, 0.0))
+        self.assertAlmostEqual(m["follow_share"], 2 / 3)
+
+    def test_both_wanted_counts_decisions_with_weight_on_a_troop_and_a_gold_action(self):
+        def policy(obs):
+            policy.type_probs = torch.tensor([[0.2, 0.0, 0.3, 0.0, 0.5], [0.5, 0.0, 0.4, 0.0, 0.1]])
+            return torch.zeros(2, 4, dtype=torch.long)
+
+        meter = Cooldown(policy, 0)
+        meter({"type_mask": type_mask().expand(2, -1)})
+        self.assertEqual(meter.meters()["both_share"], 0.5)
 
 
 if __name__ == "__main__":
