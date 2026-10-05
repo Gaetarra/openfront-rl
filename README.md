@@ -1,7 +1,7 @@
 # openfront-rl
 
-A deep reinforcement learning bot for [OpenFront.io](https://openfront.io), the territorial real-time strategy game.
-Work in progress.
+**StockShip**: a deep reinforcement learning bot for [OpenFront.io](https://openfront.io), the territorial real-time
+strategy game. Named after the chess engine Stockfish, because the goal is the strongest bot possible. Work in progress.
 
 The goal is a bot that plays every mode (Ranked 1v1/2v2, FFA, Team) well: first learning from human replays,
 then improving through self-play. The full design, phases and decisions are in [docs/PLAN.md](docs/PLAN.md).

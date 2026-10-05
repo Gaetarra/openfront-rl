@@ -10,6 +10,12 @@ release and the base model follows each new release.
 **Maintainers (OpenFront owner on Discord, 2026-09-30):** using the public API for training is fine (no data dump:
 we crawl it ourselves); the bot may be tested in casual multiplayer games (not ranked, no abuse); the user's account
 has an AI-DEV tag.
+**The bot: StockShip** (named by the user on 2026-10-05, after the chess engine Stockfish). The goal is the strongest
+bot possible, not a copy of human play:
+- human habits (a few commands per minute, single-missile nukes) bind only behaviour cloning;
+- RL may go past them as fast as the frozen evaluations allow. The KL leash keeps early RL near the clone, and
+  loosening it too early made the Phase 2 bot worse (0.773 → 0.576);
+- the game's rules always bind, and the server's command limits count as game rules.
 
 ## Ambition ladder (honest expectations)
 | Level | Target | Outlook |
@@ -31,8 +37,47 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
 - No fog of war → state is essentially Markov → no LSTM.
 - Ownership: zero-copy `Uint16Array` `game.map().tileStateBuffer()` (owner = v & 0xFFF, fallout bit 13, defense bit 14),
   live during a tick. Moving units keep `unit.tile()` current every tick.
-- `attack` = {targetID | null, absolute troops}: player-level. Boats/builds/nukes/warships take a tile.
-- SAM interception is deterministic. `build_unit.amount` (1–50) makes salvos native; `rocketDirectionUp` flips the arc.
+- `attack` = {targetID | null, absolute troops}: player-level. Boats/builds/nukes/warships take a tile. An attack runs
+  on after its command until one of these happens (`AttackExecution.ts`):
+  - its troops are spent;
+  - it is cancelled;
+  - nothing is left to conquer;
+  - an alliance forms.
+- **Nukes and SAMs** (checked in v0.34.22 on 2026-10-05):
+  - A SAM holds as many missiles as its level and reloads each one in 9 s (`SAMCooldown`).
+  - Interception is deterministic, with no hit chance.
+  - Each nuke is claimed by one SAM, so overlapping SAMs add their slots.
+  - Range: 150 − 480 / (level + 5) tiles, 70 at level 1.
+  - Among the nukes due this tick, hydrogen bombs get a bonus worth 70 tiles of distance, then nearer targets come
+    first, then the sooner explosion (`SAMLauncherExecution.ts`).
+  - An upgrade adds its slot empty: `increaseLevel` puts it in the reload queue, so it is ready 9 s later. The range
+    ramps to the new level's over 4.5 s. Silos work the same way.
+  - Atom and hydrogen bombs fly 10 tiles per tick, so a strike lands within seconds. An upgrade during a strike only
+    widens the range of the slots already loaded.
+  - `build_unit.amount` (1–50) repeats only atom and hydrogen bombs, one tick apart per silo. Each missile needs its own
+    loaded silo slot and its gold; the extras fail silently.
+  - `upgrade_structure.amount` (1–50) buys levels until the gold runs out.
+  - Each new structure takes its own intent.
+  - `rocketDirectionUp` flips the arc.
+  - The client offers atom bombs ×1, ×2, ×5 or ×max (capped by loaded slots and gold), hydrogen bombs ×1 only, and
+    upgrades ×1, ×5, ×10 or ×max.
+  - So 2 atom bombs arriving less than 9 s apart beat a level-1 SAM; the game's own comment calls ×2 the standard answer
+    to a single SAM. Two single nukes 0.5 s apart do the same.
+- **Structures:**
+  - Building and upgrading cost the same.
+  - The price counts min(levels owned, levels ever built), and ports and factories share one count. City, port and
+    factory cost min(1M, 2^n × 125k).
+  - Construction times: city and factory 2 s, port and defense post 5 s, silo 10 s, SAM 30 s. Upgrades are instant.
+  - Structures stay ≥ 15 tiles apart.
+  - No code removes a single level:
+    - a nuke deletes every unit within its outer radius, whatever its level (atom 30 tiles, hydrogen 100);
+    - a captured tile hands its structure to the captor with every level. Defense posts are destroyed instead.
+  - So a lost stack becomes the enemy's stack.
+- **The server's command limits** (`src/server/ClientMsgRateLimiter.ts`; the simulation does not apply them):
+  - per client, 10 intents per second and 150 per minute (wall-clock token buckets that start full, plus a count per
+    fixed window);
+  - intents over the limit are dropped silently, for humans too;
+  - an intent over 2,000 bytes, or 5 MB sent in total, gets the client kicked.
 - **Ranked** (src/server/MapPlaylist.ts:490-551): 1v1 = FFA with 2 players, 2v2 = 2 teams with donations; maps
   Australia 40%, Iceland/Asia/EuropeClassic 20% each; Compact 20% (1v1) / 50% (2v2); nations disabled; 100/400 bots;
   timer 10 min Compact / 15 Normal; spawn immunity 30/60 s. Win = last human/team standing, else 80% land or tile leader
@@ -71,6 +116,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
    2026-10-04. 3B restores it.)
 4. **Missiles: the policy never guesses.** SAM-coverage channels first; then an exact interception predictor (copy of
    `SAMTargetingSystem` driving a mini-sim of SAMs + nukes) → per cell and arc: interceptor slots on the path.
+   - The coverage channels count the ready interceptors on each cell: over the covering SAMs, level minus missiles
+     reloading (3B). So a level-1 and a level-14 SAM look different.
+   - That count is a lower bound for a strike on the cell. The predictor adds the SAMs along the path.
 5. **Many different situations** (spawn, early/mid/late, many vs few players, modifiers, ranked vs public) at 3 levels:
    a. everything is an input: phase, alive players, mode, ranked type, every modifier as scalars;
    b. rule-routed specialisation where decisions differ: a dedicated spawn head; optional per-mode specialist checkpoints
@@ -100,8 +148,22 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
 11. **Δ = 5 ticks (0.5 s), one action per decision**: ~2,400 decisions per 20-min game instead of 12,000. Extra human
     intents inside a BC window queue into following windows. Measured on 61 replays (2026-09-30): median 21 commands/min
     per player in ranked 1v1 (p90 32), 16 in 2v2; only 10–15% of active 0.5 s windows hold 2+ commands, so Δ = 5 holds.
+    **Under review (2026-10-06):** the user proposed three action bins (troops, gold, diplomacy), each taking up to one
+    action per decision.
+    - The reasons:
+      - today a build in a window delays a new attack, and the reverse: one softmax answers two questions;
+      - bursts: the server allows 10 intents/s, one action per decision only 2/s.
+    - Against:
+      - human play shows almost no parallel use. In 2,101 ranked 1v1 records, only 0.02% of 570k command windows mix a
+        troop command with a gold command (10.3% hold 2+ commands, nearly all of one kind);
+      - the server holds every client to 150/min, so bins add at most 25% sustained;
+      - bins would make the server's limits reachable, so the environment would need the limiter and a budget input.
+    - Decided by a bandwidth test before 3B's action work (3B).
 12. **Deployment requirements baked in**: same pinned commit on the server; random intent latency L ∈ {1,2,3} turns
-    (p = .6/.3/.1), seat order shuffled per turn; ≤150 intents/min/seat; real-time CPU inference.
+    (p = .6/.3/.1), seat order shuffled per turn; real-time CPU inference.
+    - The server's command limits (10 intents/s, 150/min; "Findings") hold by construction. Decision 11 sends at most
+      one intent per 0.5 s: 120/min, and at most 3 in any second with the latency jitter.
+    - So the environment needs no copy of the limiter while decision 11 holds.
 13. **Curriculum: Ranked 1v1 → Ranked 2v2 → public FFA/Team with nations + modifiers → augmented/procedural maps.**
     Ranked first: 4 maps, no nations, 2–4 players (natural self-play), 10–15 min games, best human data, clean win/loss.
 14. **Game updates: the base model tracks the official servers.** The game submodule is pinned to the production release
@@ -189,6 +251,16 @@ all modifiers, win-threshold progress, time left, tiles-per-cell.
 | diplomacy | player ptr × {request/accept, reject, break, extend, donate gold, donate troops, embargo on/off, target} | alliance* / donate* / embargo / targetPlayer |
 Dropped in v1: emoji, quick_chat, delete_unit, cancel_boat, embargo_all. Masks: cheap approximate grid masks (mostly
 derived on the GPU from observation channels); exact check only on the sampled action; failures = logged no-ops.
+**Amounts and the arc are deferred (2026-10-06).** 3B sends one missile on the default arc and upgrades by one level.
+- Why:
+  - two single nukes 0.5 s apart beat a level-1 SAM just like a ×2 salvo;
+  - bulk upgrades cost the same per level;
+  - humans flip the arc on 0.4% of nukes.
+- They return if 4A's intercepted-nuke rate stays high, or with the Phase 5 predictor (amount = interceptor slots on
+  the path + 1). One salvo decision is easier for RL to find than a barrage over several decisions.
+- Rule set when they return (user decision 2026-10-05):
+  - training, self-play and private lobbies follow the server's rules (1–50);
+  - in official casual lobbies, a deployment switch holds the bot to what the client offers ("Findings").
 Coverage of human commands (61 replays, 2026-09-30): this list 99.9% ranked 1v1, 99.8% 2v2, 99.5% FFA and Team; the
 Phase 1 subset (no-op, spawn, attack, boat, build city) 94.7%, 92.1%, 76.0%, 81.3%. The Phase 1 subset misses what
 decides the mid and late game: per ranked 1v1 game ~5 nukes, 3–4 silos, 3–4 defense posts, 2 factories, 1 port, 1 SAM,
@@ -587,11 +659,36 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         al. 2024; Sokar et al., ICLR 2025, found the tokens, not the number of experts, drove them), while ours gets
         one fused vector per decision (decision 5c allowed both). The case for the MoE rests on the mixed modes ahead
         (3C, Phase 6), where the router can blend the experts by mode.
-    - **Next:** 3B, starting with the troop shares (below). Until their BC night is measured, run only the purge, not
-      the crawl, so that night trains on the same records as the 3A clone it is compared with. The purge ran
+    - **Next:** 3B (below): the bandwidth test, then the troop shares. Until their BC night is measured, run only the
+      purge, not the crawl, so that night trains on the same records as the 3A clone it is compared with. The purge ran
       2026-10-05 02:09 UTC: 3 records removed (21,008 left), none from the scoring set (still 766); the next is due by
       ~2026-10-12.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
+  - **Reviewed 2026-10-06** against the StockShip brief (`docs/superpowers/specs/2026-10-05-stockship-3b-brief.md`).
+    The brief's game facts were checked in the code: corrections are in "Findings", and the ideas are decided below
+    and in decisions 4, 11 and 12. Order:
+    1. the bandwidth test;
+    2. the troop shares with a second network, in one night;
+    3. the actions, observations and extractor;
+    4. one BC refresh;
+    5. Gate 3B.
+  - **Bandwidth test** (first; it decides the action bins of decision 11).
+    - The Phase 2 PPO bot replays the 512 fixed games where it beat the Phase 2 clone 0.773, with a cooldown: after any
+      action, its next decision is a no-op (at most 1 action/s, no back-to-back actions, spawn phase exempt). The
+      option is `trainer.eval --a-cooldown 1`, and the match takes ~35 min.
+    - The cooldown is harsher than the forced choice (it blocks any two actions within 1 s, of one kind or not), so it
+      bounds the bins' gain from above. The bias favours the bins: a bot trained to act every 0.5 s loses more when
+      throttled than a bot trained under the limit would.
+    - Meters, from the same match:
+      - the share of decisions that act;
+      - the share of actions that follow an action;
+      - the share of decisions where the policy puts ≥ 25% on both a troop and a gold action.
+    - Rule, set in advance:
+      - a drop of more than 0.05 (~2.5 SE) means bandwidth matters at today's skill. Bins then join 3B's actions, with
+        the server's limiter and a command budget in the environment;
+      - otherwise decision 11 stays for 3B, and the meters move to the 3B clone and 4A (Phase 4).
+    - The test measures a bot that acts at human pace. A league bot may learn to use more bandwidth, which is what the
+      4A meters are for.
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
     the player it attacks; and its five sizes (10/25/50/75/100% of current troops) fit human play badly.
@@ -617,6 +714,23 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - the bridge takes a percent; 5-size checkpoints map theirs to 10/25/50/75/100%.
     - Measured alone: one BC night with the core 3A keeps, scored against the 3A clone (the 100 shares summed back into
       the five sizes' ranges, for a like-for-like NLL), then 512 games against it. Then the rest of 3B.
+    - **A second network in the same night: real MoE experts** (user decision 2026-10-05; the brief's idea F).
+      - Each of the 8 experts becomes a 2-layer SwiGLU network, 512 → 1024 → 512, instead of one 512 × 512 layer.
+        That adds 12.6M parameters and ~12.6M multiply-adds per decision, ~1% of the CNN's ~1.4 GMAC on the 192 × 256
+        grid: decision 6's brain growth. It is a new core value in the checkpoint, so old checkpoints keep working.
+      - One BC run trains both networks on the same replayed windows, paired row by row. BC is limited by the replay
+        workers, not the GPU: the Phase 2 and Phase 3 networks ran at 758 and 751 rows/s although their training costs
+        differ.
+      - A speed check comes first: two networks must keep ≥ 90% of one network's rows/s. Otherwise the second network
+        takes its own night.
+      - Two comparisons, each differing in one thing:
+        - shares alone against the 3A clone gives the shares' effect;
+        - shares with the new experts against shares alone gives the experts' effect.
+      - Keep rule, like the MoE rule: keep the new experts unless the old core's NLL is more than 0.02 lower, or they
+        make PPO more than 5% slower.
+      - Expectation: the deep-RL Soft-MoE paper behind decision 5c (Obando-Ceron et al. 2024) also used single-layer
+        experts, and its one-vector-per-sample input did worst. So the 3A tie more likely comes from the single fused
+        vector than from the experts' depth (3A reading). The routing test belongs in 3C.
     - The 3A nights keep the five sizes: both arms share them, so the dense / MoE comparison stays fair, and changing
       the heads mid-A/B would cost the running night and two more.
   - **Actions**, as flat types:
@@ -626,24 +740,40 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - upgrade: the own structure nearest the chosen cell;
     - retreat: a pointer; it cancels the largest attack on that target.
     - One heat map per cell action (12 instead of 3).
-    - Nukes use the default arc and one missile (98% of human nukes); upgrades are by one level.
+    - Nukes use the default arc and one missile, and upgrades are by one level ("Action space": amounts deferred). In
+      2,101 ranked 1v1 records:
+      - 98.7% of 9,255 human nukes were single missiles, and 0.4% flipped the arc;
+      - 10% came within 2 s of the same player's previous nuke. Humans build barrages from single clicks, and so can
+        the bot at one action per 0.5 s;
+      - 92% of upgrades were by one level, and upgrades are 0.3% of commands.
     - Left out of the loss: alliances, embargo, emoji, chat, donations, cancel boat, warship moves and MIRV (0.4% of 1v1
       commands).
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
     GPU from the channels. The exact check stays in the worker, and failures are counted no-ops.
   - **Observations**: nukes in flight and their targets, SAM and defense-post coverage, silo readiness, and unit costs
     as scalars. The bridge sends nuke targets and unit levels.
+    - SAM coverage counts the ready interceptors on each cell, by relation (decision 4; the brief's idea D): over the
+      covering SAMs, level minus missiles reloading.
+    - SAMs under construction are left out, and each SAM's current range is used (it ramps after an upgrade).
   - **Extractor**: every intent type is mapped. A wrapper masks the new types for 5-action checkpoints. Then a BC
     refresh.
   - **Gate 3B**:
     - commands outside the action set < 0.5% (~6% now);
     - invalid actions < 1%;
     - 1,000 ranked games without errors;
-    - beats the 3A clone ≥ 0.545.
+    - beats the 3A clone ≥ 0.545;
+    - a 10-update PPO probe keeps ≥ 75% of Phase 2's decisions/s, compared within one run as in Gate 3A. 3B adds 9 heat
+      maps, coverage channels and maybe 12.6M parameters.
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
   - Compact FFA against Easy and Medium nations, as an evaluation only.
+  - **The routing test** (the brief's idea G):
+    - the MoE core against a dense core with the same parameters and compute, e.g. 8 SwiGLU experts of 512 → 1024 →
+      512 against one dense SwiGLU layer of 512 → 8192 → 512, so that only the router's gates differ;
+    - 1v1 + 2v2 is the first place where the router can blend by mode. In 1v1 alone, a tie keeps the MoE by rule;
+    - if new modes crowd into the experts the 3A router favours (it left 4 of 8 at 2–3% weight), try upcycling (copying
+      a trained expert), a load-balancing term or router noise.
   - **Gate 3C**:
     - 1,000 2v2 games without errors;
     - the clone team beats scripted-expander teams ≥ 0.75;
@@ -670,6 +800,19 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   and backward passes) and the KL reference's forward pass in every epoch. Levers to measure: 2 epochs, and the
   reference computed once per rollout. Rollouts are stored as 8 bits (3A).
 - **Stall protocol**: reverse curriculum, then shaping.
+- **Bandwidth meters** (from 3B's bandwidth test):
+  - the share of decisions that act, per game phase;
+  - the share of actions that follow an action;
+  - the share of decisions with ≥ 25% on both a troop and a gold action.
+  - If 3B keeps decision 11, bins come in when the bot acts in more than half of a phase's decisions, or wants both
+    kinds of action in more than 10% of them.
+- **Intercepted-nuke rate**: if it stays high, salvo amounts come back ("Action space").
+- **Dormant units** (Sokar et al., ICML 2023):
+  - the share of each layer's units whose mean |activation| is at most a small fraction of the layer's mean, logged in
+    PPO, where the league shifts the data;
+  - the 3B clone's checkpoint gives the baseline with one forward pass;
+  - if the share climbs: leaky ReLU in the CNN, or resetting the dormant units. Abbas et al. 2023 and Dohare et al.
+    (Nature, 2024) report the same loss of plasticity in long training on shifting data.
 - **Also from Phase 2**:
   - the exact KL, never a one-sample estimate;
   - more games per update and smaller steps;
@@ -678,6 +821,12 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
 **Phase 5 — Exact nuke-interception predictor (≈1–2 weeks)**: silo choice as `PlayerImpl.nukeSpawn`,
 `UniversalPathFinding.Parabola`, targetable window, copied SAM targeting (slots, cooldowns, upgrade ramp, stacked-launch
 stagger). Gate A: frozen-world harness matches 100% per nuke. Gate B (metric): in-game agreement, unexplained mismatches = 0.
+- Why it stays here (reviewed 2026-10-06):
+  - SAMs are rare in ranked 1v1: 0.9 per game for both players, against 4.4–4.7 nukes;
+  - 3B's coverage counts already show the interceptors at each target (decision 4);
+  - humans already barrage with single clicks;
+  - the predictor must match the game's targeting exactly, on every upgrade.
+- It is an input, never a mask: the bot may strike a defended cell with enough nukes.
 
 **Phase 6 — Broaden & scale**:
 - public FFA/Team with nations (Easy→Impossible) and all modifiers (water nukes via terrain deltas), through the public
