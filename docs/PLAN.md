@@ -69,10 +69,14 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
     factory cost min(1M, 2^n × 125k).
   - Construction times: city and factory 2 s, port and defense post 5 s, silo 10 s, SAM 30 s. Upgrades are instant.
   - Structures stay ≥ 15 tiles apart.
-  - No code removes a single level:
-    - a nuke deletes every unit within its outer radius, whatever its level (atom 30 tiles, hydrogen 100);
-    - a captured tile hands its structure to the captor with every level. Defense posts are destroyed instead.
-  - So a lost stack becomes the enemy's stack.
+  - Spreading versus stacking:
+    - a nuke deletes every building within its outer radius, with all its levels (atom 30 tiles, hydrogen 100);
+    - a captured tile hands its building to the captor with every level. Defense posts are destroyed instead;
+    - so a nuke on spread level-1 buildings costs one level per building hit, while a stack loses all its levels, and
+      a captured stack goes to the enemy whole;
+    - spreading protects against one bomb only when the buildings are farther apart than its blast's diameter: 60
+      tiles for an atom bomb, 200 for a hydrogen bomb, against a minimum spacing of 15;
+    - each new building takes one decision, and so does each upgrade level while amounts are deferred.
 - **The server's command limits** (`src/server/ClientMsgRateLimiter.ts`; the simulation does not apply them):
   - per client, 10 intents per second and 150 per minute (wall-clock token buckets that start full, plus a count per
     fixed window);
@@ -151,7 +155,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
     **Under review (2026-10-06):** the user proposed three action bins (troops, gold, diplomacy), each taking up to one
     action per decision.
     - The reasons:
-      - today a build in a window delays a new attack, and the reverse: one softmax answers two questions;
+      - one softmax answers two questions: a build in a window delays a new attack, and the reverse. The bot re-reads
+        the state every decision, so an emergency comes first, but it interrupts the plan: a counter-attack on a
+        landing 200k transport pauses a run of SAM and city builds;
       - bursts: the server allows 10 intents/s, one action per decision only 2/s.
     - Against:
       - human play shows almost no parallel use. In 2,101 ranked 1v1 records, only 0.02% of 570k command windows mix a
@@ -672,23 +678,29 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     3. the actions, observations and extractor;
     4. one BC refresh;
     5. Gate 3B.
-  - **Bandwidth test** (first; it decides the action bins of decision 11).
-    - The Phase 2 PPO bot replays the 512 fixed games where it beat the Phase 2 clone 0.773, with a cooldown: after any
-      action, its next decision is a no-op (at most 1 action/s, no back-to-back actions, spawn phase exempt). The
-      option is `trainer.eval --a-cooldown 1`, and the match takes ~35 min.
-    - The cooldown is harsher than the forced choice (it blocks any two actions within 1 s, of one kind or not), so it
-      bounds the bins' gain from above. The bias favours the bins: a bot trained to act every 0.5 s loses more when
-      throttled than a bot trained under the limit would.
-    - Meters, from the same match:
-      - the share of decisions that act;
+  - **Bandwidth test** (first; it decides the action bins of decision 11). Three matches of the Phase 2 PPO bot
+    against the Phase 2 clone, on the 512 fixed games where it scored 0.773 (~35 min each):
+    1. baseline, unchanged: it should repeat 0.773, and gives the meters at today's bandwidth;
+    2. throttle (`trainer.eval --a-cooldown 1`): after any action, the bot's next decision is a no-op (at most 1
+       action/s, no back-to-back actions, spawn phase exempt). It measures what today's bot loses with less bandwidth;
+    3. upward probe (`--a-two-bins`, the user's design): each decision samples one troop action (attack, boat or
+       no-op) and one gold action (city or no-op). Each kind keeps the policy's own probability, as bins trained by
+       imitation would, so the bot acts as often as before and only acting in parallel is new.
+    - Meters, from every match:
+      - the share of decisions that act, and that act twice (the probe);
       - the share of actions that follow an action;
       - the share of decisions where the policy puts ≥ 25% on both a troop and a gold action.
     - Rule, set in advance:
-      - a drop of more than 0.05 (~2.5 SE) means bandwidth matters at today's skill. Bins then join 3B's actions, with
-        the server's limiter and a command budget in the environment;
-      - otherwise decision 11 stays for 3B, and the meters move to the 3B clone and 4A (Phase 4).
-    - The test measures a bot that acts at human pace. A league bot may learn to use more bandwidth, which is what the
-      4A meters are for.
+      - bins join 3B's actions if the throttle loses more than 0.05 (~2.5 SE) or the probe gains more than 0.05. They
+        bring the server's limiter and a command budget into the environment;
+      - otherwise decision 11 stays for 3B. The probe then runs again on the 3B clone before 4A, with its ten gold
+        actions, and the meters run in 4A (Phase 4).
+    - Limits (raised by the user, 2026-10-06):
+      - today's bot learned from humans who almost never act in parallel (0.02% of windows), so it never learned to.
+        Its only gold action is a city, while 3B has ten;
+      - the throttle shows what today's bot loses with less bandwidth, not what a bot would gain with bins;
+      - a gain in the probe is strong evidence for bins; a loss is weak, since the bot was never trained for it. Its
+        city builds are few per game, so the two kinds of action rarely coincide, and a null result says little.
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
     the player it attacks; and its five sizes (10/25/50/75/100% of current troops) fit human play badly.
@@ -804,8 +816,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - the share of decisions that act, per game phase;
   - the share of actions that follow an action;
   - the share of decisions with ≥ 25% on both a troop and a gold action.
-  - If 3B keeps decision 11, bins come in when the bot acts in more than half of a phase's decisions, or wants both
-    kinds of action in more than 10% of them.
+  - If 3B keeps decision 11, bins come in if any of these holds:
+    - the upward probe on the 3B clone gains more than 0.05 (before 4A);
+    - the bot acts in more than half of a phase's decisions;
+    - the bot wants both kinds of action in more than 10% of its decisions.
 - **Intercepted-nuke rate**: if it stays high, salvo amounts come back ("Action space").
 - **Dormant units** (Sokar et al., ICML 2023):
   - the share of each layer's units whose mean |activation| is at most a small fraction of the layer's mean, logged in
