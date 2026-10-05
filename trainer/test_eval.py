@@ -7,8 +7,8 @@ import torch
 
 from trainer.control import REPLAYS
 from trainer.env import ONION
-from trainer.eval import Cooldown, label, name_players, play, replay_dir, seats_for, summarize, tag
-from trainer.model import new_net
+from trainer.eval import Cooldown, label, name_players, play, replay_dir, seats_for, summarize, tag, two_bin_sample
+from trainer.model import ActionDist, new_net
 from trainer.test_model import DIMS
 
 ONION2 = {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1}
@@ -72,6 +72,11 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(first["episodes"], 2)
         self.assertEqual(first, second)
 
+    def test_policy_a_can_take_a_troop_and_a_gold_action_per_decision(self):
+        r = play(["random", "random"], ONION2, episodes=2, workers=1, games_per_worker=2, seed="bins", a_two_bins=True)
+        self.assertEqual(r["episodes"], 2)
+        self.assertIn("parallel_share", r["meters"])
+
     def test_a_cooldown_keeps_policy_a_from_acting_twice_in_a_row(self):
         r = play(["random", "random"], ONION2, episodes=2, workers=1, games_per_worker=2, seed="cool", a_cooldown=1)
         self.assertEqual(r["meters"]["follow_share"], 0.0)
@@ -118,6 +123,13 @@ class CooldownTest(unittest.TestCase):
         self.assertEqual((m["act_share"], m["blocked_share"]), (1.0, 0.0))
         self.assertAlmostEqual(m["follow_share"], 2 / 3)
 
+    def test_a_decision_with_two_actions_counts_as_parallel_and_the_cooldown_drops_both(self):
+        policy = Cooldown(always([2, 0, 1, 0, 4, 3, 0, 0]), 1)
+        rows = [policy({"type_mask": type_mask()})[0].tolist() for _ in range(2)]
+        self.assertEqual(rows, [[2, 0, 1, 0, 4, 3, 0, 0], [0] * 8])
+        m = policy.meters()
+        self.assertEqual((m["act_share"], m["parallel_share"]), (0.5, 0.5))
+
     def test_both_wanted_counts_decisions_with_weight_on_a_troop_and_a_gold_action(self):
         def policy(obs):
             policy.type_probs = torch.tensor([[0.2, 0.0, 0.3, 0.0, 0.5], [0.5, 0.0, 0.4, 0.0, 0.1]])
@@ -126,6 +138,42 @@ class CooldownTest(unittest.TestCase):
         meter = Cooldown(policy, 0)
         meter({"type_mask": type_mask().expand(2, -1)})
         self.assertEqual(meter.meters()["both_share"], 0.5)
+
+
+def dist(n, type_logits, legal_types):
+    """n rows of one policy with 4 cells and 3 player rows: the city map allows only cell 3, the pointer only player 2,
+    and the attack troop bin is almost surely bin 1."""
+    out = {"type": torch.tensor([type_logits] * n, dtype=torch.float), "maps": torch.zeros(n, 3, 4),
+           "ptr": torch.zeros(n, 3), "bins": torch.zeros(n, 2, 5)}
+    out["bins"][:, 0, 1] = 30.0
+    obs = {"type_mask": torch.tensor([legal_types] * n), "cell_mask": torch.ones(n, 3, 4, dtype=torch.bool),
+           "attack_mask": torch.tensor([[False, False, True]] * n)}
+    obs["cell_mask"][:, 2, :3] = False
+    return ActionDist(out, obs), obs
+
+
+class TwoBinTest(unittest.TestCase):
+    """The upward probe of the bandwidth test (PLAN 3B): one troop and one gold action per decision."""
+
+    def test_each_kind_of_action_keeps_its_own_probability_and_both_can_happen_together(self):
+        torch.manual_seed(0)
+        d, obs = dist(4000, [-30.0, 0.0, 0.0, -30.0, 0.0], [True, False, True, True, True])  # attack 1/2, city 1/2
+        a = two_bin_sample(d, obs)
+        attack, city = a[:, 0] == 2, a[:, 4] == 4
+        self.assertAlmostEqual(attack.float().mean().item(), 0.5, delta=0.03)
+        self.assertAlmostEqual(city.float().mean().item(), 0.5, delta=0.03)
+        self.assertAlmostEqual((attack & city).float().mean().item(), 0.25, delta=0.03)
+        self.assertEqual(a[attack][:, 1:4].unique(dim=0).tolist(), [[0, 2, 1]])  # target 2, bin 1
+        self.assertEqual(a[city][:, 5:8].unique(dim=0).tolist(), [[3, 0, 0]])  # the city map's only legal cell
+        self.assertEqual(a[~attack][:, :4].abs().sum().item(), 0)
+        self.assertEqual(a[~city][:, 4:].abs().sum().item(), 0)
+
+    def test_the_spawn_phase_keeps_one_ordinary_action(self):
+        torch.manual_seed(0)
+        d, obs = dist(100, [-30.0, 0.0, 0.0, 0.0, 0.0], [True, True, False, False, False])
+        a = two_bin_sample(d, obs)
+        self.assertTrue((a[:, 0] == 1).all())
+        self.assertEqual(a[:, 4:].abs().sum().item(), 0)
 
 
 if __name__ == "__main__":

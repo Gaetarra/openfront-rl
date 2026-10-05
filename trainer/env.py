@@ -167,12 +167,13 @@ class VecEnv:
 
     def send(self, actions=None):
         """Starts every worker on its next step (replay mode takes no actions); recv() collects it, so the caller can
-        use the GPU meanwhile. actions: int array [N, 4] of [type, cell, target, bin] with grid cell indexes."""
+        use the GPU meanwhile. actions: int array [N, 4] of [type, cell, target, bin] with grid cell indexes, or [N, 8]
+        for two actions per decision (the bandwidth probe, PLAN 3B)."""
         if self.replay:
             for wk in self.workers:
                 wk.send({"cmd": "step"})
             return
-        a = np.asarray(actions, dtype=np.int64).reshape(self.E, self.S, 4)
+        a = np.asarray(actions, dtype=np.int64).reshape(self.E, self.S, -1)  # 4 per action; the bandwidth probe sends 8
         for w, wk in enumerate(self.workers):
             wk.send({"cmd": "step", "actions": a[w * self.G:(w + 1) * self.G].tolist(), "full": self.full_frames})
 

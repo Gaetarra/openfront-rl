@@ -93,8 +93,9 @@ class Scripted:
         return torch.tensor(rows, dtype=torch.long, device=obs["type_mask"].device)
 
 
-def load_policy(spec, dims, device="cuda"):
-    """obs -> actions [n, 4] for "random", "scripted" or a checkpoint path (sampling, as in training)."""
+def load_policy(spec, dims, device="cuda", two_bins=False):
+    """obs -> actions [n, 4] for "random", "scripted" or a checkpoint path (sampling, as in training); with `two_bins`,
+    [n, 8] from two_bin_sample."""
     if spec == "scripted":
         return Scripted()
     model = RandomPolicy(dims).to(device) if spec == "random" else load_net(spec, dims, device)
@@ -105,21 +106,40 @@ def load_policy(spec, dims, device="cuda"):
                 out = model(obs)
             dist = ActionDist(out, obs)
             act.type_probs = dist.type.probs  # for Cooldown's meters
-            return dist.sample()
+            return two_bin_sample(dist, obs) if two_bins else dist.sample()
 
     return act
 
 
+def two_bin_sample(dist, obs):
+    """The upward probe of the bandwidth test (PLAN 3B): per decision a troop action (attack, boat or no-op) and then a
+    gold action (city or no-op), [n, 8]. Each kind keeps the policy's own probability, as bins trained by imitation
+    would, so the bot acts as often as before and only acting in parallel is new. In the spawn phase the first action
+    is an ordinary sample and the second a no-op."""
+    p = dist.type.probs
+    u = torch.rand(len(p), 2, device=p.device)
+    troop = torch.where(u[:, 0] < p[:, ATTACK], ATTACK, torch.where(u[:, 0] < p[:, ATTACK] + p[:, BOAT], BOAT, 0))
+    gold = torch.where(u[:, 1] < p[:, BUILD], BUILD, 0)
+    cells, target, bins, zero = dist.cells.sample(), dist.ptr.sample(), dist.bins.sample(), torch.zeros_like(troop)
+    first = torch.stack([troop, torch.where(troop == BOAT, cells[:, 1], zero),
+                         torch.where(troop == ATTACK, target, zero),
+                         torch.where(troop == ATTACK, bins[:, 0], torch.where(troop == BOAT, bins[:, 1], zero))], 1)
+    second = torch.stack([gold, torch.where(gold == BUILD, cells[:, 2], zero), zero, zero], 1)
+    single = torch.cat([dist.sample(), torch.zeros_like(first)], 1)
+    return torch.where(obs["type_mask"][:, SPAWN, None], single, torch.cat([first, second], 1))
+
+
 class Cooldown:
     """Policy A in the bandwidth test (PLAN 3B): after a decision that acts, the row's next `n` decisions become no-ops,
-    outside the spawn phase (where spawn is legal). Over those decisions it counts the share that acts, the share of
-    actions that follow an action, the share of sampled actions the cooldown dropped, and, for networks, the share of
-    decisions with >= 25% on both a troop and a gold action. With n = 0 it only counts."""
+    outside the spawn phase (where spawn is legal). Over those decisions it counts the share that acts, the share with
+    two actions (two_bin_sample), the share of actions that follow an action, the share of sampled actions the cooldown
+    dropped, and, for networks, the share of decisions with >= 25% on both a troop and a gold action. With n = 0 it
+    only counts."""
 
     def __init__(self, policy, n):
         self.policy, self.n = policy, n
         self.left = self.prev = None
-        self.counts = dict.fromkeys(("decisions", "acted", "follows", "wanted", "blocked", "both"), 0)
+        self.counts = dict.fromkeys(("decisions", "acted", "parallel", "follows", "wanted", "blocked", "both"), 0)
 
     def __call__(self, obs):
         a = self.policy(obs)
@@ -127,16 +147,18 @@ class Cooldown:
         if self.left is None:
             self.left = torch.zeros(len(a), dtype=torch.long, device=a.device)
             self.prev = torch.zeros(len(a), dtype=torch.bool, device=a.device)
-        wanted = live & (a[:, 0] != 0)
+        wanted = live & (a[:, 0::4] != 0).any(1)  # every 4th entry is an action's type
         blocked = wanted & (self.left > 0)
         a[blocked] = 0
-        acted = live & (a[:, 0] != 0)
+        actions = (a[:, 0::4] != 0).sum(1)
+        acted = live & (actions > 0)
         probs = getattr(self.policy, "type_probs", None)
         both = torch.zeros_like(acted)
         if probs is not None:
             both = (probs[:, TROOP_TYPES].sum(1) >= 0.25) & (probs[:, GOLD_TYPES].sum(1) >= 0.25)
-        for key, rows in (("decisions", live), ("acted", acted), ("follows", acted & self.prev), ("wanted", wanted),
-                          ("blocked", blocked), ("both", both & live)):
+        for key, rows in (("decisions", live), ("acted", acted), ("parallel", live & (actions > 1)),
+                          ("follows", acted & self.prev), ("wanted", wanted), ("blocked", blocked),
+                          ("both", both & live)):
             self.counts[key] += int(rows.sum())
         self.left = torch.where(acted, self.n, (self.left - 1).clamp(min=0))
         self.prev = acted
@@ -146,7 +168,8 @@ class Cooldown:
         c = self.counts
         share = lambda k, n: c[k] / c[n] if c[n] else 0.0
         m = {"decisions": c["decisions"], "act_share": share("acted", "decisions"),
-             "follow_share": share("follows", "acted"), "blocked_share": share("blocked", "wanted")}
+             "parallel_share": share("parallel", "decisions"), "follow_share": share("follows", "acted"),
+             "blocked_share": share("blocked", "wanted")}
         if getattr(self.policy, "type_probs", None) is not None:
             m["both_share"] = share("both", "decisions")
         return m
@@ -157,27 +180,29 @@ def seats_for(E, S):
     return [[(e + p) % S for p in range(S)] for e in range(E)]
 
 
-def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed="eval", record=None, a_cooldown=0):
+def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed="eval", record=None, a_cooldown=0,
+         a_two_bins=False):
     """Plays the first ceil(episodes / games) episodes of every game slot; returns the summary of policy 0, its meters
-    (Cooldown, with `a_cooldown` no-ops after each of its actions), and the IDs of the games saved with `record`
-    ({"dir", "gitCommit", "games"}). Sampling uses a fixed torch seed, so a given set of policies always gives the same
-    result."""
+    (Cooldown, with `a_cooldown` no-ops after each of its actions; `a_two_bins`: a troop and a gold action per
+    decision), and the IDs of the games saved with `record` ({"dir", "gitCommit", "games"}). Sampling uses a fixed
+    torch seed, so a given set of policies always gives the same result."""
     torch.manual_seed(0)
     envs = VecEnv(config, workers, games_per_worker, seed=seed, device=device, record=record)
     try:
         S, E = envs.S, envs.E
         if len(specs) != S:
             raise ValueError(f"{S} seats need {S} policies, got {len(specs)}")
-        policies = [load_policy(s, envs.dims, device) for s in specs]
+        policies = [load_policy(s, envs.dims, device, two_bins=a_two_bins and p == 0) for p, s in enumerate(specs)]
         policies[0] = Cooldown(policies[0], a_cooldown)
         seats = seats_for(E, S)
         rows = [torch.tensor([e * S + seats[e][p] for e in range(E)], device=device) for p in range(S)]
         per_slot = -(-episodes // E)
         counts, results, seen, obs = np.zeros(E, int), [], [], envs.obs
         while counts.min() < per_slot:
-            act = torch.zeros(envs.N, 4, dtype=torch.long, device=device)
+            act = torch.zeros(envs.N, 8 if a_two_bins else 4, dtype=torch.long, device=device)
             for p, policy in enumerate(policies):
-                act[rows[p]] = policy({k: v[rows[p]] for k, v in obs.items()})
+                out = policy({k: v[rows[p]] for k, v in obs.items()})
+                act[rows[p], :out.shape[1]] = out
             obs, _, _, infos, _ = envs.step(act.cpu().numpy())
             seen += infos
             for info in infos:
@@ -209,6 +234,8 @@ def main(argv=None):
     p.add_argument("--record", type=int, default=0, help="games saved per worker into replays/<A> vs <B>/, to watch them")
     p.add_argument("--a-cooldown", type=int, default=0,
                    help="after each action of policy A, its next N decisions are no-ops (the bandwidth test, PLAN 3B)")
+    p.add_argument("--a-two-bins", action="store_true",
+                   help="policy A takes a troop and a gold action per decision (the bandwidth test's upward probe)")
     a = p.parse_args(argv)
     config = SETUPS[a.setup]
     if config["seats"] == 2 and a.b is None:
@@ -217,8 +244,9 @@ def main(argv=None):
     folder = replay_dir(specs)
     record = {"dir": str(folder), "gitCommit": game_commit(), "games": a.record} if a.record > 0 else None
     result = play(specs, config, a.episodes, a.workers, a.games_per_worker, seed=a.seed, record=record,
-                  a_cooldown=a.a_cooldown)
-    print(json.dumps({"a": a.a, "b": a.b, "setup": a.setup, "a_cooldown": a.a_cooldown, **result}, indent=2))
+                  a_cooldown=a.a_cooldown, a_two_bins=a.a_two_bins)
+    print(json.dumps({"a": a.a, "b": a.b, "setup": a.setup, "a_cooldown": a.a_cooldown, "a_two_bins": a.a_two_bins,
+                      **result}, indent=2))
     if result["recorded"]:
         print(f'watch: python -m trainer.watch --dir "{folder.name}", then open')
         for game_id in result["recorded"]:

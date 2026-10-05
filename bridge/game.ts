@@ -21,7 +21,7 @@ import {
   Winner,
 } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
 import { createPartialGameRecord, simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
-import { attackMask, decodeAction, N_ACTS, typeMask } from "./actions";
+import { Act, attackMask, decodeAction, N_ACTS, typeMask } from "./actions";
 import { CellFrame, encodeUnits, terrainCells } from "./frame";
 import { LatencyQueue } from "./latency";
 import { loadFreshTerrain, resetGameStatics } from "./maps";
@@ -192,22 +192,32 @@ export class EnvGame {
     }
   }
 
-  /** Applies one decision per seat ([type, cell, target, bin]) through the latency queue and advances STEP_TICKS. */
+  /**
+   * Applies one decision per seat through the latency queue and advances STEP_TICKS. A decision is one action
+   * [type, cell, target, bin], or several back to back (the bandwidth probe, PLAN 3B: a troop and a gold action),
+   * where a later no-op means no further action; a seat's decision is invalid when any of its actions is.
+   */
   step(actions: number[][]): void {
     if (this.done) throw new Error("step() after the game ended");
     const masks = this.masks ?? this.currentMasks();
     this.masks = null;
     this.invalid = this.seats.map((seat, i) => {
-      const { intent, valid } = decodeAction(
-        this.game,
-        seat,
-        this.frame,
-        masks[i].types,
-        masks[i].attack,
-        actions[i] ?? [],
-      );
-      if (intent !== null) this.latency.push({ ...intent, clientID: seatClientID(i) } as StampedIntent, this.turn);
-      return !valid;
+      const flat = actions[i] ?? [];
+      let invalid = false;
+      for (let k = 0; k === 0 || k < flat.length; k += 4) {
+        if (k > 0 && flat[k] === Act.Noop) continue;
+        const { intent, valid } = decodeAction(
+          this.game,
+          seat,
+          this.frame,
+          masks[i].types,
+          masks[i].attack,
+          flat.slice(k, k + 4),
+        );
+        if (intent !== null) this.latency.push({ ...intent, clientID: seatClientID(i) } as StampedIntent, this.turn);
+        invalid ||= !valid;
+      }
+      return invalid;
     });
     for (let k = 0; k < STEP_TICKS; k++) this.tickWith(this.latency.take(this.turn));
     this.checkDone();

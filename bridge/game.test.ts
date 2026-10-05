@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
 import { Act } from "./actions";
 import { CellFrame } from "./frame";
@@ -58,6 +59,30 @@ test("random legal play reaches the end with a valid terminal reward", async () 
   assert.ok(rank >= 1 && rank <= 4);
   assert.equal(env.nPlayers, 4);
   assert.equal(env.rewards[0], rewardOf(rank, 4));
+});
+
+test("a decision can carry a second action, and both execute (the bandwidth probe, PLAN 3B)", async () => {
+  const env = await EnvGame.create(ONION, "two-actions");
+  script(env, 300);
+  const seat = env.seats[0];
+  seat.addGold(10_000_000n);
+  const target = blob(env.observe(false), "attack").indexOf(1);
+  assert.ok(target >= 0, "something to attack");
+  env.step([[Act.Attack, 0, target, 1, Act.BuildCity, spawnCell(env), 0, 0]]);
+  assert.equal(seat.units(UnitType.City).length, 1);
+  assert.equal(seat.outgoingAttacks().length, 1);
+  assert.deepEqual(env.invalid, [false]);
+});
+
+test("an empty second slot keeps the decision valid, even where a no-op is illegal", async () => {
+  const env = await EnvGame.create(ONION, "second-noop");
+  let types = blob(env.observe(true), "types");
+  while (types[Act.Noop] === 1) {
+    env.step([[Act.Noop, 0, 0, 0]]);
+    types = blob(env.observe(false), "types");
+  }
+  env.step([[Act.Spawn, spawnCell(env), 0, 0, Act.Noop, 0, 0, 0]]);
+  assert.deepEqual(env.invalid, [false]);
 });
 
 test("a seat that never spawns ends the game last as soon as the spawn phase is over", async () => {
