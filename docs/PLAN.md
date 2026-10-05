@@ -587,8 +587,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         al. 2024; Sokar et al., ICLR 2025, found the tokens, not the number of experts, drove them), while ours gets
         one fused vector per decision (decision 5c allowed both). The case for the MoE rests on the mixed modes ahead
         (3C, Phase 6), where the router can blend the experts by mode.
-    - **Next:** 3B, starting with the troop shares (below). Until their BC night is measured, run only the purge (due by
-      ~2026-10-10), not the crawl, so that night trains on the same records as the 3A clone it is compared with.
+    - **Next:** 3B, starting with the troop shares (below). Until their BC night is measured, run only the purge, not
+      the crawl, so that night trains on the same records as the 3A clone it is compared with. The purge ran
+      2026-10-05 02:09 UTC: 3 records removed (21,008 left), none from the scoring set (still 766); the next is due by
+      ~2026-10-12.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
