@@ -701,6 +701,16 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - the throttle shows what today's bot loses with less bandwidth, not what a bot would gain with bins;
       - a gain in the probe is strong evidence for bins; a loss is weak, since the bot was never trained for it. Its
         city builds are few per game, so the two kinds of action rarely coincide, and a null result says little.
+    - **Results so far (2026-10-06):**
+      - baseline: 0.793 (SE 0.018; seats 0.785 / 0.801), not 0.773. Since 3A the Phase 2 networks read inputs
+        rebuilt from the new channels (within 1/128), so the same seeds play out differently. The gap is within noise
+        (SE of the difference ~0.026), and the other two matches compare with 0.793;
+      - the bot at full bandwidth acts in 17.6% of decisions;
+      - 19.1% of its actions follow an action, against 17.6% if they were independent, so bursts are rare;
+      - it puts ≥ 25% on both a troop and a gold action in 1 of 648k decisions;
+      - throttle: finished in the user's terminal; its numbers are still to be written here;
+      - probe: killed at 192 of 512 games when the app restarted the session (02:28); to be rerun in the user's own
+        terminal.
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
     the player it attacks; and its five sizes (10/25/50/75/100% of current troops) fit human play badly.

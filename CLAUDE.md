@@ -82,8 +82,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - Claude Code kills its background tasks when the session ends, and a training run started as one dies with it. Start
   runs longer than a few minutes detached: a short Python launcher calling `subprocess.Popen([...], stdout=log,
   stderr=log, creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)`, or the user's own
-  terminal. Detached runs are still controlled via the page / `trainer.ctl`. (Surviving a session restart is not yet
-  verified.)
+  terminal. Detached runs are still controlled via the page / `trainer.ctl`. They do not survive a session restart: a
+  chain of eval matches started this way died when the app restarted the session (2026-10-06 02:28). Runs that must
+  outlive the session go in the user's own terminal.
 - The PC's NVIDIA driver occasionally fails (System event nvlddmkm 153) and kills every CUDA program. Checkpoints are
   atomic, and the trainer exits 0 on stop, Save & quit or Ctrl+C and 1 on a crash, so long runs go in a PowerShell
   restart loop: `for ($i = 1; $i -le 5; $i++) { .venv/Scripts/python -m trainer.ppo --run <name> --resume --updates <N>;
