@@ -768,6 +768,23 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         vector than from the experts' depth (3A reading). The routing test belongs in 3C.
     - The 3A nights keep the five sizes: both arms share them, so the dense / MoE comparison stays fair, and changing
       the heads mid-A/B would cost the running night and two more.
+    - **Code (2026-10-06)**, `docs/superpowers/plans/2026-10-06-phase3b-troop-shares.md` (102 trainer + 35 bridge
+      tests):
+      - actions and labels carry a whole percent (1–100); the 5-size networks send 10/25/50/75/100%, the same troops
+        as before;
+      - the share head (arch v3): per kind, a 64-wide hidden layer reads the core state and one player's token, then
+        100 logits. It runs on every token, so the entropy and the KL to the clone stay exact;
+      - soft labels: 0.9 on the human's percent, 0.05 on each neighbour;
+      - scores: `bc/nll` like for like (shares summed into the five sizes' ranges: 1–15, 16–35, 36–61, 62–86 and
+        87–100%), and `bc/nll_shares` at full resolution;
+      - `trainer.bc --twin moe-swiglu` trains the experts' network on the same windows, from the same weights outside
+        the core (`checkpoints/<run>-moe-swiglu`). Parameters: 5.8M with the MoE core, 16.3M with SwiGLU experts.
+    - Rules fixed before the night (2026-10-06):
+      - speed check: the pair keeps ≥ 90% of one network's rows/s, or the twin gets its own night;
+      - shares: they stay unless they lose the 512 games to the 3A clone by more than 2 SE (below ~0.456). A loss that
+        large points to a bug, which is found before the rest of 3B;
+      - experts: the keep rule above, on `bc/nll_shares` (both networks have 100 shares) and the speed check's PPO
+        runs.
   - **Actions**, as flat types:
     - today's 5;
     - build defense post / silo / factory / port / SAM / warship;

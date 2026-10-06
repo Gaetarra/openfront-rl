@@ -50,7 +50,7 @@ node node_modules/typescript/bin/tsc -p ../../tsconfig.json    # typecheck bridg
 npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a real record (run from the game dir)
 npx tsx ../../scripts/troop_shares.ts 60                    # share of their troops humans send per attack/boat, 60 replayed records (~10 min, game dir)
 .venv/Scripts/python scripts/bench_gpu.py                   # GPU encoder throughput (run from the repo root)
-.venv/Scripts/python scripts/speed_check.py                 # PPO decisions/s, BC rows/s and peak VRAM, Phase 2 vs Phase 3 networks (~15 min, PC idle)
+.venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s and peak VRAM (Phase 2, 3B MoE, 3B SwiGLU experts), BC rows/s of one network and of a twin pair (~20 min, PC idle)
 ```
 
 Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUDA 13.0 wheels).
@@ -65,6 +65,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.crawl                          # download ranked 1v1 records into data/ (hours: detach)
 .venv/Scripts/python -m trainer.crawl --purge                  # remove deleted players' records (daily while data is kept)
 .venv/Scripts/python -m trainer.bc --run bc3-moe --core moe --workers 14 --games-per-worker 6   # behaviour cloning: one pass over data/ (~14 h); same control page
+.venv/Scripts/python -m trainer.bc --run bc3b --core moe --twin moe-swiglu --workers 14 --games-per-worker 6   # two new networks on the same windows (PLAN 3B): checkpoints/bc3b and checkpoints/bc3b-moe-swiglu
 .venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000 --warmup 100   # fine-tune a checkpoint (its network, a fresh optimizer)
 .venv/Scripts/python -m trainer.bc --score checkpoints/bc/update0060000.pt checkpoints/bc3-moe/latest.pt   # NLL per head and bucket on the fixed held-out set (~10 min); table + runs/score/*.json
 .venv/Scripts/python -m trainer.eval --a checkpoints/bc/update0060000.pt --b scripted   # ranked 1v1 match, 256 games
@@ -98,9 +99,19 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - BC: an update averages `--accum` replay windows (default 8), and the learning rate warms up, then decays (cosine)
   over `--updates` (default: one pass over the training records). BC checkpoints from before Phase 3 cannot resume;
   start from them with `--init`. Runs with the same `--seed` replay the same records in the same order.
-- Networks: new runs record theirs in the checkpoint (`args["arch"]`, `"core"`); `--init` keeps the checkpoint's. A
-  checkpoint without `"arch"` (Phase 2) loads as `PolicyV1`, which rebuilds its 22 input channels from today's 49
-  (`v1_spatial`), so the Phase 2 bots still play.
+- Networks: new runs record theirs in the checkpoint (`args["arch"]`, `"core"`): v1 is Phase 2, v2 is Phase 3A (5 troop
+  sizes), v3 is Phase 3B (100 troop shares); `--init` keeps the checkpoint's. A checkpoint without `"arch"` (Phase 2)
+  loads as `PolicyV1`, which rebuilds its 22 input channels from today's 49 (`v1_spatial`), so the Phase 2 bots still
+  play.
+- Troops are a whole percent of current troops (1–100) in actions and labels. v1 and v2 networks send
+  10/25/50/75/100%, exactly what their five bins sent. v3 networks read the share with a player's token: the attack's
+  target, or the main owner of the boat's landing cell.
+  - BC labels the human's share, rounded and clamped to 1–100. The loss puts 0.05 on each neighbouring percent
+    (`SHARE_SMOOTH`).
+  - In `--score`, `bc/nll` is like for like (a share network's shares summed into the five sizes' ranges, 1–15, 16–35,
+    36–61, 62–86 and 87–100%), and `bc/nll_shares` is a share network's own NLL.
+  - `--twin CORE` trains a second network on the same windows, from the same weights outside the core. It saves to
+    `checkpoints/<run>-<core>`, and the run resumes both together.
 - GPU memory: ranked PPO with a Phase 3 network needs `--minibatches 12` on the 12 GB card (peak ~10.9 GB). At the
   default 8 it overflows by 1.2–1.9 GB, Windows pages the rest into system RAM without an error, and the run gets 2–4×
   slower (watch "Shared GPU memory" in Task Manager).
