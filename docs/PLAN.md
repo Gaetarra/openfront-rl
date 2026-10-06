@@ -164,7 +164,8 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
         troop command with a gold command (10.3% hold 2+ commands, nearly all of one kind);
       - the server holds every client to 150/min, so bins add at most 25% sustained;
       - bins would make the server's limits reachable, so the environment would need the limiter and a budget input.
-    - Decided by a bandwidth test before 3B's action work (3B).
+    - Kept for 3B by the bandwidth test (2026-10-06, results in 3B): the throttle lost nothing and the probe gained
+      nothing. The probe reruns on the 3B clone before 4A.
 12. **Deployment requirements baked in**: same pinned commit on the server; random intent latency L ∈ {1,2,3} turns
     (p = .6/.3/.1), seat order shuffled per turn; real-time CPU inference.
     - The server's command limits (10 intents/s, 150/min; "Findings") hold by construction. Decision 11 sends at most
@@ -665,8 +666,9 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         al. 2024; Sokar et al., ICLR 2025, found the tokens, not the number of experts, drove them), while ours gets
         one fused vector per decision (decision 5c allowed both). The case for the MoE rests on the mixed modes ahead
         (3C, Phase 6), where the router can blend the experts by mode.
-    - **Next:** 3B (below): the bandwidth test, then the troop shares. Until their BC night is measured, run only the
-      purge, not the crawl, so that night trains on the same records as the 3A clone it is compared with. The purge ran
+    - **Next:** 3B (below): the troop shares (the bandwidth test kept decision 11). Until their BC night is measured,
+      run only the purge, not the crawl, so that night trains on the same records as the 3A clone it is compared with.
+      The purge ran
       2026-10-05 02:09 UTC: 3 records removed (21,008 left), none from the scoring set (still 766); the next is due by
       ~2026-10-12.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
@@ -701,16 +703,24 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - the throttle shows what today's bot loses with less bandwidth, not what a bot would gain with bins;
       - a gain in the probe is strong evidence for bins; a loss is weak, since the bot was never trained for it. Its
         city builds are few per game, so the two kinds of action rarely coincide, and a null result says little.
-    - **Results so far (2026-10-06):**
-      - baseline: 0.793 (SE 0.018; seats 0.785 / 0.801), not 0.773. Since 3A the Phase 2 networks read inputs
-        rebuilt from the new channels (within 1/128), so the same seeds play out differently. The gap is within noise
-        (SE of the difference ~0.026), and the other two matches compare with 0.793;
-      - the bot at full bandwidth acts in 17.6% of decisions;
-      - 19.1% of its actions follow an action, against 17.6% if they were independent, so bursts are rare;
-      - it puts ≥ 25% on both a troop and a gold action in 1 of 648k decisions;
-      - throttle: finished in the user's terminal; its numbers are still to be written here;
-      - probe: killed at 192 of 512 games when the app restarted the session (02:28); to be rerun in the user's own
-        terminal.
+    - **Results (2026-10-06)**, on the same 512 games (`runs/bandwidth-{baseline,throttle,probe}.log`):
+
+      | Match | Win rate (SE) | Acts in | Notes |
+      |---|---|---|---|
+      | baseline | 0.793 (0.018) | 17.6% of decisions | 19.1% of its actions follow an action (17.6% if independent) |
+      | throttle | 0.820 (0.017) | 15.5% | the cooldown dropped 16.6% of its sampled actions |
+      | probe | 0.773 (0.019) | 17.6% | two actions in 0.19% of decisions |
+
+      - The baseline is 0.793, not Gate B's 0.773: since 3A the Phase 2 networks read inputs rebuilt from the new
+        channels (within 1/128), so the same seeds play out differently, within noise.
+      - The bot put ≥ 25% on both a troop and a gold action in 1 of 648k decisions.
+      - **Decision 11 stays for 3B.** The bar was 0.05, and neither match came close:
+        - the throttle lost nothing: +0.027, ~1.1 SE of the difference;
+        - the probe gained nothing: −0.020, ~0.8 SE.
+      - Reading: today's bot is not limited by bandwidth. It acts in one decision in six, rarely twice in a row, and
+        almost never wants a troop and a gold action at once.
+      - As agreed, this says little about a bot with ten gold actions. So the probe reruns on the 3B clone before 4A,
+        and the meters run in 4A (Phase 4).
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
     the player it attacks; and its five sizes (10/25/50/75/100% of current troops) fit human play badly.
