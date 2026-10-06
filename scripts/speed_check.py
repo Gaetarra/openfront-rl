@@ -1,8 +1,9 @@
-"""Speed and memory check (docs/PLAN.md, Gate 3A): PPO decisions/s and peak GPU memory for the Phase 2 network and
-the Phase 3 networks (dense and MoE cores, random weights: speed does not depend on them), then BC rows/s for the
-Phase 2 network and the MoE one. Run it with the PC otherwise idle (~15 min, full GPU):
+"""Speed and memory check (docs/PLAN.md, 3B): PPO decisions/s and peak GPU memory for the Phase 2 network and the
+Phase 3B networks (100 troop shares; MoE and SwiGLU-expert cores, random weights: speed does not depend on them), then
+BC rows/s for one network and for two trained on the same windows (--twin). Run it with the PC otherwise idle (~20 min,
+full GPU):
 
-  .venv/Scripts/python scripts/speed_check.py
+  .venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12
 """
 import argparse
 import shutil
@@ -69,8 +70,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     speed = ROOT / "checkpoints" / "speed"
     speed.mkdir(parents=True, exist_ok=True)
-    for core in ("dense", "moe"):
-        args = {"arch": "v2", "core": core, "widths": "64,128,192", "run": f"speed-{core}"}
+    for core in ("moe", "moe-swiglu"):
+        args = {"arch": "v3", "core": core, "widths": "64,128,192", "run": f"speed-{core}"}
         torch.manual_seed(0)
         torch.save({"model": new_net(DIMS, args).state_dict(), "args": args, "update": 0}, speed / f"{core}.pt")
     idle = gpu_memory()
@@ -80,12 +81,12 @@ def main(argv=None):
         ppo += ["--minibatches", str(a.ppo_minibatches)]
     bc = ["--workers", str(a.bc_workers), "--games-per-worker", str(a.bc_games), "--val-workers", "0", "--updates",
           str(a.bc_updates), "--log-every", str(max(1, a.bc_updates // 6))]
+    moe, swiglu = str(speed / "moe.pt"), str(speed / "moe-swiglu.pt")
     runs = {"speed-ppo-v1": ("trainer.ppo", ppo + ["--init", str(PHASE2), "--opponent", str(PHASE2)]),
-            "speed-ppo-dense": ("trainer.ppo", ppo + ["--init", str(speed / "dense.pt"), "--opponent",
-                                                      str(speed / "dense.pt")]),
-            "speed-ppo-moe": ("trainer.ppo", ppo + ["--init", str(speed / "moe.pt"), "--opponent", str(speed / "moe.pt")]),
-            "speed-bc-v1": ("trainer.bc", bc + ["--init", str(PHASE2)]),
-            "speed-bc-moe": ("trainer.bc", bc + ["--core", "moe"])}
+            "speed-ppo-moe": ("trainer.ppo", ppo + ["--init", moe, "--opponent", moe]),
+            "speed-ppo-moe-swiglu": ("trainer.ppo", ppo + ["--init", swiglu, "--opponent", swiglu]),
+            "speed-bc-one": ("trainer.bc", bc + ["--core", "moe"]),
+            "speed-bc-pair": ("trainer.bc", bc + ["--core", "moe", "--twin", "moe-swiglu"])}
     if a.skip_bc:
         runs = {name: spec for name, spec in runs.items() if spec[0] == "trainer.ppo"}
     results = {}
@@ -94,8 +95,9 @@ def main(argv=None):
             results[name] = run(name, module, flags)
     finally:
         for name in runs:
-            shutil.rmtree(ROOT / "checkpoints" / name, ignore_errors=True)
-            shutil.rmtree(ROOT / "runs" / name, ignore_errors=True)
+            for d in (name, f"{name}-moe-swiglu"):
+                shutil.rmtree(ROOT / "checkpoints" / d, ignore_errors=True)
+                shutil.rmtree(ROOT / "runs" / d, ignore_errors=True)
         shutil.rmtree(speed, ignore_errors=True)
     v1 = results["speed-ppo-v1"][0]
     print(f"\nGPU memory before the runs: {idle} MiB (other programs)")
@@ -103,7 +105,13 @@ def main(argv=None):
         unit = "decisions/s" if "ppo" in name else "rows/s"
         extra = f"  {rate / v1:.0%} of v1, {rate / PHASE2_PPO_SPEED:.0%} of Phase 2's {PHASE2_PPO_SPEED}" \
             if "ppo" in name and name != "speed-ppo-v1" else ""
-        print(f"{name:16} {rate:8.1f} {unit:12} peak {peak} MiB{extra}")
+        print(f"{name:20} {rate:8.1f} {unit:12} peak {peak} MiB{extra}")
+    ppo_moe, ppo_swiglu = results["speed-ppo-moe"][0], results["speed-ppo-moe-swiglu"][0]
+    print(f"\nPPO, SwiGLU experts: {ppo_swiglu / ppo_moe:.0%} of the MoE core's decisions/s "
+          "(keep rule: at most 5% slower)")
+    if "speed-bc-pair" in results:
+        pair = results["speed-bc-pair"][0] / results["speed-bc-one"][0]
+        print(f"BC, two networks: {pair:.0%} of one network's rows/s (PLAN 3B: >= 90% to train both in one night)")
 
 
 if __name__ == "__main__":
