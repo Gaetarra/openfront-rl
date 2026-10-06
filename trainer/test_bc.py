@@ -11,10 +11,10 @@ from unittest import mock
 import torch
 
 from trainer import bc, crawl
-from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, lr_at, main, one_pass, score,
+from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, lr_at, main, measure, one_pass, score,
                         table)
 from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import Policy, PolicyV1, new_net
+from trainer.model import ATTACK, SHARES, ActionDist, Policy, PolicyV1, new_net
 from trainer.test_model import DIMS, N as ROWS, exact_fp32, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
@@ -125,12 +125,32 @@ class CloneTest(unittest.TestCase):
         self.assertLess(losses[-1], losses[0] - 0.3)  # at least the no-op prior is learnt
 
 
+class MeasureTest(unittest.TestCase):
+    def test_a_share_networks_troops_score_like_for_like_and_on_its_own_shares(self):
+        obs = fake_obs()  # rows 3-5: no-op, attack (only on player 2) and city are legal
+        hw, players = obs["cell_mask"].shape[-1], obs["attack_mask"].shape[-1]
+        out = {"type": torch.zeros(ROWS, 5, device="cuda"), "maps": torch.zeros(ROWS, 3, hw, device="cuda"),
+               "ptr": torch.zeros(ROWS, players, device="cuda"),
+               "shares": torch.zeros(ROWS, 2, players, SHARES, device="cuda")}
+        labels = torch.tensor([[ATTACK, 0, 2, 20]] * ROWS, device="cuda")
+        legal = label_legal(obs, labels)
+        self.assertEqual(legal.tolist(), [False] * 3 + [True] * 3)
+        m, zero = Meter(), torch.zeros(ROWS, device="cuda")
+        measure(m, obs, labels, legal, ActionDist(out, obs), zero, zero)
+        s = m.means()
+        self.assertAlmostEqual(s["bc/nll_attack_bin"], -math.log(0.20), places=4)  # 20% lies in 25%'s range, 16-35%
+        self.assertAlmostEqual(s["bc/nll_attack_share"], math.log(SHARES), places=4)
+        self.assertAlmostEqual(s["bc/nll"] - s["bc/nll_type"], -math.log(0.20), places=4)  # one legal target adds 0
+        self.assertAlmostEqual(s["bc/nll_shares"] - s["bc/nll_type"], math.log(SHARES), places=4)
+
+
 class ScoreTest(unittest.TestCase):
     def test_scores_are_repeatable_and_per_head(self):
         with tempfile.TemporaryDirectory() as d:
             paths = []
             for name, args in (("old", {"widths": "64,128,192"}),
-                               ("moe", {"arch": "v2", "core": "moe", "widths": "64,128,192"})):
+                               ("moe", {"arch": "v2", "core": "moe", "widths": "64,128,192"}),
+                               ("shares", {"arch": "v3", "core": "moe", "widths": "64,128,192"})):
                 torch.manual_seed(0)
                 path = Path(d) / name / "update0000001.pt"
                 path.parent.mkdir()
@@ -145,11 +165,13 @@ class ScoreTest(unittest.TestCase):
             self.assertEqual(a.keys(), b.keys())
             for k in a:
                 self.assertTrue(math.isclose(a[k], b[k], abs_tol=1e-4) or (math.isnan(a[k]) and math.isnan(b[k])), k)
-        old, moe = first["metrics"]
+        old, moe, shares = first["metrics"]
         for k in ("bc/nll", "bc/nll_type", "bc/nll_compact", "bc/type_acc", "bc/value_mse", "value/outcome_corr"):
             self.assertIn(k, old)
         self.assertFalse(any(k.startswith("router/") for k in old), "the Phase 2 network has no router")
         self.assertAlmostEqual(sum(moe[f"router/compact_{i}"] for i in range(8)), 1.0, places=4)
+        self.assertIn("bc/nll_shares", shares)
+        self.assertNotIn("bc/nll_shares", moe)
         self.assertIn("old 1", text)
         self.assertIn("bc/nll_type", text)
 

@@ -32,6 +32,7 @@ CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes
 PHASES = ("spawn", "early", "mid", "late")
 SCORE_CUTOFF = 1790812800000  # 2026-10-01 00:00 UTC, in ms: the scoring set comes from the Phase 2 crawl's games
 SCORE_LAYOUT = {"workers": 12, "games_per_worker": 6, "steps": 2000}  # fixed, so every scoring run sees the same rows
+SHARE_SMOOTH = 0.1  # a troop-share label's weight on its two neighbouring percents (PLAN 3B: soft labels)
 
 
 def parser():
@@ -106,16 +107,17 @@ def value_targets(env, gamma, device):
     return torch.from_numpy(env.outcome.reshape(-1).copy()).to(device) * gamma ** left
 
 
-def bc_loss(model, obs, labels, legal, target, vf_coef):
-    """-log pi(label) summed over the rows that can enter the loss and divided by all rows, plus the value loss. Every
-    window has the same rows, so k accumulated windows give the gradient of one batch of all of them."""
+def bc_loss(model, obs, labels, legal, target, vf_coef, smooth=0.0):
+    """-log pi(label) summed over the rows that can enter the loss and divided by all rows, plus the value loss. With
+    `smooth`, a troop-share label keeps 1 - smooth of its weight and spreads the rest onto the neighbouring percents.
+    Every window has the same rows, so k accumulated windows give the gradient of one batch of all of them."""
     with torch.autocast("cuda", torch.bfloat16):
         out = model(obs)
     dist = ActionDist(out, obs)
-    logp = dist.log_prob(torch.where(legal[:, None], labels, torch.zeros_like(labels)))  # other rows: a no-op
-    nll = -(logp * legal).sum() / len(legal)
+    safe = torch.where(legal[:, None], labels, torch.zeros_like(labels))  # other rows: a no-op
+    nll = -(dist.log_prob(safe, smooth=smooth) * legal).sum() / len(legal)
     value = out["value"].float()
-    return nll + vf_coef * 0.5 * (value - target).pow(2).mean(), dist, logp, value, out.get("gates")
+    return nll + vf_coef * 0.5 * (value - target).pow(2).mean(), dist, value, out.get("gates")
 
 
 class Meter:
@@ -135,35 +137,43 @@ class Meter:
 
 
 @torch.no_grad()
-def measure(m, obs, labels, legal, dist, logp, value, target, gates=None):
+def measure(m, obs, labels, legal, dist, value, target, gates=None):
     """For one batch:
     - label statistics;
-    - accuracy and NLL per head;
+    - accuracy and NLL per head. bc/nll and the troop heads' bc/*_bin are like for like for every network: a
+      100-share network's shares are summed into the five sizes' ranges (SIZE_OF). Its own 100-share NLL is
+      bc/nll_shares, with bc/nll_*_share per head;
     - NLL per bucket (game phase and map size);
     - the router's mean weight per expert and bucket, for MoE networks."""
-    t, cell, tgt, b = labels.unbind(1)
+    t = labels[:, 0]
+    safe = torch.where(legal[:, None], labels, torch.zeros_like(labels))  # rows outside the loss: a no-op
+    _, cell, tgt, b = safe.unbind(1)
     n, nl = len(t), legal.sum()
+    logp = dist.log_prob(safe, sizes=True)
     m.add("labels/out_of_set", (t == -1).sum(), n)
     m.add("labels/unmapped", (t == -2).sum(), n)
     m.add("labels/illegal", ((t >= 0) & ~legal).sum(), n)
     m.add("labels/noop", ((t == 0) & legal).sum(), nl)
     m.add("bc/nll", -(logp * legal).sum(), nl)
+    if dist.shares:
+        m.add("bc/nll_shares", -(dist.log_prob(safe) * legal).sum(), nl)
     m.add("bc/nll_type", -(dist.type.log_prob(torch.where(legal, t, 0)) * legal).sum(), nl)
     m.add("bc/type_acc", ((dist.type.logits.argmax(1) == t) & legal).sum(), nl)
     m.add("bc/act_rate_human", ((t > 0) & legal).sum(), nl)
     m.add("bc/act_rate_policy", ((1 - dist.type.probs[:, 0]) * legal).sum(), nl)
-    lc = dist.cells.log_prob(cell.clamp(0, dist.cells.logits.shape[-1] - 1)[:, None].expand(-1, 3))  # [N, maps]
-    size = SIZE_OF.to(b.device)[b.clamp(0, SHARES)]  # the label's percent as one of the five sizes
-    ls = dist.size_log_probs(tgt, cell)  # [N, attack/boat, 5]
-    lb = ls.gather(2, size[:, None, None].expand(-1, 2, 1))[:, :, 0]  # [N, attack/boat]
+    lc = dist.cells.log_prob(cell[:, None].expand(-1, 3))  # [N, maps]
     rows = legal & (t == ATTACK)
     m.add("bc/attack_target_acc", ((dist.ptr.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
-    m.add("bc/nll_attack_target", -(dist.ptr.log_prob(torch.where(rows, tgt, 0)) * rows).sum(), rows.sum())
-    m.add("bc/attack_bin_acc", ((ls[:, 0].argmax(1) == size) & rows).sum(), rows.sum())
-    m.add("bc/nll_attack_bin", -(lb[:, 0] * rows).sum(), rows.sum())
-    rows = legal & (t == BOAT)
-    m.add("bc/boat_bin_acc", ((ls[:, 1].argmax(1) == size) & rows).sum(), rows.sum())
-    m.add("bc/nll_boat_bin", -(lb[:, 1] * rows).sum(), rows.sum())
+    m.add("bc/nll_attack_target", -(dist.ptr.log_prob(tgt) * rows).sum(), rows.sum())
+    size = SIZE_OF.to(b.device)[b.clamp(0, SHARES)]  # the label's percent as one of the five sizes
+    ls = dist.size_log_probs(tgt, cell)  # [N, attack/boat, 5]
+    lt = dist.troop_log_prob(tgt, cell, b) if dist.shares else None  # [N, attack/boat]
+    for k, (typ, name) in enumerate(((ATTACK, "attack"), (BOAT, "boat"))):
+        rows = legal & (t == typ)
+        m.add(f"bc/{name}_bin_acc", ((ls[:, k].argmax(1) == size) & rows).sum(), rows.sum())
+        m.add(f"bc/nll_{name}_bin", -(ls[:, k].gather(1, size[:, None])[:, 0] * rows).sum(), rows.sum())
+        if lt is not None:
+            m.add(f"bc/nll_{name}_share", -(lt[:, k] * rows).sum(), rows.sum())
     for typ, name in ((SPAWN, "spawn"), (BOAT, "boat"), (BUILD, "city")):
         rows = legal & (t == typ)
         hit = dist.cells.logits[:, CELL_HEAD[typ]].argmax(1) == cell
@@ -201,9 +211,9 @@ def backward_windows(model, windows, a, meter):
     """Accumulates the gradient of a.accum windows, each (obs, labels, legal rows, value targets). Their mean loss gives
     the gradient of one batch of all their rows."""
     for obs, labels, legal, target in windows:
-        loss, dist, logp, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef)
+        loss, dist, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef, SHARE_SMOOTH)
         (loss / a.accum).backward()
-        measure(meter, obs, labels, legal, dist, logp, value, target, gates)
+        measure(meter, obs, labels, legal, dist, value, target, gates)
 
 
 def score_records():
@@ -227,8 +237,8 @@ def score(paths, records, workers, games_per_worker, steps, device="cuda"):
                 target = value_targets(envs, 0.999, device)
                 legal = label_legal(obs, labels)
                 for net, m, v in zip(nets, meters, values):
-                    _, dist, logp, value, gates = bc_loss(net, obs, labels, legal, target, 0.0)
-                    measure(m, obs, labels, legal, dist, logp, value, target, gates)
+                    _, dist, value, gates = bc_loss(net, obs, labels, legal, target, 0.0)
+                    measure(m, obs, labels, legal, dist, value, target, gates)
                     v.append(value.cpu().numpy())
                 outcomes.append(envs.outcome.reshape(-1).copy())
                 games.update(envs.record_of)
@@ -372,8 +382,8 @@ def main(argv=None):
                 obs, labels = val_envs.obs, val_envs.labels
                 target = value_targets(val_envs, a.gamma, device)
                 legal = label_legal(obs, labels)
-                _, dist, logp, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef)
-                measure(m, obs, labels, legal, dist, logp, value, target, gates)
+                _, dist, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef)
+                measure(m, obs, labels, legal, dist, value, target, gates)
                 values.append(value.cpu().numpy())
                 outcomes.append(val_envs.outcome.reshape(-1).copy())
                 val_envs.step()
