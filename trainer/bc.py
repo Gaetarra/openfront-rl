@@ -44,6 +44,9 @@ def parser():
     p.add_argument("--score", nargs="+", metavar="CHECKPOINT",
                    help="score these checkpoints on the fixed held-out set (~10 min) instead of training")
     p.add_argument("--core", choices=CORES, default="moe", help="the core of a new network (not with --init)")
+    p.add_argument("--twin", choices=CORES,
+                   help="also train a second new network with this core on the same windows, row by row, from the same "
+                        "weights outside the core (PLAN 3B); it saves to checkpoints/<run>-<twin>")
     p.add_argument("--workers", type=int, default=10)
     p.add_argument("--games-per-worker", type=int, default=8)
     p.add_argument("--val-workers", type=int, default=2, help="0 = no validation")
@@ -80,7 +83,8 @@ def is_val(game_id, share):
 
 def run_info(a, train, val):
     """What the control page says about the run."""
-    return {"Name": a.run, "Method": "behaviour cloning (imitating humans)", "Network": describe(vars(a)),
+    network = describe(vars(a)) + (f"; twin: {describe({**vars(a), 'core': a.twin})}" if a.twin else "")
+    return {"Name": a.run, "Method": "behaviour cloning (imitating humans)", "Network": network,
             "Starts from": a.init or "random weights",
             "Data": f"{len(train):,} ranked 1v1 replays, {len(val):,} held out",
             "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
@@ -208,13 +212,14 @@ def one_pass(entries, a):
     return max(1, round(windows / (a.workers * a.games_per_worker * a.accum)))
 
 
-def backward_windows(model, windows, a, meter):
-    """Accumulates the gradient of a.accum windows, each (obs, labels, legal rows, value targets). Their mean loss gives
-    the gradient of one batch of all their rows."""
+def backward_windows(models, windows, a, meters):
+    """Accumulates each network's gradient over a.accum windows, each (obs, labels, legal rows, value targets): their
+    mean loss gives the gradient of one batch of all their rows. Every network trains on every window (--twin)."""
     for obs, labels, legal, target in windows:
-        loss, dist, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef, SHARE_SMOOTH)
-        (loss / a.accum).backward()
-        measure(meter, obs, labels, legal, dist, value, target, gates)
+        for model, meter in zip(models, meters):
+            loss, dist, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef, SHARE_SMOOTH)
+            (loss / a.accum).backward()
+            measure(meter, obs, labels, legal, dist, value, target, gates)
 
 
 def score_records():
@@ -289,8 +294,10 @@ def main(argv=None):
     a = parse_args(argv)
     if a.score:
         return score_main(a.score)
+    if a.twin and a.init:
+        raise SystemExit("--twin trains two new networks from the same random weights: drop --init")
     ckpt_dir = ROOT / "checkpoints" / a.run
-    state = None
+    state = twin_state = None
     if a.resume:
         state = torch.load(ckpt_dir / "latest.pt", map_location="cpu", weights_only=False)
         if "accum" not in state["args"]:
@@ -298,6 +305,14 @@ def main(argv=None):
                              f"schedule), so it cannot resume. Start a new run from it: --run <new name> --init "
                              f"checkpoints/{a.run}/latest.pt")
         a = resume_args(parser(), argv, state["args"], ("updates",))
+        if a.twin:
+            path = ROOT / "checkpoints" / f"{a.run}-{a.twin}" / "latest.pt"
+            if not path.exists():
+                raise SystemExit(f"{path} is missing: this run also trains a {a.twin} twin, and both resume together")
+            twin_state = torch.load(path, map_location="cpu", weights_only=False)
+            if twin_state["update"] != state["update"]:
+                raise SystemExit(f"the twin's checkpoint is at update {twin_state['update']} and the run's at "
+                                 f"{state['update']}: both must resume from the same update")
     else:
         a = network_args(parser(), argv, a)
     random.seed(a.seed)
@@ -325,13 +340,24 @@ def main(argv=None):
     if a.val_workers:
         val_envs = VecEnv(RANKED_1V1, a.val_workers, a.games_per_worker, seed="val", device=device, records=val,
                           log_dir=run_dir / "val_workers")
-    model = new_net(envs.dims, vars(a)).to(device)
-    model = model.to(memory_format=torch.channels_last)
-    opt = torch.optim.Adam(model.parameters(), lr=a.lr, eps=1e-5)
+    torch.manual_seed(a.seed)  # again before each network: a twin starts from the same weights outside its core
+    nets = [new_net(envs.dims, vars(a)).to(device).to(memory_format=torch.channels_last)]
+    net_args, dirs, writers = [vars(a)], [ckpt_dir], [SummaryWriter(run_dir)]
+    if a.twin:
+        torch.manual_seed(a.seed)
+        twin_run = f"{a.run}-{a.twin}"
+        net_args.append({**vars(a), "run": twin_run, "core": a.twin, "twin": None})
+        nets.append(new_net(envs.dims, net_args[1]).to(device).to(memory_format=torch.channels_last))
+        dirs.append(ROOT / "checkpoints" / twin_run)
+        writers.append(SummaryWriter(ROOT / "runs" / twin_run))
+    model, writer = nets[0], writers[0]
+    opts = [torch.optim.Adam(net.parameters(), lr=a.lr, eps=1e-5) for net in nets]
+    meters = [Meter() for _ in nets]
     update = global_step = 0
     if state:
-        model.load_state_dict(state["model"])
-        opt.load_state_dict(state["optimizer"])
+        for net, opt, s in zip(nets, opts, (state, twin_state)):
+            net.load_state_dict(s["model"])
+            opt.load_state_dict(s["optimizer"])
         update, global_step = state["update"], state["global_step"]
         random.setstate(state["rng"]["python"])
         np.random.set_state(state["rng"]["numpy"])
@@ -343,9 +369,8 @@ def main(argv=None):
     control.update(run=run_info(a, train, val))
     server = serve(control, a.port, log_dir=run_dir)
     control.note(f"control page on http://127.0.0.1:{server.server_address[1]}")
-    writer = SummaryWriter(run_dir)
     commit = game_commit()
-    meter, done = Meter(), {"records": 0, "desync": 0, "errors": 0}
+    done = {"records": 0, "desync": 0, "errors": 0}
 
     def elo_rows(env):
         return torch.tensor([ratings.get(rec, {}).get(c, 1500.0) for rec, seats in zip(env.record_of, env.seats_of)
@@ -367,32 +392,38 @@ def main(argv=None):
             global_step += envs.N
 
     def checkpoint():
-        s = dict(kind="bc", model=model.state_dict(), optimizer=opt.state_dict(), args=vars(a), update=update,
-                 global_step=global_step, game_commit=commit,
-                 rng={"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
-                      "cuda": torch.cuda.get_rng_state_all()})
-        save_checkpoint(ckpt_dir / "latest.pt", **s)
-        if update % (10 * a.save_every) == 0 and update > 0:
-            save_checkpoint(ckpt_dir / f"update{update:07d}.pt", **s)
+        """Every network's checkpoint, at the same update."""
+        rng = {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+               "cuda": torch.cuda.get_rng_state_all()}
+        for net, opt, args, d in zip(nets, opts, net_args, dirs):
+            s = dict(kind="bc", model=net.state_dict(), optimizer=opt.state_dict(), args=args, update=update,
+                     global_step=global_step, game_commit=commit, rng=rng)
+            save_checkpoint(d / "latest.pt", **s)
+            if update % (10 * a.save_every) == 0 and update > 0:
+                save_checkpoint(d / f"update{update:07d}.pt", **s)
         control.note(f"saved checkpoint at update {update}")
 
     def validate():
-        m, values, outcomes = Meter(), [], []
+        """Every network's held-out statistics, on the same windows."""
+        ms, values, outcomes = [Meter() for _ in nets], [[] for _ in nets], []
         with torch.no_grad():
             for _ in range(a.val_steps):
                 obs, labels = val_envs.obs, val_envs.labels
                 target = value_targets(val_envs, a.gamma, device)
                 legal = label_legal(obs, labels)
-                _, dist, value, gates = bc_loss(model, obs, labels, legal, target, a.vf_coef)
-                measure(m, obs, labels, legal, dist, value, target, gates)
-                values.append(value.cpu().numpy())
+                for net, m, v in zip(nets, ms, values):
+                    _, dist, value, gates = bc_loss(net, obs, labels, legal, target, a.vf_coef)
+                    measure(m, obs, labels, legal, dist, value, target, gates)
+                    v.append(value.cpu().numpy())
                 outcomes.append(val_envs.outcome.reshape(-1).copy())
                 val_envs.step()
-        out = m.means("val/")
-        v, o = np.concatenate(values), np.concatenate(outcomes)
-        if v.std() > 0 and o.std() > 0:
-            out["val/value_outcome_corr"] = float(np.corrcoef(v, o)[0, 1])
-        return out
+        o, results = np.concatenate(outcomes), []
+        for m, v in zip(ms, values):
+            out, v = m.means("val/"), np.concatenate(v)
+            if v.std() > 0 and o.std() > 0:
+                out["val/value_outcome_corr"] = float(np.corrcoef(v, o)[0, 1])
+            results.append(out)
+        return results
 
     control.set_state("running")
     t_log = time.perf_counter()
@@ -401,27 +432,39 @@ def main(argv=None):
             if not control.wait():
                 break
             t0 = time.perf_counter()
-            for group in opt.param_groups:
-                group["lr"] = lr_at(update, a)
-            opt.zero_grad(set_to_none=True)
-            backward_windows(model, windows(), a, meter)
-            nn.utils.clip_grad_norm_(model.parameters(), a.max_grad_norm)
-            opt.step()
+            for opt in opts:
+                for group in opt.param_groups:
+                    group["lr"] = lr_at(update, a)
+                opt.zero_grad(set_to_none=True)
+            backward_windows(nets, windows(), a, meters)
+            for net, opt in zip(nets, opts):
+                nn.utils.clip_grad_norm_(net.parameters(), a.max_grad_norm)
+                opt.step()
             update += 1
             control.throttle(time.perf_counter() - t0)
             if update % a.log_every == 0:
-                metrics = meter.means()
+                metrics = meters[0].means()
                 metrics.update({"data/records_done": done["records"], "data/errors": done["errors"],
                                 "data/desync_share": done["desync"] / max(done["records"], 1),
-                                "train/lr": opt.param_groups[0]["lr"],
+                                "train/lr": opts[0].param_groups[0]["lr"],
                                 "perf/samples_per_s": a.log_every * a.accum * envs.N / (time.perf_counter() - t_log)})
                 t_log = time.perf_counter()
                 for k, v in metrics.items():
                     writer.add_scalar(k, v, global_step)
+                if a.twin:
+                    twin = meters[1].means()
+                    for k, v in twin.items():
+                        writers[1].add_scalar(k, v, global_step)
+                    if "bc/nll" in twin:
+                        writer.add_scalar("twin/bc/nll", twin["bc/nll"], global_step)  # the control page's loss chart
                 control.update(update=update, global_step=global_step, metrics=metrics)
             if val_envs is not None and update % a.val_every == 0:
-                for k, v in validate().items():
-                    writer.add_scalar(k, v, global_step)
+                results = validate()
+                for w, metrics in zip(writers, results):
+                    for k, v in metrics.items():
+                        w.add_scalar(k, v, global_step)
+                if a.twin and "val/bc/nll" in results[1]:
+                    writer.add_scalar("twin/val/bc/nll", results[1]["val/bc/nll"], global_step)
             if update % a.save_every == 0 or control.take_save():
                 checkpoint()
     except KeyboardInterrupt:
@@ -432,7 +475,8 @@ def main(argv=None):
         envs.close()
         if val_envs is not None:
             val_envs.close()
-        writer.close()
+        for w in writers:
+            w.close()
         server.shutdown()
         server.server_close()
 

@@ -361,7 +361,8 @@ const CHARTS = [
       "rest are waits." },
   { title: "Decisions / s", lines: [["perf/decisions_per_s", "decisions/s"]], goal: "higher is better",
     note: "Training speed. It drops when the PC is busy or the run is throttled." },
-  { title: "Loss", lines: [["bc/nll", "training"], ["val/bc/nll", "held-out"]], goal: "lower is better",
+  { title: "Loss", lines: [["bc/nll", "training"], ["val/bc/nll", "held-out"], ["twin/bc/nll", "twin, training"],
+    ["twin/val/bc/nll", "twin, held-out"]], goal: "lower is better",
     note: "How unlikely the clone finds the command the human actually gave. Trust the held-out line: those games " +
       "are never trained on." },
   { title: "Value vs outcome correlation", lines: [["val/value_outcome_corr", "held-out"]], goal: "higher is better",

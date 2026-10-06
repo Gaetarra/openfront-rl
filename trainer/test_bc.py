@@ -87,7 +87,7 @@ class AccumulationTest(unittest.TestCase):
             windows.append((fake_obs(seed=i), labels, legal, torch.full((ROWS,), 0.5, device="cuda")))
         with mock.patch.object(torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext()):
             model.zero_grad()
-            backward_windows(model, windows, argparse.Namespace(accum=3, vf_coef=0.5), Meter())
+            backward_windows([model], windows, argparse.Namespace(accum=3, vf_coef=0.5), [Meter()])
             accumulated = [p.grad.clone() for p in model.parameters()]
             model.zero_grad()
             obs = {k: torch.cat([w[0][k] for w in windows]) for k in windows[0][0]}
@@ -193,7 +193,8 @@ class MainTest(unittest.TestCase):
 
     def tearDown(self):
         for d in ("checkpoints", "runs"):
-            shutil.rmtree(ROOT / d / self.RUN, ignore_errors=True)
+            for run in (self.RUN, f"{self.RUN}-moe-swiglu"):
+                shutil.rmtree(ROOT / d / run, ignore_errors=True)
         shutil.rmtree(self.data, ignore_errors=True)
 
     def run_main(self, argv):
@@ -207,8 +208,8 @@ class MainTest(unittest.TestCase):
                                  INDEX=self.data / "index.jsonl"), mock.patch.object(bc, "VecEnv", spy):
             main(argv)
 
-    def latest(self):
-        return torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
+    def latest(self, run=None):
+        return torch.load(ROOT / "checkpoints" / (run or self.RUN) / "latest.pt", weights_only=False)
 
     def test_train_save_and_resume(self):
         self.run_main(self.common + ["--updates", "3"])
@@ -235,6 +236,29 @@ class MainTest(unittest.TestCase):
         self.run_main(self.common + ["--updates", "1"])
         with self.assertRaisesRegex(SystemExit, "--lr would be ignored"):
             self.run_main(self.common + ["--updates", "2", "--lr", "1e-3", "--resume"])
+
+    def test_a_twin_starts_from_the_same_weights_outside_its_core(self):
+        self.run_main(self.common + ["--updates", "0", "--twin", "moe-swiglu"])
+        main, twin = self.latest(), self.latest(f"{self.RUN}-moe-swiglu")
+        self.assertEqual((main["args"]["core"], twin["args"]["core"]), ("moe", "moe-swiglu"))
+        self.assertEqual((twin["args"]["run"], twin["args"]["twin"]), (f"{self.RUN}-moe-swiglu", None))
+        for k, v in main["model"].items():
+            if not k.startswith("core."):
+                self.assertTrue(torch.equal(v, twin["model"][k]), k)
+
+    def test_a_twin_trains_on_the_same_windows_and_resumes_with_the_run(self):
+        self.run_main(self.common + ["--updates", "2", "--twin", "moe-swiglu"])
+        main, twin = self.latest(), self.latest(f"{self.RUN}-moe-swiglu")
+        self.assertEqual((twin["update"], twin["global_step"]), (2, main["global_step"]))
+        self.assertTrue((ROOT / "runs" / f"{self.RUN}-moe-swiglu").is_dir())
+        self.run_main(self.common + ["--updates", "3", "--resume"])
+        self.assertEqual((self.latest()["update"], self.latest(f"{self.RUN}-moe-swiglu")["update"]), (3, 3))
+        (ROOT / "checkpoints" / f"{self.RUN}-moe-swiglu" / "latest.pt").unlink()
+        with self.assertRaisesRegex(SystemExit, "is missing"):
+            self.run_main(self.common + ["--updates", "4", "--resume"])
+        with self.assertRaisesRegex(SystemExit, "drop --init"):
+            self.run_main(self.common + ["--init", str(ROOT / "checkpoints" / self.RUN / "latest.pt"), "--twin", "moe",
+                                         "--updates", "1"])
 
     def test_old_bc_checkpoints_cannot_resume(self):
         path = ROOT / "checkpoints" / self.RUN / "latest.pt"
