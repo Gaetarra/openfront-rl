@@ -194,7 +194,7 @@ export class EnvGame {
 
   /**
    * Applies one decision per seat through the latency queue and advances STEP_TICKS. A decision is one action
-   * [type, cell, target, bin], or several back to back (the bandwidth probe, PLAN 3B: a troop and a gold action),
+   * [type, cell, target, share], or several back to back (the bandwidth probe, PLAN 3B: a troop and a gold action),
    * where a later no-op means no further action; a seat's decision is invalid when any of its actions is.
    */
   step(actions: number[][]): void {

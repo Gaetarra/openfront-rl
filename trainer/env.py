@@ -157,7 +157,7 @@ class VecEnv:
         self.n2 = torch.zeros_like(self.n1)
         self.fo = torch.zeros_like(self.n1)
         # Replay mode: per game its record, players, their outcome (+1 winner, -1 otherwise) and windows left; per row
-        # the label [type, cell, target, bin] (type -1: a command outside the action set, -2: unmapped).
+        # the label [type, cell, target, troops %] (type -1: a command outside the action set, -2: unmapped).
         self.labels = None
         self.outcome = np.zeros((self.E, self.S), np.float32)
         self.left = np.zeros(self.E, np.int64)
@@ -167,7 +167,7 @@ class VecEnv:
 
     def send(self, actions=None):
         """Starts every worker on its next step (replay mode takes no actions); recv() collects it, so the caller can
-        use the GPU meanwhile. actions: int array [N, 4] of [type, cell, target, bin] with grid cell indexes, or [N, 8]
+        use the GPU meanwhile. actions: int array [N, 4] of [type, cell, target, troops %] with grid cell indexes, or [N, 8]
         for two actions per decision (the bandwidth probe, PLAN 3B)."""
         if self.replay:
             for wk in self.workers:

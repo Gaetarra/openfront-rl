@@ -155,7 +155,7 @@ class CooldownTest(unittest.TestCase):
 
 def dist(n, type_logits, legal_types):
     """n rows of one policy with 4 cells and 3 player rows: the city map allows only cell 3, the pointer only player 2,
-    and the attack troop bin is almost surely bin 1."""
+    and attacks almost surely send 25%."""
     out = {"type": torch.tensor([type_logits] * n, dtype=torch.float), "maps": torch.zeros(n, 3, 4),
            "ptr": torch.zeros(n, 3), "bins": torch.zeros(n, 2, 5)}
     out["bins"][:, 0, 1] = 30.0
@@ -176,7 +176,7 @@ class TwoBinTest(unittest.TestCase):
         self.assertAlmostEqual(attack.float().mean().item(), 0.5, delta=0.03)
         self.assertAlmostEqual(city.float().mean().item(), 0.5, delta=0.03)
         self.assertAlmostEqual((attack & city).float().mean().item(), 0.25, delta=0.03)
-        self.assertEqual(a[attack][:, 1:4].unique(dim=0).tolist(), [[0, 2, 1]])  # target 2, bin 1
+        self.assertEqual(a[attack][:, 1:4].unique(dim=0).tolist(), [[0, 2, 25]])  # target 2, 25%
         self.assertEqual(a[city][:, 5:8].unique(dim=0).tolist(), [[3, 0, 0]])  # the city map's only legal cell
         self.assertEqual(a[~attack][:, :4].abs().sum().item(), 0)
         self.assertEqual(a[~city][:, 4:].abs().sum().item(), 0)

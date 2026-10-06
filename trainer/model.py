@@ -11,6 +11,13 @@ from trainer.env import BUILDING_TYPES, BUILDINGS, OWNER
 
 ACT_NAMES = ["noop", "spawn", "attack", "boat", "build_city"]
 SPAWN, ATTACK, BOAT, BUILD = 1, 2, 3, 4
+SIZES = (10, 25, 50, 75, 100)  # the troop sizes of the Phase 2 and 3A networks, in percent of current troops
+SHARES = 100  # the Phase 3B network's troop shares: 1-100% (PLAN 3B)
+# Each percent's nearest size in log scale, as the Phase 2-3A labels were made: 1-15% -> 10, 16-35 -> 25, 36-61 -> 50,
+# 62-86 -> 75, 87-100 -> 100.
+SIZE_OF = torch.tensor([min(range(len(SIZES)), key=lambda i: abs(math.log(max(p, SIZES[0]) / SIZES[i])))
+                        for p in range(SHARES + 1)])
+SIZE_PERCENT = torch.tensor(SIZES)
 N_MAPS = 3  # heat maps: spawn, boat landing, city
 MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
 V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
@@ -127,7 +134,7 @@ class Policy(nn.Module):
     def __init__(self, dims, widths=(64, 128, 192), core="moe"):
         super().__init__()
         c_in, n_feat, n_scal = dims["channels"], dims["playerFeatures"], dims["scalars"]
-        self.n_bins = len(dims["troopBins"])
+        self.n_bins = len(SIZES)
         c1, c2, c3 = widths
         self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
         self.s1 = nn.Sequential(Res(c1), Res(c1))
@@ -200,7 +207,7 @@ class PolicyV1(nn.Module):
     def __init__(self, dims, widths=(64, 128, 192)):
         super().__init__()
         n_scal = dims["scalars"]
-        self.n_bins = len(dims["troopBins"])
+        self.n_bins = len(SIZES)
         c1, c2, c3 = widths
         self.stem = nn.Conv2d(V1_CHANNELS, c1, 4, stride=4)
         self.s1 = nn.Sequential(Res(c1), Res(c1))
@@ -248,7 +255,7 @@ class RandomPolicy(nn.Module):
 
     def __init__(self, dims):
         super().__init__()
-        self.n_bins = len(dims["troopBins"])
+        self.n_bins = len(SIZES)
 
     def forward(self, obs):
         n, dev = obs["type_mask"].shape[0], obs["type_mask"].device
@@ -266,10 +273,11 @@ def _masked(logits, mask):
 
 
 class ActionDist:
-    """The joint action [type, cell, target, bin]: the type picks which argument heads are used.
+    """The joint action [type, cell, target, troops]: the type picks which argument heads are used.
 
-    spawn: spawn map cell; attack: player pointer + attack troops; boat: boat map cell + boat troops;
-    build city: city map cell."""
+    spawn: spawn map cell; attack: player pointer + troops; boat: boat map cell + troops; build city: city map cell.
+    troops: the percent of its current troops an attack or boat sends (1-100). The Phase 2 and 3A networks pick one of
+    the five SIZES per kind, whatever the target."""
 
     def __init__(self, out, obs):
         self.type = _masked(out["type"].float(), obs["type_mask"])
@@ -277,18 +285,27 @@ class ActionDist:
         self.ptr = _masked(out["ptr"].float(), obs["attack_mask"])
         self.bins = Categorical(logits=out["bins"].float())  # batch [N, 2]: attack, boat
 
+    def troop_sample(self, target, cell):
+        """Percents [N, 2] sampled for an attack on `target` and a boat to `cell`."""
+        return SIZE_PERCENT.to(target.device)[self.bins.sample()]
+
+    def size_log_probs(self, target, cell):
+        """Log-probabilities [N, 2, 5] of the five SIZES for an attack on `target` and a boat to `cell`."""
+        return self.bins.logits
+
     def sample(self):
-        t, c, p, b = self.type.sample(), self.cells.sample(), self.ptr.sample(), self.bins.sample()
+        t, c, p = self.type.sample(), self.cells.sample(), self.ptr.sample()
         zero = torch.zeros_like(t)
         cell = torch.where(t == SPAWN, c[:, 0], torch.where(t == BOAT, c[:, 1], torch.where(t == BUILD, c[:, 2], zero)))
         target = torch.where(t == ATTACK, p, zero)
-        troops = torch.where(t == ATTACK, b[:, 0], torch.where(t == BOAT, b[:, 1], zero))
+        pct = self.troop_sample(p, c[:, 1])
+        troops = torch.where(t == ATTACK, pct[:, 0], torch.where(t == BOAT, pct[:, 1], zero))
         return torch.stack([t, cell, target, troops], 1)
 
     def log_prob(self, actions):
         t, cell, target, troops = actions.unbind(1)
         lc = self.cells.log_prob(cell[:, None].expand(-1, N_MAPS))
-        lb = self.bins.log_prob(troops[:, None].expand(-1, 2))
+        lb = self.bins.log_prob(SIZE_OF.to(troops.device)[troops.clamp(0, SHARES)][:, None].expand(-1, 2))
         zero = torch.zeros_like(lc[:, 0])
         return (self.type.log_prob(t)
                 + torch.where(t == SPAWN, lc[:, 0], zero)

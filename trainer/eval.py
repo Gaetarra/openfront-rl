@@ -72,11 +72,11 @@ def name_players(path, by_seat):
 
 class Scripted:
     """The scripted expander (PLAN Phase 1 diagnosis): spawns on a random legal cell at the first decision (and when
-    forced), then every `every` decisions attacks unowned land, or else a random attackable bot, with troop bin
-    `bin`; otherwise waits."""
+    forced), then every `every` decisions attacks unowned land, or else a random attackable bot, sending `share`
+    percent of its troops; otherwise waits."""
 
-    def __init__(self, bin=1, every=4, seed=0):
-        self.bin, self.every, self.rng, self.step = bin, every, np.random.default_rng(seed), 0
+    def __init__(self, share=25, every=4, seed=0):
+        self.share, self.every, self.rng, self.step = share, every, np.random.default_rng(seed), 0
 
     def __call__(self, obs):
         types, attack, cells = (obs[k].cpu().numpy() for k in ("type_mask", "attack_mask", "cell_mask"))
@@ -89,7 +89,7 @@ class Scripted:
             elif types[i, 2] and self.step % self.every == 0:
                 targets = [0] if attack[i, 0] else np.flatnonzero(attack[i] & bots[i])
                 if len(targets):
-                    act = [2, 0, int(self.rng.choice(targets)), self.bin]
+                    act = [2, 0, int(self.rng.choice(targets)), self.share]
             rows.append(act)
         self.step += 1
         return torch.tensor(rows, dtype=torch.long, device=obs["type_mask"].device)
@@ -122,10 +122,11 @@ def two_bin_sample(dist, obs):
     u = torch.rand(len(p), 2, device=p.device)
     troop = torch.where(u[:, 0] < p[:, ATTACK], ATTACK, torch.where(u[:, 0] < p[:, ATTACK] + p[:, BOAT], BOAT, 0))
     gold = torch.where(u[:, 1] < p[:, BUILD], BUILD, 0)
-    cells, target, bins, zero = dist.cells.sample(), dist.ptr.sample(), dist.bins.sample(), torch.zeros_like(troop)
+    cells, target, zero = dist.cells.sample(), dist.ptr.sample(), torch.zeros_like(troop)
+    pct = dist.troop_sample(target, cells[:, 1])
     first = torch.stack([troop, torch.where(troop == BOAT, cells[:, 1], zero),
                          torch.where(troop == ATTACK, target, zero),
-                         torch.where(troop == ATTACK, bins[:, 0], torch.where(troop == BOAT, bins[:, 1], zero))], 1)
+                         torch.where(troop == ATTACK, pct[:, 0], torch.where(troop == BOAT, pct[:, 1], zero))], 1)
     second = torch.stack([gold, torch.where(gold == BUILD, cells[:, 2], zero), zero, zero], 1)
     single = torch.cat([dist.sample(), torch.zeros_like(first)], 1)
     return torch.where(obs["type_mask"][:, SPAWN, None], single, torch.cat([first, second], 1))

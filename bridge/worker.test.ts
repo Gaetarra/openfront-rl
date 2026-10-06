@@ -77,7 +77,7 @@ test("same seed and actions give the same hash in a fresh worker and after other
     await c.request({ cmd: "init", config: ONION, games: 1, seed, worker: 0 });
     let reply: Reply | null = null;
     for (let step = 0; step < 200; step++) {
-      const action = step === 2 ? [Act.Spawn, cell, 0, 0] : step > 45 && step % 10 === 0 ? [Act.Attack, 0, 0, 2] : [Act.Noop, 0, 0, 0];
+      const action = step === 2 ? [Act.Spawn, cell, 0, 0] : step > 45 && step % 10 === 0 ? [Act.Attack, 0, 0, 50] : [Act.Noop, 0, 0, 0];
       reply = await c.request({ cmd: "step", actions: [[action]] });
     }
     return reply!.header.games[0].hash;

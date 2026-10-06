@@ -16,7 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
 import { simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
-import { N_ACTS, TROOP_BINS } from "./actions";
+import { N_ACTS } from "./actions";
 import { UNIT_TYPES } from "./frame";
 import { Blob, EnvConfig, EnvGame } from "./game";
 import { PLAYER_FEATURES, SCALARS } from "./obs";
@@ -160,7 +160,6 @@ function dims(cfg: EnvConfig): Record<string, unknown> {
     playerFeatures: PLAYER_FEATURES,
     scalars: SCALARS,
     acts: N_ACTS,
-    troopBins: TROOP_BINS,
     unitTypes: UNIT_TYPES,
   };
 }

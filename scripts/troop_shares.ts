@@ -11,14 +11,23 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
-import { TROOP_BINS } from "../bridge/actions";
-import { binOf, readRecord, RecordGame } from "../bridge/replay";
+import { readRecord, RecordGame } from "../bridge/replay";
 import { gridFor, slotsFor } from "../bridge/setups";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RANKED = { map: "Australia", compact: false, nations: 0, difficulty: "Medium", bots: 400, timerMinutes: 15,
   seats: 2, playlist: "ranked1v1" as const };
 const GROUPS = [[1, 9], [10, 10], [11, 19], [20, 20], [21, 49], [50, 100], [75, 100]];
+/** The five troop sizes of the Phase 2 and 3A networks, and the nearest one in log scale (how their labels were made). */
+const SIZES = [0.1, 0.25, 0.5, 0.75, 1.0];
+function sizeOf(share: number): number {
+  const s = Math.min(Math.max(share, SIZES[0]), 1);
+  let best = 0;
+  for (let i = 1; i < SIZES.length; i++) {
+    if (Math.abs(Math.log(s / SIZES[i])) < Math.abs(Math.log(s / SIZES[best]))) best = i;
+  }
+  return best;
+}
 
 async function main() {
   os.setPriority(0, os.constants.priority.PRIORITY_BELOW_NORMAL);
@@ -63,9 +72,9 @@ async function main() {
       .join(", ") + `, over 100%: ${pct(whole.filter((k) => k > 100).length)}`);
     print("  most common: " + top.map(([k, c]) => `${k}% ${pct(c)}`).join(", "));
     if (kind === "follow-up") continue;
-    const moved = all.map((x) => Math.abs(x - 100 * TROOP_BINS[binOf(x, 100)]));
+    const moved = all.map((x) => Math.abs(x - 100 * SIZES[sizeOf(x / 100)]));
     const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / v.length;
-    print(`  the ${TROOP_BINS.length} sizes move a command by ${mean(moved).toFixed(1)} points on average` +
+    print(`  the ${SIZES.length} sizes move a command by ${mean(moved).toFixed(1)} points on average` +
       ` (${(100 * mean(moved.map((m, j) => m / Math.max(all[j], 1)))).toFixed(0)}% of it); within 0.25 points of a whole` +
       ` percent: ${pct(all.filter((x) => Math.abs(x - Math.round(x)) <= 0.25).length)}`);
   }

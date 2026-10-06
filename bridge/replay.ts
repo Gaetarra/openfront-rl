@@ -3,7 +3,7 @@ import zlib from "node:zlib";
 import { Player, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
 import { GameRecord, StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
 import { decompressGameRecord, toWireGameStartInfo } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
-import { Act, TROOP_BINS } from "./actions";
+import { Act } from "./actions";
 import { EnvGame, STEP_TICKS } from "./game";
 
 /** Label types of windows that stay out of the loss (PLAN Phase 2, b). */
@@ -19,17 +19,15 @@ export function readRecord(file: string): GameRecord {
   return decompressGameRecord(JSON.parse(text) as GameRecord);
 }
 
-/** The troop bin nearest, in log scale, to the share of its troops a player sent. */
-export function binOf(troops: number, have: number): number {
-  const share = Math.min(Math.max(troops / Math.max(have, 1), TROOP_BINS[0]), 1);
-  let best = 0;
-  for (let i = 1; i < TROOP_BINS.length; i++) {
-    if (Math.abs(Math.log(share / TROOP_BINS[i])) < Math.abs(Math.log(share / TROOP_BINS[best]))) best = i;
-  }
-  return best;
+/**
+ * The share of its troops a player sent, as a whole percent (1-100). Commands execute a few ticks after the click and
+ * troops change meanwhile: 84% of human attacks land within 0.25 points of a whole percent (PLAN 3B).
+ */
+export function shareOf(troops: number, have: number): number {
+  return Math.min(100, Math.max(1, Math.round((100 * troops) / Math.max(have, 1))));
 }
 
-/** A human command as the [type, cell, target, bin] action the agent would take for it, from the current state. */
+/** A human command as the [type, cell, target, share] action the agent would take for it, from the current state. */
 export function labelOf(env: EnvGame, seat: Player, intent: StampedIntent): number[] {
   const { game, frame } = env;
   switch (intent.type) {
@@ -39,10 +37,10 @@ export function labelOf(env: EnvGame, seat: Player, intent: StampedIntent): numb
       if (intent.troops === null) return [UNMAPPED, 0, 0, 0];
       if (intent.targetID !== null && !game.hasPlayer(intent.targetID)) return [UNMAPPED, 0, 0, 0];
       const target = intent.targetID === null ? 0 : game.player(intent.targetID).smallID();
-      return [Act.Attack, 0, target, binOf(intent.troops, seat.troops())];
+      return [Act.Attack, 0, target, shareOf(intent.troops, seat.troops())];
     }
     case "boat":
-      return [Act.Boat, frame.cellOf(intent.dst), 0, binOf(intent.troops, seat.troops())];
+      return [Act.Boat, frame.cellOf(intent.dst), 0, shareOf(intent.troops, seat.troops())];
     case "build_unit":
       return intent.unit === UnitType.City ? [Act.BuildCity, frame.cellOf(intent.tile), 0, 0] : [OUT_OF_SET, 0, 0, 0];
     default:

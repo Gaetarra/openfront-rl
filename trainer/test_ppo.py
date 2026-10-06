@@ -141,7 +141,7 @@ class SmokeTest(unittest.TestCase):
     def test_two_seats_against_a_frozen_opponent_with_kl(self):
         init = ROOT / "checkpoints" / self.RUN / "init.pt"
         init.parent.mkdir(parents=True, exist_ok=True)
-        dims = {"channels": 22, "playerFeatures": 17, "scalars": 16, "acts": 5, "troopBins": [0.1, 0.25, 0.5, 0.75, 1.0]}
+        dims = {"channels": 22, "playerFeatures": 17, "scalars": 16, "acts": 5}
         torch.save({"model": PolicyV1(dims).state_dict(), "args": {"widths": "64,128,192"}}, init)
         main(["--run", self.RUN, "--workers", "1", "--games-per-worker", "2", "--steps", "8", "--minibatches", "2",
               "--epochs", "1", "--port", "0", "--timer", "1", "--nations", "0", "--seats", "2",

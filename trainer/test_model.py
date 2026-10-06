@@ -6,11 +6,10 @@ from pathlib import Path
 import torch
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE,
-                           load_net, new_net, relevance, v1_spatial)
+from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1,
+                           RandomPolicy, SoftMoE, load_net, new_net, relevance, v1_spatial)
 
-DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5,
-        "troopBins": [0.1, 0.25, 0.5, 0.75, 1.0]}
+DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5}
 N, P, H, W = 6, 5, 32, 32
 
 
@@ -131,8 +130,8 @@ class ModelTest(unittest.TestCase):
         kl = ActionDist(p_out, obs).kl(ActionDist(q_out, obs))
         hw = range(H * W)
         acts = torch.tensor([[0, 0, 0, 0]] + [[SPAWN, c, 0, 0] for c in hw]
-                            + [[ATTACK, 0, t, b] for t in range(P) for b in range(5)]
-                            + [[BOAT, c, 0, b] for c in hw for b in range(5)] + [[BUILD, c, 0, 0] for c in hw])
+                            + [[ATTACK, 0, t, b] for t in range(P) for b in SIZES]
+                            + [[BOAT, c, 0, b] for c in hw for b in SIZES] + [[BUILD, c, 0, 0] for c in hw])
         for i in range(N):  # sum over every joint action of p log(p / q)
             one = lambda d: {k: v[i:i + 1].expand(len(acts), *v.shape[1:]) for k, v in d.items()}
             lp = ActionDist(one(p_out), one(obs)).log_prob(acts)
@@ -141,6 +140,17 @@ class ModelTest(unittest.TestCase):
         self.assertTrue(torch.allclose(ActionDist(p_out, obs).kl(ActionDist(p_out, obs)), torch.zeros(N), atol=1e-6))
         q_out["maps"][:, :, 7] += 300.0  # a reference sure of one cell: the others' probabilities underflow to 0
         self.assertTrue(torch.isfinite(ActionDist(p_out, obs).kl(ActionDist(q_out, obs))).all())
+
+    def test_five_size_networks_send_their_sizes_as_percents(self):
+        self.assertEqual(SIZE_OF[list(SIZES)].tolist(), [0, 1, 2, 3, 4])
+        self.assertEqual(SIZE_OF[[1, 15, 16, 35, 36, 61, 62, 86, 87, 100]].tolist(), [0, 0, 1, 1, 2, 2, 3, 3, 4, 4])
+        out = RandomPolicy(DIMS)(self.obs)
+        out["type"][:, ATTACK] = 30.0  # rows 3-5 attack (their only target is player 2); rows 0-2 cannot
+        out["bins"][:, 0, 1] = 30.0  # and send 25%
+        dist = ActionDist(out, self.obs)
+        self.assertEqual(dist.sample()[3:, [0, 2, 3]].tolist(), [[ATTACK, 2, 25]] * 3)
+        lp = dist.log_prob(torch.tensor([[ATTACK, 0, 2, 20]] * N, device="cuda"))  # 20% lies in 25%'s range
+        self.assertTrue(torch.allclose(lp[3:], torch.zeros(3, device="cuda"), atol=1e-4))
 
     def test_entropy_bonus_does_not_favour_types_with_more_arguments(self):
         out = RandomPolicy(DIMS)(self.obs)

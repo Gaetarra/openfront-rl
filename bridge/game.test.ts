@@ -51,7 +51,7 @@ test("random legal play reaches the end with a valid terminal reward", async () 
     const type = pick(blob(blobs, "types"));
     const cell = type === Act.Spawn ? spawnCell(env) : rnd.nextInt(0, env.frame.n);
     const target = type === Act.Attack ? pick(blob(blobs, "attack")) : 0;
-    env.step([[type, cell, target, rnd.nextInt(0, 5)]]);
+    env.step([[type, cell, target, rnd.nextInt(1, 101)]]);
     steps++;
   }
   assert.ok(env.done, "game ended");
@@ -68,7 +68,7 @@ test("a decision can carry a second action, and both execute (the bandwidth prob
   seat.addGold(10_000_000n);
   const target = blob(env.observe(false), "attack").indexOf(1);
   assert.ok(target >= 0, "something to attack");
-  env.step([[Act.Attack, 0, target, 1, Act.BuildCity, spawnCell(env), 0, 0]]);
+  env.step([[Act.Attack, 0, target, 25, Act.BuildCity, spawnCell(env), 0, 0]]);
   assert.equal(seat.units(UnitType.City).length, 1);
   assert.equal(seat.outgoingAttacks().length, 1);
   assert.deepEqual(env.invalid, [false]);

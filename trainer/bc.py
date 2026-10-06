@@ -25,7 +25,7 @@ from trainer import crawl
 from trainer.control import Control, serve
 from trainer.env import RANKED_1V1, ROOT, VecEnv
 from trainer.eval import tag
-from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, load_net, new_net
+from trainer.model import ATTACK, BOAT, BUILD, SHARES, SIZE_OF, SPAWN, ActionDist, load_net, new_net
 from trainer.ppo import game_commit, network_args, resume_args, save_checkpoint
 
 CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes from (trainer/model.py)
@@ -155,14 +155,16 @@ def measure(m, obs, labels, legal, dist, logp, value, target, gates=None):
     m.add("bc/act_rate_human", ((t > 0) & legal).sum(), nl)
     m.add("bc/act_rate_policy", ((1 - dist.type.probs[:, 0]) * legal).sum(), nl)
     lc = dist.cells.log_prob(cell.clamp(0, dist.cells.logits.shape[-1] - 1)[:, None].expand(-1, 3))  # [N, maps]
-    lb = dist.bins.log_prob(b.clamp(0, dist.bins.logits.shape[-1] - 1)[:, None].expand(-1, 2))  # [N, attack/boat]
+    size = SIZE_OF.to(b.device)[b.clamp(0, SHARES)]  # the label's percent as one of the five sizes
+    ls = dist.size_log_probs(tgt, cell)  # [N, attack/boat, 5]
+    lb = ls.gather(2, size[:, None, None].expand(-1, 2, 1))[:, :, 0]  # [N, attack/boat]
     rows = legal & (t == ATTACK)
     m.add("bc/attack_target_acc", ((dist.ptr.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
     m.add("bc/nll_attack_target", -(dist.ptr.log_prob(torch.where(rows, tgt, 0)) * rows).sum(), rows.sum())
-    m.add("bc/attack_bin_acc", ((dist.bins.logits[:, 0].argmax(1) == b) & rows).sum(), rows.sum())
+    m.add("bc/attack_bin_acc", ((ls[:, 0].argmax(1) == size) & rows).sum(), rows.sum())
     m.add("bc/nll_attack_bin", -(lb[:, 0] * rows).sum(), rows.sum())
     rows = legal & (t == BOAT)
-    m.add("bc/boat_bin_acc", ((dist.bins.logits[:, 1].argmax(1) == b) & rows).sum(), rows.sum())
+    m.add("bc/boat_bin_acc", ((ls[:, 1].argmax(1) == size) & rows).sum(), rows.sum())
     m.add("bc/nll_boat_bin", -(lb[:, 1] * rows).sum(), rows.sum())
     for typ, name in ((SPAWN, "spawn"), (BOAT, "boat"), (BUILD, "city")):
         rows = legal & (t == typ)

@@ -9,19 +9,19 @@ import { GameRecord, GameRecordSchema, StampedIntent, Turn } from "../OpenFront_
 import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
 import { Act } from "./actions";
 import { EnvGame, seatClientID } from "./game";
-import { binOf, OUT_OF_SET, readRecord, RecordGame } from "./replay";
+import { OUT_OF_SET, readRecord, RecordGame, shareOf } from "./replay";
 import { gameConfigOf } from "./setups";
 import { landTile, ONION } from "./testkit";
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "testdata/ranked1v1.json.gz");
 
-test("troop shares map to the nearest bin in log scale", () => {
-  assert.equal(binOf(10, 100), 0);
-  assert.equal(binOf(30, 100), 1); // 0.3: nearer 0.25 than 0.5
-  assert.equal(binOf(40, 100), 2); // 0.4: nearer 0.5 than 0.25 in log scale
-  assert.equal(binOf(100, 100), 4);
-  assert.equal(binOf(500, 100), 4);
-  assert.equal(binOf(1, 100), 0);
+test("a label's troop share is the whole percent the player sent", () => {
+  assert.equal(shareOf(20, 100), 20);
+  assert.equal(shareOf(19.8, 100), 20); // troops change a little between the click and its execution
+  assert.equal(shareOf(1000, 4000), 25);
+  assert.equal(shareOf(0.3, 100), 1); // a trickle still sends 1%
+  assert.equal(shareOf(130, 100), 100); // troops fell since the click
+  assert.equal(shareOf(5, 0), 100);
 });
 
 test("a blanked ranked record replays in sync and labels every window", async () => {

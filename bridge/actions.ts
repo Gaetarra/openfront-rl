@@ -13,8 +13,8 @@ export enum Act {
   BuildCity = 4,
 }
 export const N_ACTS = 5;
-/** Troops sent by attack and boat actions, as fractions of the seat's current troops. */
-export const TROOP_BINS = [0.1, 0.25, 0.5, 0.75, 1.0];
+/** Attacks and boats send a whole percent of the seat's current troops, 1-100 (PLAN 3B: troop shares). */
+const isShare = (s: number) => Number.isInteger(s) && s >= 1 && s <= 100;
 /** A spawn intent must still execute inside the spawn phase after up to 3 turns of latency. */
 const SPAWN_MARGIN = 4;
 /** Decisions in the last ticks of the spawn phase must spawn if the seat has not spawned yet. */
@@ -71,7 +71,10 @@ export interface Decoded {
 }
 const DROP: Decoded = { intent: null, valid: false };
 
-/** Turns a sampled [type, cell, target, bin] into a game intent (null intent = no-op). */
+/**
+ * Turns a sampled [type, cell, target, share] into a game intent (null intent = no-op). share: the percent of its
+ * current troops an attack or boat sends.
+ */
 export function decodeAction(
   game: Game,
   seat: Player,
@@ -80,13 +83,13 @@ export function decodeAction(
   attack: Uint8Array,
   action: number[],
 ): Decoded {
-  const [type, cell, target, bin] = action;
+  const [type, cell, target, share] = action;
   if (!Number.isInteger(type) || types[type] !== 1) return DROP;
   if (type === Act.Noop) return { intent: null, valid: true };
   if (type === Act.Attack) {
-    if (!Number.isInteger(target) || attack[target] !== 1 || !(bin in TROOP_BINS)) return DROP;
+    if (!Number.isInteger(target) || attack[target] !== 1 || !isShare(share)) return DROP;
     const targetID = target === 0 ? null : (game.playerBySmallID(target) as Player).id();
-    return { intent: { type: "attack", targetID, troops: TROOP_BINS[bin] * seat.troops() }, valid: true };
+    return { intent: { type: "attack", targetID, troops: (share / 100) * seat.troops() }, valid: true };
   }
   if (!Number.isInteger(cell) || cell < 0 || cell >= frame.n) return DROP;
   if (type === Act.Spawn) {
@@ -94,12 +97,12 @@ export function decodeAction(
     return tile === null ? DROP : { intent: { type: "spawn", tile }, valid: true };
   }
   if (type === Act.Boat) {
-    if (!(bin in TROOP_BINS)) return DROP;
+    if (!isShare(share)) return DROP;
     for (const tile of frame.tilesOf(cell)) {
       if (!game.isLand(tile) || game.isImpassable(tile) || !game.isShore(tile)) continue;
       if (game.ownerID(tile) === seat.smallID()) continue;
       if (canBuildTransportShip(game, seat, tile) !== false) {
-        return { intent: { type: "boat", dst: tile, troops: TROOP_BINS[bin] * seat.troops() }, valid: true };
+        return { intent: { type: "boat", dst: tile, troops: (share / 100) * seat.troops() }, valid: true };
       }
     }
     return DROP;
