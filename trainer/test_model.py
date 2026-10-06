@@ -4,9 +4,10 @@ import unittest
 from pathlib import Path
 
 import torch
+from torch.distributions import Categorical
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1,
+from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, SHARES, SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1,
                            RandomPolicy, SoftMoE, load_net, new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5}
@@ -61,6 +62,37 @@ def exact_fp32(test):
     torch.backends.cudnn.allow_tf32 = torch.backends.cuda.matmul.allow_tf32 = False
     test.addCleanup(lambda: (setattr(torch.backends.cudnn, "allow_tf32", flags[0]),
                              setattr(torch.backends.cuda.matmul, "allow_tf32", flags[1])))
+
+
+def brute_kl(p_out, q_out, obs, troops):
+    """Per row, the sum over every joint action of p log(p / q); `troops` are the percents a troop head can send."""
+    hw, players = obs["cell_mask"].shape[-1], obs["attack_mask"].shape[-1]
+    acts = torch.tensor([[0, 0, 0, 0]] + [[SPAWN, c, 0, 0] for c in range(hw)]
+                        + [[ATTACK, 0, t, s] for t in range(players) for s in troops]
+                        + [[BOAT, c, 0, s] for c in range(hw) for s in troops] + [[BUILD, c, 0, 0] for c in range(hw)])
+    rows = []
+    for i in range(len(obs["type_mask"])):
+        one = lambda d: {k: v[i:i + 1].expand(len(acts), *v.shape[1:]) for k, v in d.items()}
+        lp = ActionDist(one(p_out), one(obs)).log_prob(acts)
+        lq = ActionDist(one(q_out), one(obs)).log_prob(acts)
+        rows.append(float((lp.exp() * (lp - lq)).sum()))
+    return rows
+
+
+def small_obs(seed=0):
+    """3 rows on 16 cells with 4 player rows (0: unowned land, 1: the seat, 2-3: others), every type legal and the
+    cells' main owners drawn among all four: small enough to sum over every joint action."""
+    g = torch.Generator().manual_seed(seed)
+    return {"type_mask": torch.ones(3, 5, dtype=torch.bool), "cell_mask": torch.rand(3, 3, 16, generator=g) < 0.6,
+            "attack_mask": torch.tensor([[True, False, True, True]] * 3),
+            "owners": torch.randint(0, 4, (3, 2, 16), generator=g).to(torch.int16)}
+
+
+def share_out(seed=0):
+    """Random outputs of a 100-share network for small_obs."""
+    g = torch.Generator().manual_seed(seed)
+    return {"type": torch.randn(3, 5, generator=g), "maps": torch.randn(3, 3, 16, generator=g) * 3,
+            "ptr": torch.randn(3, 4, generator=g), "shares": torch.randn(3, 2, 4, SHARES, generator=g) * 2}
 
 
 class ModelTest(unittest.TestCase):
@@ -128,15 +160,8 @@ class ModelTest(unittest.TestCase):
         obs = {k: v.cpu() for k, v in self.obs.items()}
         p_out, q_out = logits(), logits()
         kl = ActionDist(p_out, obs).kl(ActionDist(q_out, obs))
-        hw = range(H * W)
-        acts = torch.tensor([[0, 0, 0, 0]] + [[SPAWN, c, 0, 0] for c in hw]
-                            + [[ATTACK, 0, t, b] for t in range(P) for b in SIZES]
-                            + [[BOAT, c, 0, b] for c in hw for b in SIZES] + [[BUILD, c, 0, 0] for c in hw])
-        for i in range(N):  # sum over every joint action of p log(p / q)
-            one = lambda d: {k: v[i:i + 1].expand(len(acts), *v.shape[1:]) for k, v in d.items()}
-            lp = ActionDist(one(p_out), one(obs)).log_prob(acts)
-            lq = ActionDist(one(q_out), one(obs)).log_prob(acts)
-            self.assertAlmostEqual(float(kl[i]), float((lp.exp() * (lp - lq)).sum()), places=4)
+        for i, want in enumerate(brute_kl(p_out, q_out, obs, SIZES)):
+            self.assertAlmostEqual(float(kl[i]), want, places=4)
         self.assertTrue(torch.allclose(ActionDist(p_out, obs).kl(ActionDist(p_out, obs)), torch.zeros(N), atol=1e-6))
         q_out["maps"][:, :, 7] += 300.0  # a reference sure of one cell: the others' probabilities underflow to 0
         self.assertTrue(torch.isfinite(ActionDist(p_out, obs).kl(ActionDist(q_out, obs))).all())
@@ -275,6 +300,75 @@ class SoftMoETest(unittest.TestCase):
         self.assertTrue(all(float(moe.w.grad[e].abs().sum()) > 0 for e in range(4)))
         self.assertGreater(float(moe.router.weight.grad.abs().sum()), 0)
 
+
+
+class ShareDistTest(unittest.TestCase):
+    """ActionDist with a 100-share troop head (PLAN 3B), on small_obs."""
+
+    def test_an_attack_reads_its_targets_share_and_a_boat_its_landing_cells_main_owner(self):
+        obs, out = small_obs(), share_out()
+        out["shares"].zero_()
+        for who in range(4):
+            out["shares"][:, 0, who, 10 * who + 4] = 50.0  # an attack on player `who` sends 10 * who + 5 %
+            out["shares"][:, 1, who, 10 * who + 9] = 50.0  # a boat to a cell `who` mainly owns: 10 * who + 10 %
+        dist = ActionDist(out, obs)
+        target, cell = torch.tensor([0, 2, 3]), torch.tensor([0, 5, 15])
+        owner = obs["owners"][torch.arange(3), 0, cell].long()
+        pct = dist.troop_sample(target, cell)
+        self.assertEqual(pct[:, 0].tolist(), (10 * target + 5).tolist())
+        self.assertEqual(pct[:, 1].tolist(), (10 * owner + 10).tolist())
+        lp = dist.troop_log_prob(target, cell, 10 * owner + 10)
+        self.assertTrue(torch.allclose(lp[:, 1], torch.zeros(3), atol=1e-4))
+        out["type"] = torch.tensor([[-30.0, -30.0, -30.0, 30.0, -30.0]] * 3)  # boats everywhere
+        a = ActionDist(out, obs).sample()
+        self.assertEqual(a[:, 3].tolist(), (10 * obs["owners"][torch.arange(3), 0, a[:, 1]].long() + 10).tolist())
+
+    def test_kl_is_the_exact_kl_of_the_joint_action(self):
+        obs, p_out, q_out = small_obs(), share_out(1), share_out(2)
+        kl = ActionDist(p_out, obs).kl(ActionDist(q_out, obs))
+        for i, want in enumerate(brute_kl(p_out, q_out, obs, range(1, SHARES + 1))):
+            self.assertAlmostEqual(float(kl[i]), want, delta=1e-4 * max(1.0, want))
+        self.assertTrue(torch.allclose(ActionDist(p_out, obs).kl(ActionDist(p_out, obs)), torch.zeros(3), atol=1e-6))
+
+    def test_the_share_entropy_weights_each_token_by_its_pointer_or_boat_probability(self):
+        obs, out = small_obs(), share_out()
+        d, flat = ActionDist(out, obs), ActionDist(dict(out, shares=torch.zeros_like(out["shares"])), obs)
+        h = Categorical(logits=out["shares"]).entropy() / math.log(SHARES)  # [3, 2, 4]; uniform shares give 1
+        boat = torch.zeros(3, 4)
+        for i in range(3):
+            for c in range(16):
+                boat[i, int(obs["owners"][i, 0, c])] += d.cells.probs[i, 1, c]
+        pt = d.type.probs
+        want = pt[:, ATTACK] * ((d.ptr.probs * h[:, 0]).sum(1) - 1) + pt[:, BOAT] * ((boat * h[:, 1]).sum(1) - 1)
+        self.assertTrue(torch.allclose(d.entropy() - flat.entropy(), want, atol=1e-5))
+
+    def test_a_soft_label_spreads_onto_the_neighbouring_percents(self):
+        obs, out = small_obs(), share_out()
+        d = ActionDist(out, obs)
+        target, cell = torch.full((3,), 2), torch.zeros(3, dtype=torch.long)
+        lp = out["shares"][:, 0, 2].log_softmax(-1)  # the attack on player 2; index k is k + 1 percent
+        for percent, near in ((20, (18, 19, 20)), (1, (0, 0, 1)), (100, (98, 99, 99))):
+            got = d.troop_log_prob(target, cell, torch.full((3,), percent), smooth=0.1)[:, 0]
+            want = 0.05 * lp[:, near[0]] + 0.9 * lp[:, near[1]] + 0.05 * lp[:, near[2]]
+            self.assertTrue(torch.allclose(got, want, atol=1e-5), percent)
+        self.assertTrue(torch.allclose(d.troop_log_prob(target, cell, torch.full((3,), 20))[:, 0], lp[:, 19]))
+
+    def test_uniform_shares_sum_into_the_five_sizes_by_their_ranges(self):
+        obs, out = small_obs(), share_out()
+        out["shares"].zero_()
+        d = ActionDist(out, obs)
+        p = d.size_log_probs(torch.full((3,), 2), torch.zeros(3, dtype=torch.long)).exp()
+        want = torch.tensor([15, 20, 26, 25, 14]) / 100  # 1-15%, 16-35, 36-61, 62-86, 87-100
+        self.assertTrue(torch.allclose(p, want.expand(3, 2, 5), atol=1e-6))
+        acts = torch.tensor([[ATTACK, 0, 2, 20]] * 3)
+        gap = d.log_prob(acts, sizes=True) - d.log_prob(acts)  # 25%'s 20 percents against one
+        self.assertTrue(torch.allclose(gap, torch.full((3,), math.log(20)), atol=1e-5))
+
+    def test_the_kl_needs_the_same_troop_head(self):
+        obs, out = small_obs(), share_out()
+        sizes = {k: v for k, v in out.items() if k != "shares"} | {"bins": torch.zeros(3, 2, 5)}
+        with self.assertRaisesRegex(ValueError, "same troop head"):
+            ActionDist(out, obs).kl(ActionDist(sizes, obs))
 
 
 class LoadTest(unittest.TestCase):

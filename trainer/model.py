@@ -18,6 +18,8 @@ SHARES = 100  # the Phase 3B network's troop shares: 1-100% (PLAN 3B)
 SIZE_OF = torch.tensor([min(range(len(SIZES)), key=lambda i: abs(math.log(max(p, SIZES[0]) / SIZES[i])))
                         for p in range(SHARES + 1)])
 SIZE_PERCENT = torch.tensor(SIZES)
+# [5, SHARES]: 0 on the percents of each size, -inf elsewhere
+SIZE_RANGES = torch.where(SIZE_OF[1:] == torch.arange(len(SIZES))[:, None], 0.0, -math.inf)
 N_MAPS = 3  # heat maps: spawn, boat landing, city
 MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
 V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
@@ -276,22 +278,64 @@ class ActionDist:
     """The joint action [type, cell, target, troops]: the type picks which argument heads are used.
 
     spawn: spawn map cell; attack: player pointer + troops; boat: boat map cell + troops; build city: city map cell.
-    troops: the percent of its current troops an attack or boat sends (1-100). The Phase 2 and 3A networks pick one of
-    the five SIZES per kind, whatever the target."""
+    troops: the percent of its current troops an attack or boat sends (1-100).
+    - A Phase 3B network ("shares" in its outputs, [N, 2, P, SHARES]) reads the share from a player's token: the
+      attack's target, or the main owner of the boat's landing cell (obs "owners").
+    - The Phase 2 and 3A networks ("bins", [N, 2, 5]) pick one of the five SIZES per kind, whatever the target: a
+      single token."""
 
     def __init__(self, out, obs):
         self.type = _masked(out["type"].float(), obs["type_mask"])
         self.cells = _masked(out["maps"].float(), obs["cell_mask"])  # batch [N, 3]
         self.ptr = _masked(out["ptr"].float(), obs["attack_mask"])
-        self.bins = Categorical(logits=out["bins"].float())  # batch [N, 2]: attack, boat
+        self.shares = "shares" in out
+        if self.shares:
+            self.troops = Categorical(logits=out["shares"].float())  # batch [N, 2, P]: attack, boat x token
+            self.owner = obs["owners"][:, 0].long()  # [N, cells]: each cell's main owner
+        else:
+            self.troops = Categorical(logits=out["bins"].float()[:, :, None])  # batch [N, 2, 1]
+
+    def _at(self, target, cell):
+        """The troop logits [N, 2, choices] of an attack on `target` and a boat to `cell`."""
+        logits = self.troops.logits
+        if not self.shares:
+            return logits[:, :, 0]
+        who = torch.stack([target, self.owner.gather(1, cell[:, None])[:, 0]], 1)  # [N, 2]
+        return logits.gather(2, who[:, :, None, None].expand(-1, -1, 1, SHARES))[:, :, 0]
+
+    def _weights(self):
+        """[N, 2, tokens]: how likely an attack or a boat reads each token's troop head, given its type."""
+        if not self.shares:
+            return torch.ones_like(self.troops.logits[..., 0])
+        boat = torch.zeros_like(self.ptr.probs).scatter_add_(1, self.owner, self.cells.probs[:, 1])
+        return torch.stack([self.ptr.probs, boat], 1)
 
     def troop_sample(self, target, cell):
         """Percents [N, 2] sampled for an attack on `target` and a boat to `cell`."""
-        return SIZE_PERCENT.to(target.device)[self.bins.sample()]
+        k = Categorical(logits=self._at(target, cell)).sample()
+        return k + 1 if self.shares else SIZE_PERCENT.to(k.device)[k]
 
     def size_log_probs(self, target, cell):
-        """Log-probabilities [N, 2, 5] of the five SIZES for an attack on `target` and a boat to `cell`."""
-        return self.bins.logits
+        """Log-probabilities [N, 2, 5] of the five SIZES for an attack on `target` and a boat to `cell`. A 100-share
+        network's shares are summed over the percents each size stands for (SIZE_OF), for like-for-like scores."""
+        lp = self._at(target, cell).log_softmax(-1)
+        return (lp[..., None, :] + SIZE_RANGES.to(lp.device)).logsumexp(-1) if self.shares else lp
+
+    def troop_log_prob(self, target, cell, percent, smooth=0.0, sizes=False):
+        """[N, 2]: the log-probability that an attack on `target` or a boat to `cell` sends `percent`.
+        - sizes: of the size `percent` falls in (SIZE_OF), for every network;
+        - smooth (100-share networks): the label keeps 1 - smooth of its weight and puts smooth / 2 on each neighbouring
+          percent (back on itself at 1% and 100%); the result is the expected log-probability."""
+        if sizes or not self.shares:
+            size = SIZE_OF.to(percent.device)[percent.clamp(0, SHARES)]
+            return self.size_log_probs(target, cell).gather(2, size[:, None, None].expand(-1, 2, 1))[:, :, 0]
+        lp = self._at(target, cell).log_softmax(-1)
+        k = (percent - 1).clamp(0, SHARES - 1)[:, None, None].expand(-1, 2, 1)
+        if not smooth:
+            return lp.gather(2, k)[:, :, 0]
+        near = (k + torch.tensor([-1, 0, 1], device=k.device)).clamp(0, SHARES - 1)  # [N, 2, 3]
+        weight = torch.tensor([smooth / 2, 1 - smooth, smooth / 2], device=lp.device).expand(near.shape)
+        return (torch.zeros_like(lp).scatter_add_(2, near, weight) * lp).sum(2)
 
     def sample(self):
         t, c, p = self.type.sample(), self.cells.sample(), self.ptr.sample()
@@ -302,36 +346,43 @@ class ActionDist:
         troops = torch.where(t == ATTACK, pct[:, 0], torch.where(t == BOAT, pct[:, 1], zero))
         return torch.stack([t, cell, target, troops], 1)
 
-    def log_prob(self, actions):
+    def log_prob(self, actions, smooth=0.0, sizes=False):
+        """log pi(actions) [N]; `smooth` and `sizes` as in troop_log_prob."""
         t, cell, target, troops = actions.unbind(1)
         lc = self.cells.log_prob(cell[:, None].expand(-1, N_MAPS))
-        lb = self.bins.log_prob(SIZE_OF.to(troops.device)[troops.clamp(0, SHARES)][:, None].expand(-1, 2))
+        lt = self.troop_log_prob(target, cell, troops, smooth, sizes)
         zero = torch.zeros_like(lc[:, 0])
         return (self.type.log_prob(t)
                 + torch.where(t == SPAWN, lc[:, 0], zero)
-                + torch.where(t == ATTACK, self.ptr.log_prob(target) + lb[:, 0], zero)
-                + torch.where(t == BOAT, lc[:, 1] + lb[:, 1], zero)
+                + torch.where(t == ATTACK, self.ptr.log_prob(target) + lt[:, 0], zero)
+                + torch.where(t == BOAT, lc[:, 1] + lt[:, 1], zero)
                 + torch.where(t == BUILD, lc[:, 2], zero))
 
     def entropy(self):
         """Exact joint entropy, H(type) + sum_k p(k) H(args | k), with every head divided by the log of its size so
-        the 4k-cell maps do not drown out the type head. p(k) is detached: otherwise the bonus pushes the type head
-        toward the types with the most arguments (attack, boat) and away from no-op, as it did in Phase 1."""
+        the 4k-cell maps do not drown out the type head. A troop head's entropy is averaged over the tokens it reads,
+        weighted by the pointer or the boat map. p(k) and those weights are detached: otherwise the bonus pushes the
+        type head toward the types with the most arguments (attack, boat) and away from no-op, as it did in Phase 1,
+        and the pointer toward the targets with the least certain shares."""
         hc = self.cells.entropy() / math.log(self.cells.logits.shape[-1])
-        hb = self.bins.entropy() / math.log(self.bins.logits.shape[-1])
         hp = self.ptr.entropy() / math.log(max(self.ptr.logits.shape[-1], 2))
+        ht = (self._weights().detach() * self.troops.entropy()).sum(2) / math.log(self.troops.logits.shape[-1])
         pt = self.type.probs.detach()
         return (self.type.entropy() / math.log(pt.shape[-1]) + pt[:, SPAWN] * hc[:, 0]
-                + pt[:, ATTACK] * (hp + hb[:, 0]) + pt[:, BOAT] * (hc[:, 1] + hb[:, 1]) + pt[:, BUILD] * hc[:, 2])
+                + pt[:, ATTACK] * (hp + ht[:, 0]) + pt[:, BOAT] * (hc[:, 1] + ht[:, 1]) + pt[:, BUILD] * hc[:, 2])
 
     def kl(self, ref):
-        """Exact KL(self || ref) of the joint action, KL(type) + sum_k p(k) KL(args | k). The one-sample estimate
-        from the taken action is not usable: it explodes when that action is one this policy all but rules out and
-        ref does not, which a spread-out 49k-cell map makes common."""
-        kc, kb = _kl(self.cells, ref.cells), _kl(self.bins, ref.bins)  # [N, 3], [N, 2]
+        """Exact KL(self || ref) of the joint action, KL(type) + sum_k p(k) KL(args | k); a troop head's KL is averaged
+        over the tokens it reads, weighted by this policy's pointer or boat map. The one-sample estimate from the taken
+        action is not usable: it explodes when that action is one this policy all but rules out and ref does not,
+        which a spread-out 49k-cell map makes common."""
+        if self.shares != ref.shares:
+            raise ValueError("the KL needs two networks with the same troop head (100 shares or 5 sizes)")
+        kc = _kl(self.cells, ref.cells)  # [N, 3]
+        kt = (self._weights() * _kl(self.troops, ref.troops)).sum(2)  # [N, 2]
         pt = self.type.probs
-        return (_kl(self.type, ref.type) + pt[:, SPAWN] * kc[:, 0] + pt[:, ATTACK] * (_kl(self.ptr, ref.ptr) + kb[:, 0])
-                + pt[:, BOAT] * (kc[:, 1] + kb[:, 1]) + pt[:, BUILD] * kc[:, 2])
+        return (_kl(self.type, ref.type) + pt[:, SPAWN] * kc[:, 0] + pt[:, ATTACK] * (_kl(self.ptr, ref.ptr) + kt[:, 0])
+                + pt[:, BOAT] * (kc[:, 1] + kt[:, 1]) + pt[:, BUILD] * kc[:, 2])
 
 
 def _kl(p, q):
