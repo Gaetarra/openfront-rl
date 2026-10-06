@@ -785,6 +785,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         large points to a bug, which is found before the rest of 3B;
       - experts: the keep rule above, on `bc/nll_shares` (both networks have 100 shares) and the speed check's PPO
         runs.
+    - Checks (2026-10-06, `runs/3b-score.log`, `runs/3b-speed.log`):
+      - score: the 3A clone scores `bc/nll` 0.8425 under the percent labels (0.8430 before, same 288,000 rows). Only
+        its attack size moved (0.6739 → 0.6705): a few rounded percents cross a size boundary;
+      - speed (`--ppo-minibatches 12`): BC 779 rows/s with one network, 549 with the pair (71%, below the 90% bar), so
+        **the twin gets its own night**. One network's GPU work takes ~70% of the time the workers need to replay a
+        window, so two networks make the GPU the bottleneck;
+      - PPO: Phase 2 network 178 decisions/s, v3 MoE 150 (79% of Phase 2's 190; Gate 3B's bar is 75%), v3 SwiGLU
+        experts 147 (98% of the MoE core, within the keep rule's 5%). Peak VRAM 11.4–11.5 GB of 12.3 (2.1 GB held by
+        other programs). Both margins are thin before step 3 adds 9 heat maps and the coverage channels.
   - **Actions**, as flat types:
     - today's 5;
     - build defense post / silo / factory / port / SAM / warship;
