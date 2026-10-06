@@ -25,7 +25,8 @@ from trainer import crawl
 from trainer.control import Control, serve
 from trainer.env import RANKED_1V1, ROOT, VecEnv
 from trainer.eval import tag
-from trainer.model import ATTACK, BOAT, BUILD, SHARES, SIZE_OF, SPAWN, ActionDist, describe, load_net, new_net
+from trainer.model import (ATTACK, BOAT, BUILD, CORES, SHARES, SIZE_OF, SPAWN, ActionDist, describe, load_net,
+                           new_net)
 from trainer.ppo import game_commit, network_args, resume_args, save_checkpoint
 
 CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes from (trainer/model.py)
@@ -42,7 +43,7 @@ def parser():
     p.add_argument("--init", help="start from this checkpoint's weights and network, with a fresh optimizer")
     p.add_argument("--score", nargs="+", metavar="CHECKPOINT",
                    help="score these checkpoints on the fixed held-out set (~10 min) instead of training")
-    p.add_argument("--core", choices=("dense", "moe"), default="moe", help="the core of a new network (not with --init)")
+    p.add_argument("--core", choices=CORES, default="moe", help="the core of a new network (not with --init)")
     p.add_argument("--workers", type=int, default=10)
     p.add_argument("--games-per-worker", type=int, default=8)
     p.add_argument("--val-workers", type=int, default=2, help="0 = no validation")

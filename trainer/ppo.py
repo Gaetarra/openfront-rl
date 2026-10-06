@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from trainer.control import Control, serve
 from trainer.env import GAME_DIR, RANKED_1V1, ROOT, VecEnv
-from trainer.model import ACT_NAMES, ActionDist, arch_of, load_net, new_net
+from trainer.model import ACT_NAMES, CORES, ActionDist, arch_of, load_net, new_net
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
 
@@ -54,7 +54,7 @@ def parser():
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--widths", default="64,128,192", help="CNN stage widths")
-    p.add_argument("--core", choices=("dense", "moe"), default="moe", help="the core of a new network (not with --init)")
+    p.add_argument("--core", choices=CORES, default="moe", help="the core of a new network (not with --init)")
     p.add_argument("--init", help="start from this checkpoint's weights, e.g. checkpoints/bc/latest.pt")
     p.add_argument("--opponent", help="frozen checkpoint that plays every seat but the learner's (2-seat setups)")
     p.add_argument("--kl-coef", type=float, default=None,

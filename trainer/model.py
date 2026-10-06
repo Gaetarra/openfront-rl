@@ -26,6 +26,7 @@ V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
 D = 128  # width of the player tokens
 ATTENDED = 64  # players the transformer attends to (the most relevant ones); every player keeps a token
 DS = 64  # hidden width of the troop-share head, per kind (attack, boat)
+CORES = ("dense", "moe", "moe-swiglu")  # Policy cores: one 512 x 512 layer, 8 such experts, 8 SwiGLU experts
 
 
 def relevance(players):
@@ -91,21 +92,32 @@ def land_features(obs, f):
 class SoftMoE(nn.Module):
     """Soft-MoE (PLAN decision 5c) for one vector per row. With a single token, every expert's slot receives the row's
     vector, and the combine weights are a softmax over the experts: the layer blends the experts' outputs by
-    situation. Each expert is one d x d layer, so running them all costs little next to the CNN. More experts can be
-    added later by copying trained ones (upcycling)."""
+    situation. Each expert is one d x d layer, or with `hidden` a 2-layer SwiGLU network d -> hidden -> d without
+    biases (PLAN 3B, the brief's idea F). Running them all costs little next to the CNN. More experts can be added
+    later by copying trained ones (upcycling)."""
 
-    def __init__(self, d, experts=8):
+    def __init__(self, d, experts=8, hidden=None):
         super().__init__()
         self.router = nn.Linear(d, experts)
         nn.init.zeros_(self.router.weight)  # every expert weighs the same at the start
         nn.init.zeros_(self.router.bias)
-        layers = [nn.Linear(d, d) for _ in range(experts)]
-        self.w = nn.Parameter(torch.stack([layer.weight.detach() for layer in layers]))  # [experts, out, in]
-        self.b = nn.Parameter(torch.stack([layer.bias.detach() for layer in layers]))  # [experts, out]
+        self.hidden = hidden
+        if hidden is None:
+            layers = [nn.Linear(d, d) for _ in range(experts)]
+            self.w = nn.Parameter(torch.stack([layer.weight.detach() for layer in layers]))  # [experts, out, in]
+            self.b = nn.Parameter(torch.stack([layer.bias.detach() for layer in layers]))  # [experts, out]
+        else:
+            stack = lambda i, o: nn.Parameter(torch.stack([nn.Linear(i, o, bias=False).weight.detach()
+                                                           for _ in range(experts)]))  # [experts, out, in]
+            self.gate, self.up, self.down = stack(d, hidden), stack(d, hidden), stack(hidden, d)
 
     def forward(self, x):
         gates = self.router(x).softmax(-1)  # [N, experts]
-        y = torch.einsum("ni,eoi->neo", x, self.w) + self.b  # every expert's output [N, experts, out]
+        if self.hidden is None:
+            y = torch.einsum("ni,eoi->neo", x, self.w) + self.b  # every expert's output [N, experts, out]
+        else:
+            z = F.silu(torch.einsum("ni,eoi->neo", x, self.gate)) * torch.einsum("ni,eoi->neo", x, self.up)
+            y = torch.einsum("nei,eoi->neo", z, self.down)
         return torch.einsum("ne,neo->no", gates, y), gates
 
 
@@ -132,7 +144,8 @@ class Policy(nn.Module):
     - The core reads an attention summary queried by the map and the scalars, the seat's own token, and the means over
       its friends, its enemies and the bots.
     - The attack pointer reads the tokens.
-    - core: "dense" (one 512 x 512 layer) or "moe" (a Soft-MoE layer of 8 experts in its place).
+    - core: "dense" (one 512 x 512 layer), "moe" (a Soft-MoE layer of 8 experts in its place) or "moe-swiglu" (8
+      SwiGLU experts, 512 -> 1024 -> 512).
     - troops: with shares=True (arch v3, PLAN 3B), per kind a hidden layer reads the core and one player's token, then
       100 shares; otherwise the 3A network's 5 sizes from the core alone."""
 
@@ -172,8 +185,8 @@ class Policy(nn.Module):
             nn.init.zeros_(layer.weight)
             nn.init.zeros_(layer.bias)
         # Built last, so for a given seed both cores start every other layer from the same weights (the A/B).
-        self.moe = core == "moe"
-        self.core = SoftMoE(512) if self.moe else nn.Linear(512, 512)
+        self.moe = core != "dense"
+        self.core = SoftMoE(512, hidden=1024 if core == "moe-swiglu" else None) if self.moe else nn.Linear(512, 512)
 
     def forward(self, obs):
         x = _spatial_input(obs["spatial"], self.stem.weight)
@@ -421,7 +434,8 @@ def new_net(dims, args):
     return Policy(dims, widths, spec["core"], shares=spec["arch"] == "v3")
 
 
-CORE_NAMES = {"dense": "dense core", "moe": "Soft-MoE core (8 experts)"}
+CORE_NAMES = {"dense": "dense core", "moe": "Soft-MoE core (8 experts)",
+              "moe-swiglu": "Soft-MoE core (8 SwiGLU experts)"}
 
 
 def describe(args):

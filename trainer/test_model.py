@@ -4,11 +4,12 @@ import unittest
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, SHARES, SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1,
-                           RandomPolicy, SoftMoE, load_net, new_net, relevance, v1_spatial)
+from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, SHARES, SIZE_OF, SIZES, SPAWN, ActionDist, Policy,
+                           PolicyV1, RandomPolicy, SoftMoE, load_net, new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5}
 N, P, H, W = 6, 5, 32, 32
@@ -42,7 +43,7 @@ def fake_obs(device="cuda", seed=0):
 def nets():
     """One network of every kind."""
     return {"v1": PolicyV1(DIMS), "dense": Policy(DIMS, core="dense"), "moe": Policy(DIMS, core="moe"),
-            "v3": Policy(DIMS, shares=True)}
+            "v3": Policy(DIMS, shares=True), "swiglu": Policy(DIMS, core="moe-swiglu", shares=True)}
 
 
 def randomized(net):
@@ -108,7 +109,7 @@ class ModelTest(unittest.TestCase):
                     out = net.cuda()(self.obs)
                 self.assertEqual(out["type"].shape, (N, 5))
                 self.assertEqual(out["maps"].shape, (N, 3, H * W))
-                if name == "v3":
+                if name in ("v3", "swiglu"):
                     self.assertEqual(out["shares"].shape, (N, 2, P, SHARES))
                 else:
                     self.assertEqual(out["bins"].shape, (N, 2, 5))
@@ -248,14 +249,15 @@ class PolicyTest(unittest.TestCase):
                 for x, y in pairs:
                     self.assertTrue(torch.allclose(x, y, rtol=1e-4, atol=1e-4))
 
-    def test_the_two_cores_start_alike_everywhere_else(self):
-        torch.manual_seed(3)
-        dense = Policy(DIMS, core="dense").state_dict()
-        torch.manual_seed(3)
-        moe = Policy(DIMS, core="moe").state_dict()
-        for k, v in dense.items():
-            if not k.startswith("core."):
-                self.assertTrue(torch.equal(v, moe[k]), k)
+    def test_the_cores_start_alike_everywhere_else(self):
+        states = {}
+        for core in CORES:
+            torch.manual_seed(3)
+            states[core] = Policy(DIMS, core=core, shares=True).state_dict()
+        for core in CORES[1:]:
+            for k, v in states["dense"].items():
+                if not k.startswith("core."):
+                    self.assertTrue(torch.equal(v, states[core][k]), (core, k))
 
     def test_64ths_are_exact_in_bf16(self):
         k = torch.arange(256)
@@ -306,6 +308,20 @@ class SoftMoETest(unittest.TestCase):
         self.assertTrue(torch.allclose(gates.sum(1), torch.ones(5)))
         experts = torch.stack([x @ moe.w[e].T + moe.b[e] for e in range(4)], 1)  # [5, experts, 16]
         self.assertTrue(torch.allclose(y, (gates[..., None] * experts).sum(1), atol=1e-5))
+
+    def test_swiglu_experts_are_two_layer_networks_blended_by_the_router(self):
+        torch.manual_seed(0)
+        moe = SoftMoE(16, experts=4, hidden=32)
+        torch.nn.init.normal_(moe.router.weight)
+        x = torch.randn(5, 16)
+        y, gates = moe(x)
+        experts = torch.stack([(F.silu(x @ moe.gate[e].T) * (x @ moe.up[e].T)) @ moe.down[e].T for e in range(4)], 1)
+        self.assertTrue(torch.allclose(y, (gates[..., None] * experts).sum(1), atol=1e-5))
+
+    def test_the_swiglu_experts_hold_plans_12_6m_parameters(self):
+        moe = SoftMoE(512, hidden=1024)
+        self.assertEqual(sum(p.numel() for n, p in moe.named_parameters() if not n.startswith("router")),
+                         8 * 3 * 512 * 1024)  # 12,582,912
 
     def test_every_expert_learns(self):
         torch.manual_seed(0)
@@ -393,12 +409,13 @@ class LoadTest(unittest.TestCase):
             for args, kind in (({"widths": "64,128,192"}, PolicyV1),  # Phase 2 checkpoints have no "arch"
                                ({"arch": "v2", "core": "dense", "widths": "64,128,192"}, Policy),
                                ({"arch": "v2", "core": "moe", "widths": "64,128,192"}, Policy),
-                               ({"arch": "v3", "core": "moe", "widths": "64,128,192"}, Policy)):
+                               ({"arch": "v3", "core": "moe", "widths": "64,128,192"}, Policy),
+                               ({"arch": "v3", "core": "moe-swiglu", "widths": "64,128,192"}, Policy)):
                 path = Path(d) / "net.pt"
                 torch.save({"model": new_net(DIMS, args).state_dict(), "args": args}, path)
                 net = load_net(path, DIMS)
                 self.assertIsInstance(net, kind)
-                self.assertEqual(getattr(net, "moe", False), args.get("core") == "moe")
+                self.assertEqual(getattr(net, "moe", False), args.get("core", "dense") != "dense")
                 self.assertEqual(getattr(net, "shares", False), args.get("arch") == "v3")
                 with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                     self.assertEqual(tuple(net(obs)["value"].shape), (N,))
