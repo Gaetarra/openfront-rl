@@ -18,7 +18,7 @@ read it before starting new work, and update it when a decision changes.
 
 ## Game version
 
-The submodule is pinned to the production release the official servers run (currently `v0.34.22`, commit `4e837520`).
+The submodule is pinned to the production release the official servers run (currently `v0.34.23`, commit `71154c52`).
 Check what production runs by reading `gitCommit` from a recent record:
 `https://api.openfront.io/public/game/<id>?turns=false` (list games via `/public/games`, see the game's `docs/API.md`).
 To upgrade, follow the playbook in `docs/PLAN.md` (decision 14): diff `src/core` between the tags, move the submodule,
@@ -133,7 +133,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   are grid indexes y x W + x; padding cells hold no tiles.
 - Records store only non-empty turns: expand them with `decompressGameRecord` (`bridge/replay.ts: readRecord`).
 - Replays: archived records contain only human intents; nations and bots re-simulate from the game seed. A record
-  replays in sync when no simulation code changed between its `gitCommit` and the pin (v0.34.17-v0.34.22 are
+  replays in sync when no simulation code changed between its `gitCommit` and the pin (v0.34.17-v0.34.23 are
   identical); the hashes it carries every 10 turns decide, not the commit string.
 - v0.34.x has no game snapshots. `loadTerrainMap` caches one mutable map per map and size per process, so the bridge
   builds a fresh map for every game (`bridge/maps.ts: loadFreshTerrain`) and resets the game's cross-game static

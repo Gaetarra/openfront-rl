@@ -197,6 +197,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
     v0.34.21 → **v0.34.22** (2026-10-03; live since 2026-10-01): 6 commits of client, server, telemetry and payments
     changes; the only core file is `src/core/ApiSchemas.ts` (an account API field), no simulation change and no
     dependency change; 5/5 recent v0.34.22 ranked 1v1 records replay in sync at v0.34.22 (2,519 hash checkpoints).
+    v0.34.22 → **v0.34.23** (2026-10-06; live by 2026-10-06): 1 commit, client only (the WebGL map recovers after the GPU
+    process crashes, `src/client/render/gl`), no `src/core` or dependency change; 5/5 recent v0.34.23 ranked 1v1
+    records replay in sync at v0.34.23 (1,819 hash checkpoints).
 
 ## Architecture
 ```
