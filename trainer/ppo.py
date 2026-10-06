@@ -94,17 +94,20 @@ def resume_args(p, argv, saved, may_change):
 def network_args(p, argv, a):
     """A new run's network settings. With --init they are the checkpoint's: its weights decide the network, and a
     different --core or --widths given alongside is refused. Without it, a Phase 3B network (100 troop shares) from
-    --core and --widths."""
-    if not a.init:
+    --core and --widths. A new run never overwrites another: a folder that holds a run's checkpoint is refused."""
+    if a.init:
+        spec = arch_of(torch.load(a.init, map_location="cpu", weights_only=False)["args"])
+        given = given_flags(p, argv)
+        clash = [k for k in ("core", "widths") if k in given and given[k] != spec[k]]
+        if clash:
+            raise SystemExit(f"--init {a.init} holds a {spec['arch']} network ({spec['core']} core, widths "
+                             f"{spec['widths']}): drop {', '.join('--' + k for k in clash)}")
+        vars(a).update(spec)
+    else:
         a.arch = "v3"
-        return a
-    spec = arch_of(torch.load(a.init, map_location="cpu", weights_only=False)["args"])
-    given = given_flags(p, argv)
-    clash = [k for k in ("core", "widths") if k in given and given[k] != spec[k]]
-    if clash:
-        raise SystemExit(f"--init {a.init} holds a {spec['arch']} network ({spec['core']} core, widths "
-                         f"{spec['widths']}): drop {', '.join('--' + k for k in clash)}")
-    vars(a).update(spec)
+    if (ROOT / "checkpoints" / a.run / "latest.pt").exists():
+        raise SystemExit(f"checkpoints/{a.run} already holds a run: add --resume to continue it, or start a new one "
+                         f"with another --run name (or delete the folder)")
     return a
 
 
@@ -276,7 +279,7 @@ def main(argv=None):
     control.update(run=run_info(a))
     server = serve(control, a.port, log_dir=run_dir)
     control.note(f"control page on http://127.0.0.1:{server.server_address[1]}")
-    writer = SummaryWriter(run_dir)
+    writer = SummaryWriter(run_dir, purge_step=global_step + 1 if state else None)  # a resume hides a crash's tail
     commit = game_commit()
 
     def checkpoint():

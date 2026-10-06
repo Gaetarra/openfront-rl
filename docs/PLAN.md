@@ -794,6 +794,13 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - PPO: Phase 2 network 178 decisions/s, v3 MoE 150 (79% of Phase 2's 190; Gate 3B's bar is 75%), v3 SwiGLU
         experts 147 (98% of the MoE core, within the keep rule's 5%). Peak VRAM 11.4–11.5 GB of 12.3 (2.1 GB held by
         other programs). Both margins are thin before step 3 adds 9 heat maps and the coverage channels.
+    - Night 1 (`bc3b`, started 2026-10-06 20:32): the GPU driver failed at 23:40 (nvlddmkm 153), at update ~5,225.
+      The run was then restarted from update 0 under the same name by mistake (01:03), which made the curves step
+      back. It was stopped at update 81; `latest.pt` was restored from `update0005000.pt`, and the run resumed from
+      update 5000.
+      - Fixes: a new run now refuses a folder that holds a run, and a resume hides the curves' points logged after
+        the last checkpoint (TensorBoard's purge_step).
+      - The launch command is one loop that starts or resumes, safe to rerun (CLAUDE.md).
   - **Actions**, as flat types:
     - today's 5;
     - build defense post / silo / factory / port / SAM / warship;

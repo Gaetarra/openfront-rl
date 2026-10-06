@@ -88,11 +88,14 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   outlive the session go in the user's own terminal, or in a `.cmd` file started with `explorer.exe <file>.cmd`. That
   gives a normal console window whose parent is explorer.exe, outside the app (the bandwidth test ran this way,
   `runs/bandwidth.cmd`). `trainer.eval` saves every result to `runs/eval/<date>-<time>.json`.
-- The PC's NVIDIA driver occasionally fails (System event nvlddmkm 153) and kills every CUDA program. Checkpoints are
-  atomic, and the trainer exits 0 on stop, Save & quit or Ctrl+C and 1 on a crash, so long runs go in a PowerShell
-  restart loop: `for ($i = 1; $i -le 5; $i++) { .venv/Scripts/python -m trainer.ppo --run <name> --resume --updates <N>;
-  if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 60 }` (a new run starts once without `--resume`; it checkpoints
-  every 25 updates).
+- The PC's NVIDIA driver occasionally fails (System event nvlddmkm 153) and kills every CUDA program (bc3b died this
+  way at update ~5,225, 2026-10-06 23:40). Checkpoints are atomic, and the trainer exits 0 on stop, Save & quit or
+  Ctrl+C and 1 on a crash, so long runs go in one PowerShell loop that starts the run or resumes it, safe to rerun:
+  `for ($i = 1; $i -le 6; $i++) { if (Test-Path checkpoints/<name>/latest.pt) { <trainer> --run <name> --resume }
+  else { <trainer> --run <name> <flags> }; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 60 }`.
+  - A new run refuses a folder that already holds a run.
+  - A resume hides from the curves what the crashed sitting logged after its last checkpoint.
+  - BC saves every 250 updates and keeps every 2,500th; PPO saves every 25.
 - `--resume` keeps the run's settings and refuses flags it would ignore. It takes `--updates` (and, for PPO,
   `--kl-coef`) and this sitting's `--port`, `--duty` and `--gpu-temp-limit`. To change anything else, start a new
   run from the checkpoint with `--init`.

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import torch
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from trainer import bc, crawl
 from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, lr_at, main, measure, one_pass, score,
@@ -236,6 +237,22 @@ class MainTest(unittest.TestCase):
         self.run_main(self.common + ["--updates", "1"])
         with self.assertRaisesRegex(SystemExit, "--lr would be ignored"):
             self.run_main(self.common + ["--updates", "2", "--lr", "1e-3", "--resume"])
+
+    def test_a_new_run_refuses_a_folder_that_holds_a_run(self):
+        self.run_main(self.common + ["--updates", "1"])
+        with self.assertRaisesRegex(SystemExit, "add --resume"):
+            self.run_main(self.common + ["--updates", "1"])
+
+    def test_a_resume_hides_what_the_crashed_run_logged_after_its_checkpoint(self):
+        self.run_main(self.common + ["--updates", "3"])  # logs updates 1-3 at steps 4, 8 and 12
+        path = ROOT / "checkpoints" / self.RUN / "latest.pt"
+        state = torch.load(path, weights_only=False)
+        state.update(update=1, global_step=4)  # as if it crashed after logging update 3, its last checkpoint at 1
+        torch.save(state, path)
+        self.run_main(self.common + ["--updates", "3", "--resume"])
+        curves = EventAccumulator(str(ROOT / "runs" / self.RUN))
+        curves.Reload()
+        self.assertEqual([e.step for e in curves.Scalars("bc/nll")], [4, 8, 12], "the curve never steps back")
 
     def test_a_twin_starts_from_the_same_weights_outside_its_core(self):
         self.run_main(self.common + ["--updates", "0", "--twin", "moe-swiglu"])

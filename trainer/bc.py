@@ -342,14 +342,16 @@ def main(argv=None):
                           log_dir=run_dir / "val_workers")
     torch.manual_seed(a.seed)  # again before each network: a twin starts from the same weights outside its core
     nets = [new_net(envs.dims, vars(a)).to(device).to(memory_format=torch.channels_last)]
-    net_args, dirs, writers = [vars(a)], [ckpt_dir], [SummaryWriter(run_dir)]
+    # A resume hides what a crashed sitting logged after its last checkpoint (TensorBoard's purge_step).
+    purge = state["global_step"] + 1 if state else None
+    net_args, dirs, writers = [vars(a)], [ckpt_dir], [SummaryWriter(run_dir, purge_step=purge)]
     if a.twin:
         torch.manual_seed(a.seed)
         twin_run = f"{a.run}-{a.twin}"
         net_args.append({**vars(a), "run": twin_run, "core": a.twin, "twin": None})
         nets.append(new_net(envs.dims, net_args[1]).to(device).to(memory_format=torch.channels_last))
         dirs.append(ROOT / "checkpoints" / twin_run)
-        writers.append(SummaryWriter(ROOT / "runs" / twin_run))
+        writers.append(SummaryWriter(ROOT / "runs" / twin_run, purge_step=purge))
     model, writer = nets[0], writers[0]
     opts = [torch.optim.Adam(net.parameters(), lr=a.lr, eps=1e-5) for net in nets]
     meters = [Meter() for _ in nets]
