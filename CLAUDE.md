@@ -86,7 +86,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   chain of eval matches started this way died when the app restarted the session (2026-10-06 02:28). Runs that must
   outlive the session go in the user's own terminal, or in a `.cmd` file started with `explorer.exe <file>.cmd`. That
   gives a normal console window whose parent is explorer.exe, outside the app (the bandwidth test ran this way,
-  `runs/bandwidth.cmd`). `trainer.eval` only prints its result, so redirect it to a file.
+  `runs/bandwidth.cmd`). `trainer.eval` saves every result to `runs/eval/<date>-<time>.json`.
 - The PC's NVIDIA driver occasionally fails (System event nvlddmkm 153) and kills every CUDA program. Checkpoints are
   atomic, and the trainer exits 0 on stop, Save & quit or Ctrl+C and 1 on a crash, so long runs go in a PowerShell
   restart loop: `for ($i = 1; $i -le 5; $i++) { .venv/Scripts/python -m trainer.ppo --run <name> --resume --updates <N>;

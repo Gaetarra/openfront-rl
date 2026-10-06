@@ -1,13 +1,16 @@
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import torch
 
 from trainer.control import REPLAYS
 from trainer.env import ONION
-from trainer.eval import Cooldown, label, name_players, play, replay_dir, seats_for, summarize, tag, two_bin_sample
+from trainer.eval import Cooldown, label, main, name_players, play, replay_dir, seats_for, summarize, tag, two_bin_sample
 from trainer.model import ActionDist, new_net
 from trainer.test_model import DIMS
 
@@ -53,6 +56,16 @@ class EvalTest(unittest.TestCase):
             self.assertEqual(tag(str(ckpt)), "bc 60000")
             self.assertEqual(tag(str(old)), f"{Path(d).name} 7")  # no run in its settings: its folder
             self.assertEqual(replay_dir([str(ckpt), "random"]), REPLAYS / "bc 60000 vs random")
+
+    def test_every_result_is_saved_under_runs_eval(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch("trainer.eval.RESULTS", Path(d) / "eval"),                 mock.patch("trainer.eval.play", return_value={"episodes": 2, "win_rate": 0.5, "recorded": []}):
+            with redirect_stdout(io.StringIO()) as out:
+                main(["--setup", "onion", "--a", "random"])
+            saved = list((Path(d) / "eval").glob("*.json"))
+            self.assertEqual(len(saved), 1)
+            result = json.loads(saved[0].read_text(encoding="utf-8"))
+        self.assertEqual((result["a"], result["win_rate"]), ("random", 0.5))
+        self.assertIn(f"saved {saved[0]}", out.getvalue())
 
     def test_old_and_new_networks_play_each_other(self):
         with tempfile.TemporaryDirectory() as d:

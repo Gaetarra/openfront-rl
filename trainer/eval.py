@@ -5,9 +5,10 @@
   .venv/Scripts/python -m trainer.eval --setup onion --a random                        (Phase 1: one seat vs 3 nations)
 
 A policy is "random", "scripted" or a checkpoint path. The results are the first policy's; in 2-seat setups the two
-policies swap seats from one game slot to the next.
+policies swap seats from one game slot to the next. Every result is printed and saved to runs/eval/<date>-<time>.json.
 """
 import argparse
+import datetime
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, RandomPolicy, 
 from trainer.ppo import game_commit
 
 SETUPS = {"onion": ONION, "ranked1v1": RANKED_1V1}
+RESULTS = Path(__file__).resolve().parents[1] / "runs" / "eval"  # every match's result, as runs/score/ for BC
 TROOP_TYPES, GOLD_TYPES = [ATTACK, BOAT], [BUILD]  # the two kinds of action the bins would split (PLAN decision 11)
 
 
@@ -245,8 +247,13 @@ def main(argv=None):
     record = {"dir": str(folder), "gitCommit": game_commit(), "games": a.record} if a.record > 0 else None
     result = play(specs, config, a.episodes, a.workers, a.games_per_worker, seed=a.seed, record=record,
                   a_cooldown=a.a_cooldown, a_two_bins=a.a_two_bins)
-    print(json.dumps({"a": a.a, "b": a.b, "setup": a.setup, "a_cooldown": a.a_cooldown, "a_two_bins": a.a_two_bins,
-                      **result}, indent=2))
+    text = json.dumps({"a": a.a, "b": a.b, "setup": a.setup, "seed": a.seed, "a_cooldown": a.a_cooldown,
+                       "a_two_bins": a.a_two_bins, **result}, indent=2)
+    out = RESULTS / f"{datetime.datetime.now():%Y%m%d-%H%M%S}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")  # first, so a closed terminal cannot lose it
+    print(text)
+    print(f"saved {out}")
     if result["recorded"]:
         print(f'watch: python -m trainer.watch --dir "{folder.name}", then open')
         for game_id in result["recorded"]:
