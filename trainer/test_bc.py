@@ -40,10 +40,10 @@ class LabelTest(unittest.TestCase):
 
     def test_the_control_page_says_what_is_training(self):
         a = bc.parse_args(["--workers", "14", "--games-per-worker", "6", "--updates", "10"])
-        a.arch = "v2"
+        a.arch = "v3"
         info = bc.run_info(a, ["r"] * 3, ["v"])
         self.assertEqual(info["Method"], "behaviour cloning (imitating humans)")
-        self.assertEqual(info["Network"], "player transformer, Soft-MoE core (8 experts)")
+        self.assertEqual(info["Network"], "player transformer, Soft-MoE core (8 experts), 100 troop shares")
         self.assertEqual(info["Starts from"], "random weights")
         self.assertEqual(info["Data"], "3 ranked 1v1 replays, 1 held out")
         self.assertEqual(info["Games at once"], "84 (14 workers x 6)")
@@ -112,7 +112,7 @@ class CloneTest(unittest.TestCase):
         legal = label_legal(obs, labels)
         self.assertGreater(int(legal.sum()), 40)
         torch.manual_seed(0)
-        model = Policy(dims, core="moe").cuda().to(memory_format=torch.channels_last)
+        model = Policy(dims, core="moe", shares=True).cuda().to(memory_format=torch.channels_last)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
         target = torch.zeros(len(labels), device="cuda")
         losses = []
@@ -192,7 +192,7 @@ class MainTest(unittest.TestCase):
         self.run_main(self.common + ["--updates", "3"])
         first = self.latest()
         self.assertEqual((first["kind"], first["update"]), ("bc", 3))
-        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v2", "moe"))
+        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v3", "moe"))
         self.assertEqual(first["global_step"], 3 * 2 * 2)  # 3 updates of 2 windows of 2 rows
         self.assertEqual(self.seeds[0], "bc-1-u0", "runs with one seed replay the same records in the same order")
         self.run_main(self.common + ["--updates", "4", "--resume"])

@@ -93,10 +93,10 @@ def resume_args(p, argv, saved, may_change):
 
 def network_args(p, argv, a):
     """A new run's network settings. With --init they are the checkpoint's: its weights decide the network, and a
-    different --core or --widths given alongside is refused. Without it, a Phase 3 network from --core and
-    --widths."""
+    different --core or --widths given alongside is refused. Without it, a Phase 3B network (100 troop shares) from
+    --core and --widths."""
     if not a.init:
-        a.arch = "v2"
+        a.arch = "v3"
         return a
     spec = arch_of(torch.load(a.init, map_location="cpu", weights_only=False)["args"])
     given = given_flags(p, argv)

@@ -70,7 +70,7 @@ class EvalTest(unittest.TestCase):
     def test_old_and_new_networks_play_each_other(self):
         with tempfile.TemporaryDirectory() as d:
             paths = []
-            for name, args in (("new", {"arch": "v2", "core": "moe", "widths": "64,128,192"}),
+            for name, args in (("new", {"arch": "v3", "core": "moe", "widths": "64,128,192"}),
                                ("old", {"widths": "64,128,192"})):
                 path = Path(d) / f"{name}.pt"
                 torch.save({"model": new_net(DIMS, args).state_dict(), "args": args, "update": 1}, path)

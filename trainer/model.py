@@ -25,6 +25,7 @@ MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
 V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
 D = 128  # width of the player tokens
 ATTENDED = 64  # players the transformer attends to (the most relevant ones); every player keeps a token
+DS = 64  # hidden width of the troop-share head, per kind (attack, boat)
 
 
 def relevance(players):
@@ -131,12 +132,13 @@ class Policy(nn.Module):
     - The core reads an attention summary queried by the map and the scalars, the seat's own token, and the means over
       its friends, its enemies and the bots.
     - The attack pointer reads the tokens.
-    - core: "dense" (one 512 x 512 layer) or "moe" (a Soft-MoE layer of 8 experts in its place)."""
+    - core: "dense" (one 512 x 512 layer) or "moe" (a Soft-MoE layer of 8 experts in its place).
+    - troops: with shares=True (arch v3, PLAN 3B), per kind a hidden layer reads the core and one player's token, then
+      100 shares; otherwise the 3A network's 5 sizes from the core alone."""
 
-    def __init__(self, dims, widths=(64, 128, 192), core="moe"):
+    def __init__(self, dims, widths=(64, 128, 192), core="moe", shares=False):
         super().__init__()
         c_in, n_feat, n_scal = dims["channels"], dims["playerFeatures"], dims["scalars"]
-        self.n_bins = len(SIZES)
         c1, c2, c3 = widths
         self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
         self.s1 = nn.Sequential(Res(c1), Res(c1))
@@ -155,11 +157,18 @@ class Policy(nn.Module):
         self.shuffle = nn.Conv2d(c1, N_MAPS * 16, 1)
         self.skip = nn.Conv2d(c_in, N_MAPS, 1)
         self.type_head = nn.Linear(512, dims["acts"])
-        self.bin_head = nn.Linear(512, 2 * self.n_bins)
+        self.shares = shares
+        if shares:  # per kind (attack, boat): a hidden layer reading the core and one player's token, then the shares
+            self.share_h, self.share_t = nn.Linear(512, 2 * DS), nn.Linear(D, 2 * DS)
+            self.share_out = nn.ModuleList(nn.Linear(DS, SHARES) for _ in range(2))
+            troop_heads = tuple(self.share_out)
+        else:
+            self.bin_head = nn.Linear(512, 2 * len(SIZES))
+            troop_heads = (self.bin_head,)
         self.query, self.key = nn.Linear(512, D), nn.Linear(D, D)
         self.value_head = nn.Linear(512, 1)
         # Policy outputs start at zero: a uniform policy over legal actions.
-        for layer in (self.type_head, self.bin_head, self.shuffle, self.skip, self.query):
+        for layer in (self.type_head, *troop_heads, self.shuffle, self.skip, self.query):
             nn.init.zeros_(layer.weight)
             nn.init.zeros_(layer.bias)
         # Built last, so for a given seed both cores start every other layer from the same weights (the A/B).
@@ -198,8 +207,14 @@ class Policy(nn.Module):
         g = g * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]
         maps = F.pixel_shuffle(self.shuffle(F.relu(g)), 4) + self.skip(x)
         ptr = torch.einsum("nd,npd->np", self.query(h), self.key(tokens)) / math.sqrt(D)
-        return {**out, "type": self.type_head(h), "maps": maps.flatten(2),
-                "bins": self.bin_head(h).view(-1, 2, self.n_bins), "ptr": ptr, "value": self.value_head(h).squeeze(1)}
+        out.update(type=self.type_head(h), maps=maps.flatten(2), ptr=ptr, value=self.value_head(h).squeeze(1))
+        if self.shares:
+            n, p = tokens.shape[:2]
+            z = F.relu(self.share_h(h).view(n, 1, 2, DS) + self.share_t(tokens).view(n, p, 2, DS))  # [N, P, kind, DS]
+            out["shares"] = torch.stack([head(z[:, :, k]) for k, head in enumerate(self.share_out)], 1)
+        else:
+            out["bins"] = self.bin_head(h).view(-1, 2, len(SIZES))
+        return out
 
 
 class PolicyV1(nn.Module):
@@ -392,7 +407,8 @@ def _kl(p, q):
 
 
 def arch_of(args):
-    """The network a run's settings describe. Phase 2 checkpoints predate "arch": they are PolicyV1."""
+    """The network a run's settings describe: arch v1 (Phase 2), v2 (Phase 3A, 5 troop sizes) or v3 (Phase 3B, 100
+    troop shares). Phase 2 checkpoints predate "arch": they are PolicyV1."""
     return {"arch": args.get("arch", "v1"), "core": args.get("core", "dense"), "widths": args["widths"]}
 
 
@@ -400,7 +416,21 @@ def new_net(dims, args):
     """A fresh network of the kind a run's settings (a dict like a checkpoint's "args") describe."""
     spec = arch_of(args)
     widths = tuple(int(w) for w in spec["widths"].split(","))
-    return PolicyV1(dims, widths) if spec["arch"] == "v1" else Policy(dims, widths, spec["core"])
+    if spec["arch"] == "v1":
+        return PolicyV1(dims, widths)
+    return Policy(dims, widths, spec["core"], shares=spec["arch"] == "v3")
+
+
+CORE_NAMES = {"dense": "dense core", "moe": "Soft-MoE core (8 experts)"}
+
+
+def describe(args):
+    """A network in words, from a run's settings (the control page)."""
+    spec = arch_of(args)
+    if spec["arch"] == "v1":
+        return "the Phase 2 network"
+    troops = "100 troop shares" if spec["arch"] == "v3" else "5 troop sizes"
+    return f"player transformer, {CORE_NAMES[spec['core']]}, {troops}"
 
 
 def load_net(path, dims, device="cuda"):

@@ -41,7 +41,8 @@ def fake_obs(device="cuda", seed=0):
 
 def nets():
     """One network of every kind."""
-    return {"v1": PolicyV1(DIMS), "dense": Policy(DIMS, core="dense"), "moe": Policy(DIMS, core="moe")}
+    return {"v1": PolicyV1(DIMS), "dense": Policy(DIMS, core="dense"), "moe": Policy(DIMS, core="moe"),
+            "v3": Policy(DIMS, shares=True)}
 
 
 def randomized(net):
@@ -107,7 +108,10 @@ class ModelTest(unittest.TestCase):
                     out = net.cuda()(self.obs)
                 self.assertEqual(out["type"].shape, (N, 5))
                 self.assertEqual(out["maps"].shape, (N, 3, H * W))
-                self.assertEqual(out["bins"].shape, (N, 2, 5))
+                if name == "v3":
+                    self.assertEqual(out["shares"].shape, (N, 2, P, SHARES))
+                else:
+                    self.assertEqual(out["bins"].shape, (N, 2, 5))
                 self.assertEqual(out["ptr"].shape, (N, P))
                 self.assertEqual(out["value"].shape, (N,))
 
@@ -166,6 +170,11 @@ class ModelTest(unittest.TestCase):
         q_out["maps"][:, :, 7] += 300.0  # a reference sure of one cell: the others' probabilities underflow to 0
         self.assertTrue(torch.isfinite(ActionDist(p_out, obs).kl(ActionDist(q_out, obs))).all())
 
+    def test_a_new_share_head_starts_uniform(self):
+        with torch.no_grad():
+            out = Policy(DIMS, shares=True).cuda()(self.obs)
+        self.assertEqual(int(torch.count_nonzero(out["shares"])), 0)
+
     def test_five_size_networks_send_their_sizes_as_percents(self):
         self.assertEqual(SIZE_OF[list(SIZES)].tolist(), [0, 1, 2, 3, 4])
         self.assertEqual(SIZE_OF[[1, 15, 16, 35, 36, 61, 62, 86, 87, 100]].tolist(), [0, 0, 1, 1, 2, 2, 3, 3, 4, 4])
@@ -211,27 +220,33 @@ class PolicyTest(unittest.TestCase):
 
     def test_absent_players_change_nothing(self):
         exact_fp32(self)
-        net = randomized(Policy(DIMS)).cuda().eval()
-        noisy = dict(self.obs, players=self.obs["players"].clone())
-        noisy["players"][:, 4, 1:] = 3.0  # the absent row (feature 0 = 0) holds garbage, relation flags included
-        with torch.no_grad():
-            a, b = net(self.obs), net(noisy)
-        self.assertGreater(float(a["ptr"][:, :4].std()), 1e-2, "the pointer depends on the players")
-        for k in ("type", "maps", "bins", "value", "gates"):
-            self.assertTrue(torch.allclose(a[k], b[k], rtol=1e-4, atol=1e-5), k)
-        self.assertTrue(torch.allclose(a["ptr"][:, :4], b["ptr"][:, :4], rtol=1e-4, atol=1e-5))
+        for shares in (False, True):
+            with self.subTest(shares=shares):
+                net = randomized(Policy(DIMS, shares=shares)).cuda().eval()
+                noisy = dict(self.obs, players=self.obs["players"].clone())
+                noisy["players"][:, 4, 1:] = 3.0  # the absent row (feature 0 = 0) holds garbage, relation flags included
+                with torch.no_grad():
+                    a, b = net(self.obs), net(noisy)
+                self.assertGreater(float(a["ptr"][:, :4].std()), 1e-2, "the pointer depends on the players")
+                pairs = [(a[k], b[k]) for k in ("type", "maps", "value", "gates")] + [(a["ptr"][:, :4], b["ptr"][:, :4])]
+                pairs.append((a["shares"][:, :, :4], b["shares"][:, :, :4]) if shares else (a["bins"], b["bins"]))
+                for x, y in pairs:
+                    self.assertTrue(torch.allclose(x, y, rtol=1e-4, atol=1e-5))
 
     def test_players_can_come_in_any_order(self):
         exact_fp32(self)
-        net = randomized(Policy(DIMS)).cuda().eval()
         perm = torch.tensor([0, 3, 1, 4, 2], device="cuda")  # new row i holds old row perm[i]
         moved = dict(self.obs, players=self.obs["players"][:, perm], attack_mask=self.obs["attack_mask"][:, perm],
                      owners=torch.argsort(perm)[self.obs["owners"].long()].to(torch.int16))
-        with torch.no_grad():
-            a, b = net(self.obs), net(moved)
-        for k in ("type", "maps", "bins", "value", "gates"):
-            self.assertTrue(torch.allclose(a[k], b[k], rtol=1e-4, atol=1e-4), k)
-        self.assertTrue(torch.allclose(a["ptr"][:, perm], b["ptr"], rtol=1e-4, atol=1e-4))
+        for shares in (False, True):
+            with self.subTest(shares=shares):
+                net = randomized(Policy(DIMS, shares=shares)).cuda().eval()
+                with torch.no_grad():
+                    a, b = net(self.obs), net(moved)
+                pairs = [(a[k], b[k]) for k in ("type", "maps", "value", "gates")] + [(a["ptr"][:, perm], b["ptr"])]
+                pairs.append((a["shares"][:, :, perm], b["shares"]) if shares else (a["bins"], b["bins"]))
+                for x, y in pairs:
+                    self.assertTrue(torch.allclose(x, y, rtol=1e-4, atol=1e-4))
 
     def test_the_two_cores_start_alike_everywhere_else(self):
         torch.manual_seed(3)
@@ -377,12 +392,14 @@ class LoadTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for args, kind in (({"widths": "64,128,192"}, PolicyV1),  # Phase 2 checkpoints have no "arch"
                                ({"arch": "v2", "core": "dense", "widths": "64,128,192"}, Policy),
-                               ({"arch": "v2", "core": "moe", "widths": "64,128,192"}, Policy)):
+                               ({"arch": "v2", "core": "moe", "widths": "64,128,192"}, Policy),
+                               ({"arch": "v3", "core": "moe", "widths": "64,128,192"}, Policy)):
                 path = Path(d) / "net.pt"
                 torch.save({"model": new_net(DIMS, args).state_dict(), "args": args}, path)
                 net = load_net(path, DIMS)
                 self.assertIsInstance(net, kind)
                 self.assertEqual(getattr(net, "moe", False), args.get("core") == "moe")
+                self.assertEqual(getattr(net, "shares", False), args.get("arch") == "v3")
                 with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                     self.assertEqual(tuple(net(obs)["value"].shape), (N,))
 

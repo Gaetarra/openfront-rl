@@ -25,7 +25,7 @@ from trainer import crawl
 from trainer.control import Control, serve
 from trainer.env import RANKED_1V1, ROOT, VecEnv
 from trainer.eval import tag
-from trainer.model import ATTACK, BOAT, BUILD, SHARES, SIZE_OF, SPAWN, ActionDist, load_net, new_net
+from trainer.model import ATTACK, BOAT, BUILD, SHARES, SIZE_OF, SPAWN, ActionDist, describe, load_net, new_net
 from trainer.ppo import game_commit, network_args, resume_args, save_checkpoint
 
 CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes from (trainer/model.py)
@@ -78,9 +78,7 @@ def is_val(game_id, share):
 
 def run_info(a, train, val):
     """What the control page says about the run."""
-    network = "the Phase 2 network" if a.arch == "v1" else (
-        "player transformer, " + ("Soft-MoE core (8 experts)" if a.core == "moe" else "dense core"))
-    return {"Name": a.run, "Method": "behaviour cloning (imitating humans)", "Network": network,
+    return {"Name": a.run, "Method": "behaviour cloning (imitating humans)", "Network": describe(vars(a)),
             "Starts from": a.init or "random weights",
             "Data": f"{len(train):,} ranked 1v1 replays, {len(val):,} held out",
             "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
