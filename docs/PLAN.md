@@ -801,6 +801,21 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - Fixes: a new run now refuses a folder that holds a run, and a resume hides the curves' points logged after
         the last checkpoint (TensorBoard's purge_step).
       - The launch command is one loop that starts or resumes, safe to rerun (CLAUDE.md).
+    - **Results (2026-10-07)**: night 1 (`bc3b`, shares with the 3A core) finished at 12:50.
+      - Score (`runs/score/20261007-130049.json`, the same 288,000 rows), 3A clone → shares:
+        - `bc/nll` 0.8425 → 0.8364;
+        - attack size 0.6705 → 0.6324 (accuracy 73.6% → 74.5%); boat size 0.8458 → 0.8466;
+        - attack target 1.6065 → 1.6020; type 0.4310 → 0.4304;
+        - the rare cell heads slightly worse: spawn +0.10, city +0.08, boat +0.03;
+        - its own 100-share NLL: 1.126 overall, attack 2.55, boat 2.92.
+      - Match (`runs/eval/20261007-133639.json`, 512 games): **shares 0.660 (SE 0.021)** against the 3A clone (seat
+        0 0.637, seat 1 0.684).
+        - **The shares stay**: the bar was 0.456.
+        - 0.660 already clears Gate 3B's 0.545 against the 3A clone, a bar the full 3B clone must pass.
+      - Reading: a small gain in NLL (−0.006 overall, −0.038 on attack sizes) gave a large gain in play. Sizing an
+        attack to its target decides fights, yet it is a small part of the loss, so NLL understates such decisions.
+        The user expected a big leap. My caution (a modest gain under imitation) was wrong.
+      - Next: the SwiGLU twin's own night (`--run bc3b-moe-swiglu --core moe-swiglu`), then step 3.
   - **Actions**, as flat types:
     - today's 5;
     - build defense post / silo / factory / port / SAM / warship;
