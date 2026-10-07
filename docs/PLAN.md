@@ -815,7 +815,14 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - Reading: a small gain in NLL (−0.006 overall, −0.038 on attack sizes) gave a large gain in play. Sizing an
         attack to its target decides fights, yet it is a small part of the loss, so NLL understates such decisions.
         The user expected a big leap. My caution (a modest gain under imitation) was wrong.
-      - Next: the SwiGLU twin's own night (`--run bc3b-moe-swiglu --core moe-swiglu`), then step 3.
+      - Next: the SwiGLU twin's own night (`--run bc3b-moe-swiglu --core moe-swiglu`, started 2026-10-07 14:09), then
+        step 3.
+      - The heat maps are also scored by closeness (the user's suggestion, 2026-10-07). Exact-cell accuracy and NLL
+        treat a near miss like a far one, so two closeness numbers are added:
+        - `bc/*_cell_near`: the chance the bot's cell lands within 16 tiles of the human's;
+        - `bc/*_cell_dist`: its expected distance in tiles.
+        All three networks are rescored after the twin's night. A spatial soft label (the human's cell spread over
+        its neighbours, like the shares' 0.05) is a candidate for step 4's BC refresh, decided on these numbers.
   - **Actions**, as flat types:
     - today's 5;
     - build defense post / silo / factory / port / SAM / warship;

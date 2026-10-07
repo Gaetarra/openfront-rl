@@ -15,7 +15,7 @@ from trainer import bc, crawl
 from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, lr_at, main, measure, one_pass, score,
                         table)
 from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import ATTACK, SHARES, ActionDist, Policy, PolicyV1, new_net
+from trainer.model import ATTACK, BUILD, SHARES, ActionDist, Policy, PolicyV1, new_net
 from trainer.test_model import DIMS, N as ROWS, exact_fp32, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
@@ -143,6 +143,25 @@ class MeasureTest(unittest.TestCase):
         self.assertAlmostEqual(s["bc/nll_attack_share"], math.log(SHARES), places=4)
         self.assertAlmostEqual(s["bc/nll"] - s["bc/nll_type"], -math.log(0.20), places=4)  # one legal target adds 0
         self.assertAlmostEqual(s["bc/nll_shares"] - s["bc/nll_type"], math.log(SHARES), places=4)
+
+    def test_cell_heads_score_how_close_the_bots_cell_lands_to_the_humans(self):
+        obs = fake_obs()
+        obs["scalars"][:, 14] = 1.0  # a Normal map: cells of 8 x 8 tiles
+        obs["type_mask"][:], obs["cell_mask"][:] = True, True
+        hw, w = obs["cell_mask"].shape[-1], obs["spatial"].shape[-1]
+        human = 10 * w + 10  # the cell where the human built a city
+        maps = torch.full((ROWS, 3, hw), -30.0, device="cuda")
+        maps[:3, 2, human + 1] = 30.0  # rows 0-2 build one cell to the right: 8 tiles away
+        maps[3:, 2, human + 3 * w] = 30.0  # rows 3-5 three cells below: 24 tiles away
+        out = {"type": torch.zeros(ROWS, 5, device="cuda"), "maps": maps,
+               "ptr": torch.zeros(ROWS, obs["attack_mask"].shape[-1], device="cuda"),
+               "bins": torch.zeros(ROWS, 2, 5, device="cuda")}
+        labels = torch.tensor([[BUILD, human, 0, 0]] * ROWS, device="cuda")
+        m, zero = Meter(), torch.zeros(ROWS, device="cuda")
+        measure(m, obs, labels, label_legal(obs, labels), ActionDist(out, obs), zero, zero)
+        s = m.means()
+        self.assertAlmostEqual(s["bc/city_cell_near"], 0.5, places=4)  # within 16 tiles: rows 0-2 only
+        self.assertAlmostEqual(s["bc/city_cell_dist"], (8 + 24) / 2, places=3)
 
 
 class ScoreTest(unittest.TestCase):

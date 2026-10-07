@@ -113,6 +113,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     (`SHARE_SMOOTH`).
   - In `--score`, `bc/nll` is like for like (a share network's shares summed into the five sizes' ranges, 1–15, 16–35,
     36–61, 62–86 and 87–100%), and `bc/nll_shares` is a share network's own NLL.
+  - The cell heads are also scored by closeness (the user's idea, 2026-10-07), since a near miss is almost as good as
+    a hit. `bc/*_cell_near` is the chance the bot's cell lands within 16 tiles of the human's, and `bc/*_cell_dist`
+    is its expected distance in tiles.
   - `--twin CORE` trains a second network on the same windows, from the same weights outside the core. It saves to
     `checkpoints/<run>-<core>`, and the run resumes both together.
 - GPU memory: ranked PPO with a Phase 3 network needs `--minibatches 12` on the 12 GB card (peak ~10.9 GB). At the

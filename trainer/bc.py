@@ -34,6 +34,7 @@ PHASES = ("spawn", "early", "mid", "late")
 SCORE_CUTOFF = 1790812800000  # 2026-10-01 00:00 UTC, in ms: the scoring set comes from the Phase 2 crawl's games
 SCORE_LAYOUT = {"workers": 12, "games_per_worker": 6, "steps": 2000}  # fixed, so every scoring run sees the same rows
 SHARE_SMOOTH = 0.1  # a troop-share label's weight on its two neighbouring percents (PLAN 3B: soft labels)
+NEAR_TILES = 16  # a cell head's choice counts as near the human's within this many tiles (bc/*_cell_near)
 
 
 def parser():
@@ -148,6 +149,8 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     - accuracy and NLL per head. bc/nll and the troop heads' bc/*_bin are like for like for every network: a
       100-share network's shares are summed into the five sizes' ranges (SIZE_OF). Its own 100-share NLL is
       bc/nll_shares, with bc/nll_*_share per head;
+    - for the cell heads, also how close the bot's cell lands to the human's, since a near miss is almost as good as a
+      hit: the chance it falls within NEAR_TILES (bc/*_cell_near) and its expected distance in tiles (bc/*_cell_dist);
     - NLL per bucket (game phase and map size);
     - the router's mean weight per expert and bucket, for MoE networks."""
     t = labels[:, 0]
@@ -179,11 +182,18 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
         m.add(f"bc/nll_{name}_bin", -(ls[:, k].gather(1, size[:, None])[:, 0] * rows).sum(), rows.sum())
         if lt is not None:
             m.add(f"bc/nll_{name}_share", -(lt[:, k] * rows).sum(), rows.sum())
+    every = torch.arange(dist.cells.logits.shape[-1], device=cell.device)  # every cell, as grid index y * W + x
+    w = obs["spatial"].shape[-1]
+    side = 8 * obs["scalars"][:, 14:15].clamp(min=0).sqrt()  # tiles per cell side: 8 on Normal maps, 4 on Compact
+    tiles = torch.hypot((every // w - cell[:, None] // w).float(), (every % w - cell[:, None] % w).float()) * side
     for typ, name in ((SPAWN, "spawn"), (BOAT, "boat"), (BUILD, "city")):
         rows = legal & (t == typ)
         hit = dist.cells.logits[:, CELL_HEAD[typ]].argmax(1) == cell
         m.add(f"bc/{name}_cell_acc", (hit & rows).sum(), rows.sum())
         m.add(f"bc/nll_{name}_cell", -(lc[:, CELL_HEAD[typ]] * rows).sum(), rows.sum())
+        p = dist.cells.probs[:, CELL_HEAD[typ]]  # [N, cells]
+        m.add(f"bc/{name}_cell_near", ((p * (tiles <= NEAR_TILES)).sum(1) * rows).sum(), rows.sum())
+        m.add(f"bc/{name}_cell_dist", ((p * tiles).sum(1) * rows).sum(), rows.sum())
     phase = torch.where(obs["scalars"][:, 1] > 0, 0, 1 + (obs["scalars"][:, 0] * 3).long().clamp(max=2))
     buckets = {name: phase == i for i, name in enumerate(PHASES)}
     normal = obs["scalars"][:, 14] > 0.5  # tiles per cell / 64: Normal maps 1, Compact 0.25
