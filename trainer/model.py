@@ -7,10 +7,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from trainer.env import BUILDING_TYPES, BUILDINGS, OWNER
+from trainer.env import BUILDING_TYPES, BUILDINGS, MAP_TYPES, OWNER
 
-ACT_NAMES = ["noop", "spawn", "attack", "boat", "build_city"]
-SPAWN, ATTACK, BOAT, BUILD = 1, 2, 3, 4
+ACT_NAMES = ["noop", "spawn", "attack", "boat", "build_city", "build_defense_post", "build_silo", "build_factory",
+             "build_port", "build_sam", "build_warship", "atom_bomb", "hydrogen_bomb", "upgrade", "retreat"]
+SPAWN, ATTACK, BOAT, BUILD, RETREAT = 1, 2, 3, 4, 14
+OLD_ACTS, OLD_MAPS = 5, 3  # the action types and heat maps of the networks before 3B step 3 (v1-v3)
+MAP_NAMES = ("spawn", "boat", "city", "defense_post", "silo", "factory", "port", "sam", "warship", "atom", "hydrogen",
+             "upgrade")  # one per MAP_TYPES entry
+MAP_OF = torch.full((len(ACT_NAMES),), -1, dtype=torch.long)
+MAP_OF[list(MAP_TYPES)] = torch.arange(len(MAP_TYPES))  # each type's heat map; -1 for types without a cell
+MAP_TYPES_T = torch.tensor(MAP_TYPES)
 SIZES = (10, 25, 50, 75, 100)  # the troop sizes of the Phase 2 and 3A networks, in percent of current troops
 SHARES = 100  # the Phase 3B network's troop shares: 1-100% (PLAN 3B)
 # Each percent's nearest size in log scale, as the Phase 2-3A labels were made: 1-15% -> 10, 16-35 -> 25, 36-61 -> 50,
@@ -20,7 +27,6 @@ SIZE_OF = torch.tensor([min(range(len(SIZES)), key=lambda i: abs(math.log(max(p,
 SIZE_PERCENT = torch.tensor(SIZES)
 # [5, SHARES]: 0 on the percents of each size, -inf elsewhere
 SIZE_RANGES = torch.where(SIZE_OF[1:] == torch.arange(len(SIZES))[:, None], 0.0, -math.inf)
-N_MAPS = 3  # heat maps: spawn, boat landing, city
 MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
 V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
 D = 128  # width of the player tokens
@@ -147,12 +153,15 @@ class Policy(nn.Module):
     - core: "dense" (one 512 x 512 layer), "moe" (a Soft-MoE layer of 8 experts in its place) or "moe-swiglu" (8
       SwiGLU experts, 512 -> 1024 -> 512).
     - troops: with shares=True (arch v3, PLAN 3B), per kind a hidden layer reads the core and one player's token, then
-      100 shares; otherwise the 3A network's 5 sizes from the core alone."""
+      100 shares; otherwise the 3A network's 5 sizes from the core alone.
+    - full=True (arch v4, 3B step 3): 15 action types, 12 heat maps (MAP_TYPES) and the retreat pointer; otherwise the
+      5 types and 3 heat maps of the networks before."""
 
-    def __init__(self, dims, widths=(64, 128, 192), core="moe", shares=False):
+    def __init__(self, dims, widths=(64, 128, 192), core="moe", shares=False, full=False):
         super().__init__()
         c_in, n_feat, n_scal = dims["channels"], dims["playerFeatures"], dims["scalars"]
         c1, c2, c3 = widths
+        self.full, self.n_maps = full, len(MAP_TYPES) if full else OLD_MAPS
         self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
         self.s1 = nn.Sequential(Res(c1), Res(c1))
         self.d2, self.s2 = nn.Conv2d(c1, c2, 2, stride=2), nn.Sequential(Res(c2), Res(c2))
@@ -167,9 +176,9 @@ class Policy(nn.Module):
         self.trunk = nn.Sequential(nn.Linear(2 * c3 + 6 * D, 512), nn.ReLU())
         self.film = nn.Linear(512, 2 * c1)
         self.u3, self.u2 = nn.Conv2d(c3, c2, 1), nn.Conv2d(c2, c1, 1)
-        self.shuffle = nn.Conv2d(c1, N_MAPS * 16, 1)
-        self.skip = nn.Conv2d(c_in, N_MAPS, 1)
-        self.type_head = nn.Linear(512, dims["acts"])
+        self.shuffle = nn.Conv2d(c1, self.n_maps * 16, 1)
+        self.skip = nn.Conv2d(c_in, self.n_maps, 1)
+        self.type_head = nn.Linear(512, len(ACT_NAMES) if full else OLD_ACTS)
         self.shares = shares
         if shares:  # per kind (attack, boat): a hidden layer reading the core and one player's token, then the shares
             self.share_h, self.share_t = nn.Linear(512, 2 * DS), nn.Linear(D, 2 * DS)
@@ -179,9 +188,11 @@ class Policy(nn.Module):
             self.bin_head = nn.Linear(512, 2 * len(SIZES))
             troop_heads = (self.bin_head,)
         self.query, self.key = nn.Linear(512, D), nn.Linear(D, D)
+        self.retreat_query = nn.Linear(512, D) if full else None  # the retreat pointer: which target's attack to cancel
         self.value_head = nn.Linear(512, 1)
         # Policy outputs start at zero: a uniform policy over legal actions.
-        for layer in (self.type_head, *troop_heads, self.shuffle, self.skip, self.query):
+        for layer in (self.type_head, *troop_heads, self.shuffle, self.skip, self.query,
+                      *([self.retreat_query] if full else [])):
             nn.init.zeros_(layer.weight)
             nn.init.zeros_(layer.bias)
         # Built last, so for a given seed both cores start every other layer from the same weights (the A/B).
@@ -219,8 +230,11 @@ class Policy(nn.Module):
         gamma, beta = self.film(h).chunk(2, 1)
         g = g * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]
         maps = F.pixel_shuffle(self.shuffle(F.relu(g)), 4) + self.skip(x)
-        ptr = torch.einsum("nd,npd->np", self.query(h), self.key(tokens)) / math.sqrt(D)
+        keys = self.key(tokens)
+        ptr = torch.einsum("nd,npd->np", self.query(h), keys) / math.sqrt(D)
         out.update(type=self.type_head(h), maps=maps.flatten(2), ptr=ptr, value=self.value_head(h).squeeze(1))
+        if self.full:
+            out["retreat"] = torch.einsum("nd,npd->np", self.retreat_query(h), keys) / math.sqrt(D)
         if self.shares:
             n, p = tokens.shape[:2]
             z = F.relu(self.share_h(h).view(n, 1, 2, DS) + self.share_t(tokens).view(n, p, 2, DS))  # [N, P, kind, DS]
@@ -248,9 +262,9 @@ class PolicyV1(nn.Module):
         self.core = nn.Sequential(nn.Linear(2 * c3 + 256, 512), nn.ReLU(), nn.Linear(512, 512), nn.ReLU())
         self.film = nn.Linear(512, 2 * c1)
         self.u3, self.u2 = nn.Conv2d(c3, c2, 1), nn.Conv2d(c2, c1, 1)
-        self.shuffle = nn.Conv2d(c1, N_MAPS * 16, 1)
-        self.skip = nn.Conv2d(V1_CHANNELS, N_MAPS, 1)
-        self.type_head = nn.Linear(512, dims["acts"])
+        self.shuffle = nn.Conv2d(c1, OLD_MAPS * 16, 1)
+        self.skip = nn.Conv2d(V1_CHANNELS, OLD_MAPS, 1)
+        self.type_head = nn.Linear(512, OLD_ACTS)
         self.bin_head = nn.Linear(512, 2 * self.n_bins)
         self.query, self.key = nn.Linear(512, 128), nn.Linear(128, 128)
         self.value_head = nn.Linear(512, 1)
@@ -293,6 +307,7 @@ class RandomPolicy(nn.Module):
                 "maps": torch.zeros(obs["cell_mask"].shape, device=dev),
                 "bins": torch.zeros(n, 2, self.n_bins, device=dev),
                 "ptr": torch.zeros(obs["attack_mask"].shape, device=dev),
+                "retreat": torch.zeros(obs["retreat_mask"].shape, device=dev),
                 "value": torch.zeros(n, device=dev)}
 
 
@@ -305,7 +320,10 @@ def _masked(logits, mask):
 class ActionDist:
     """The joint action [type, cell, target, troops]: the type picks which argument heads are used.
 
-    spawn: spawn map cell; attack: player pointer + troops; boat: boat map cell + troops; build city: city map cell.
+    Every type in MAP_TYPES takes a cell on its own heat map (MAP_OF): spawn, boat, the nine builds and upgrade. attack:
+    the player pointer + troops; boat: troops too; retreat: the retreat pointer (whose attack to cancel). A network
+    reads the masks of the actions it has: the networks before 3B step 3 have 5 types, 3 heat maps and no retreat
+    pointer, so they play on in a game with 15 types.
     troops: the percent of its current troops an attack or boat sends (1-100).
     - A Phase 3B network ("shares" in its outputs, [N, 2, P, SHARES]) reads the share from a player's token: the
       attack's target, or the main owner of the boat's landing cell (obs "owners").
@@ -313,9 +331,12 @@ class ActionDist:
       single token."""
 
     def __init__(self, out, obs):
-        self.type = _masked(out["type"].float(), obs["type_mask"])
-        self.cells = _masked(out["maps"].float(), obs["cell_mask"])  # batch [N, 3]
+        n_types, n_maps = out["type"].shape[-1], out["maps"].shape[1]
+        self.type = _masked(out["type"].float(), obs["type_mask"][:, :n_types])
+        self.cells = _masked(out["maps"].float(), obs["cell_mask"][:, :n_maps])  # batch [N, maps]
         self.ptr = _masked(out["ptr"].float(), obs["attack_mask"])
+        self.retreat = _masked(out["retreat"].float(), obs["retreat_mask"]) if "retreat" in out else None
+        self.map_types = MAP_TYPES_T[:n_maps].to(out["type"].device)  # the action type of each heat map
         self.shares = "shares" in out
         if self.shares:
             self.troops = Categorical(logits=out["shares"].float())  # batch [N, 2, P]: attack, boat x token
@@ -365,26 +386,34 @@ class ActionDist:
         weight = torch.tensor([smooth / 2, 1 - smooth, smooth / 2], device=lp.device).expand(near.shape)
         return (torch.zeros_like(lp).scatter_add_(2, near, weight) * lp).sum(2)
 
-    def sample(self):
-        t, c, p = self.type.sample(), self.cells.sample(), self.ptr.sample()
+    def complete(self, t):
+        """Actions [N, 4] of types t, their arguments sampled from this policy."""
+        c, p = self.cells.sample(), self.ptr.sample()
+        r = self.retreat.sample() if self.retreat is not None else torch.zeros_like(p)
+        m = MAP_OF.to(t.device)[t]
         zero = torch.zeros_like(t)
-        cell = torch.where(t == SPAWN, c[:, 0], torch.where(t == BOAT, c[:, 1], torch.where(t == BUILD, c[:, 2], zero)))
-        target = torch.where(t == ATTACK, p, zero)
+        cell = torch.where(m >= 0, c.gather(1, m.clamp(min=0)[:, None])[:, 0], zero)
+        target = torch.where(t == ATTACK, p, torch.where(t == RETREAT, r, zero))
         pct = self.troop_sample(p, c[:, 1])
         troops = torch.where(t == ATTACK, pct[:, 0], torch.where(t == BOAT, pct[:, 1], zero))
         return torch.stack([t, cell, target, troops], 1)
 
+    def sample(self):
+        return self.complete(self.type.sample())
+
     def log_prob(self, actions, smooth=0.0, sizes=False):
-        """log pi(actions) [N]; `smooth` and `sizes` as in troop_log_prob."""
+        """log pi(actions) [N]; `smooth` and `sizes` as in troop_log_prob. Every type must be one this network has."""
         t, cell, target, troops = actions.unbind(1)
-        lc = self.cells.log_prob(cell[:, None].expand(-1, N_MAPS))
+        m = MAP_OF.to(t.device)[t]
+        lc = self.cells.log_prob(cell[:, None].expand(-1, self.cells.logits.shape[1]))  # [N, maps]
         lt = self.troop_log_prob(target, cell, troops, smooth, sizes)
         zero = torch.zeros_like(lc[:, 0])
+        lr = self.retreat.log_prob(target) if self.retreat is not None else zero
         return (self.type.log_prob(t)
-                + torch.where(t == SPAWN, lc[:, 0], zero)
+                + torch.where(m >= 0, lc.gather(1, m.clamp(min=0)[:, None])[:, 0], zero)
                 + torch.where(t == ATTACK, self.ptr.log_prob(target) + lt[:, 0], zero)
-                + torch.where(t == BOAT, lc[:, 1] + lt[:, 1], zero)
-                + torch.where(t == BUILD, lc[:, 2], zero))
+                + torch.where(t == BOAT, lt[:, 1], zero)
+                + torch.where(t == RETREAT, lr, zero))
 
     def entropy(self):
         """Exact joint entropy, H(type) + sum_k p(k) H(args | k), with every head divided by the log of its size so
@@ -392,25 +421,31 @@ class ActionDist:
         weighted by the pointer or the boat map. p(k) and those weights are detached: otherwise the bonus pushes the
         type head toward the types with the most arguments (attack, boat) and away from no-op, as it did in Phase 1,
         and the pointer toward the targets with the least certain shares."""
-        hc = self.cells.entropy() / math.log(self.cells.logits.shape[-1])
+        hc = self.cells.entropy() / math.log(self.cells.logits.shape[-1])  # [N, maps]
         hp = self.ptr.entropy() / math.log(max(self.ptr.logits.shape[-1], 2))
         ht = (self._weights().detach() * self.troops.entropy()).sum(2) / math.log(self.troops.logits.shape[-1])
         pt = self.type.probs.detach()
-        return (self.type.entropy() / math.log(pt.shape[-1]) + pt[:, SPAWN] * hc[:, 0]
-                + pt[:, ATTACK] * (hp + ht[:, 0]) + pt[:, BOAT] * (hc[:, 1] + ht[:, 1]) + pt[:, BUILD] * hc[:, 2])
+        h = (self.type.entropy() / math.log(pt.shape[-1]) + (pt[:, self.map_types] * hc).sum(1)
+             + pt[:, ATTACK] * (hp + ht[:, 0]) + pt[:, BOAT] * ht[:, 1])
+        if self.retreat is not None:
+            h = h + pt[:, RETREAT] * self.retreat.entropy() / math.log(max(self.retreat.logits.shape[-1], 2))
+        return h
 
     def kl(self, ref):
         """Exact KL(self || ref) of the joint action, KL(type) + sum_k p(k) KL(args | k); a troop head's KL is averaged
         over the tokens it reads, weighted by this policy's pointer or boat map. The one-sample estimate from the taken
         action is not usable: it explodes when that action is one this policy all but rules out and ref does not,
         which a spread-out 49k-cell map makes common."""
-        if self.shares != ref.shares:
-            raise ValueError("the KL needs two networks with the same troop head (100 shares or 5 sizes)")
-        kc = _kl(self.cells, ref.cells)  # [N, 3]
+        if self.shares != ref.shares or self.type.logits.shape != ref.type.logits.shape:
+            raise ValueError("the KL needs two networks with the same troop head and actions")
+        kc = _kl(self.cells, ref.cells)  # [N, maps]
         kt = (self._weights() * _kl(self.troops, ref.troops)).sum(2)  # [N, 2]
         pt = self.type.probs
-        return (_kl(self.type, ref.type) + pt[:, SPAWN] * kc[:, 0] + pt[:, ATTACK] * (_kl(self.ptr, ref.ptr) + kt[:, 0])
-                + pt[:, BOAT] * (kc[:, 1] + kt[:, 1]) + pt[:, BUILD] * kc[:, 2])
+        k = (_kl(self.type, ref.type) + (pt[:, self.map_types] * kc).sum(1)
+             + pt[:, ATTACK] * (_kl(self.ptr, ref.ptr) + kt[:, 0]) + pt[:, BOAT] * kt[:, 1])
+        if self.retreat is not None:
+            k = k + pt[:, RETREAT] * _kl(self.retreat, ref.retreat)
+        return k
 
 
 def _kl(p, q):
@@ -420,8 +455,9 @@ def _kl(p, q):
 
 
 def arch_of(args):
-    """The network a run's settings describe: arch v1 (Phase 2), v2 (Phase 3A, 5 troop sizes) or v3 (Phase 3B, 100
-    troop shares). Phase 2 checkpoints predate "arch": they are PolicyV1."""
+    """The network a run's settings describe: arch v1 (Phase 2), v2 (Phase 3A, 5 troop sizes), v3 (Phase 3B, 100
+    troop shares) or v4 (Phase 3B step 3, 100 troop shares and 15 actions). Phase 2 checkpoints predate "arch": they
+    are PolicyV1."""
     return {"arch": args.get("arch", "v1"), "core": args.get("core", "dense"), "widths": args["widths"]}
 
 
@@ -431,7 +467,7 @@ def new_net(dims, args):
     widths = tuple(int(w) for w in spec["widths"].split(","))
     if spec["arch"] == "v1":
         return PolicyV1(dims, widths)
-    return Policy(dims, widths, spec["core"], shares=spec["arch"] == "v3")
+    return Policy(dims, widths, spec["core"], shares=spec["arch"] in ("v3", "v4"), full=spec["arch"] == "v4")
 
 
 CORE_NAMES = {"dense": "dense core", "moe": "Soft-MoE core (8 experts)",
@@ -443,8 +479,9 @@ def describe(args):
     spec = arch_of(args)
     if spec["arch"] == "v1":
         return "the Phase 2 network"
-    troops = "100 troop shares" if spec["arch"] == "v3" else "5 troop sizes"
-    return f"player transformer, {CORE_NAMES[spec['core']]}, {troops}"
+    troops = "100 troop shares" if spec["arch"] in ("v3", "v4") else "5 troop sizes"
+    actions = ", 15 actions" if spec["arch"] == "v4" else ""
+    return f"player transformer, {CORE_NAMES[spec['core']]}, {troops}{actions}"
 
 
 def load_net(path, dims, device="cuda"):

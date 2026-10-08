@@ -126,7 +126,7 @@ class SmokeTest(unittest.TestCase):
         main(common + ["--updates", "2"])
         first = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
         self.assertEqual(first["update"], 2)
-        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v3", "moe"), "a new run records its network")
+        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v4", "moe"), "a new run records its network")
         self.assertEqual(first["global_step"], 2 * 16 * 2)
         # 32 decisions do not finish a game: the unfinished games are skipped on resume, so no seed is played twice
         self.assertEqual(first["episodes"], [1, 1])

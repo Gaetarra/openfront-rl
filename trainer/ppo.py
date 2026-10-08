@@ -93,8 +93,9 @@ def resume_args(p, argv, saved, may_change):
 
 def network_args(p, argv, a):
     """A new run's network settings. With --init they are the checkpoint's: its weights decide the network, and a
-    different --core or --widths given alongside is refused. Without it, a Phase 3B network (100 troop shares) from
-    --core and --widths. A new run never overwrites another: a folder that holds a run's checkpoint is refused."""
+    different --core or --widths given alongside is refused. Without it, a Phase 3B network (100 troop shares, 15
+    actions) from --core and --widths. A new run never overwrites another: a folder that holds a run's checkpoint is
+    refused."""
     if a.init:
         spec = arch_of(torch.load(a.init, map_location="cpu", weights_only=False)["args"])
         given = given_flags(p, argv)
@@ -104,7 +105,7 @@ def network_args(p, argv, a):
                              f"{spec['widths']}): drop {', '.join('--' + k for k in clash)}")
         vars(a).update(spec)
     else:
-        a.arch = "v3"
+        a.arch = "v4"
     if (ROOT / "checkpoints" / a.run / "latest.pt").exists():
         raise SystemExit(f"checkpoints/{a.run} already holds a run: add --resume to continue it, or start a new one "
                          f"with another --run name (or delete the folder)")

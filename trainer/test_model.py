@@ -8,8 +8,9 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, SHARES, SIZE_OF, SIZES, SPAWN, ActionDist, Policy,
-                           PolicyV1, RandomPolicy, SoftMoE, load_net, new_net, relevance, v1_spatial)
+from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, RETREAT, SHARES, SIZE_OF, SIZES, SPAWN,
+                           ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, load_net, new_net, relevance,
+                           v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5}
 N, P, H, W = 6, 5, 32, 32
@@ -20,7 +21,7 @@ def fake_obs(device="cuda", seed=0):
     g = torch.Generator(device="cpu").manual_seed(seed)
     cell_mask = torch.rand(N, 3, H * W, generator=g) < 0.1
     cell_mask[0] = False  # a row without any legal cell must not produce NaNs
-    type_mask = torch.tensor([[1, 1, 0, 0, 0]] * 3 + [[1, 0, 1, 0, 1]] * 3, dtype=torch.bool)
+    type_mask = torch.tensor([[1, 1] + [0] * 13] * 3 + [[1, 0, 1, 0, 1] + [0] * 10] * 3, dtype=torch.bool)
     attack_mask = torch.zeros(N, P, dtype=torch.bool)
     attack_mask[3:, 2] = True
     players = torch.rand(N, P, 25, generator=g)
@@ -37,13 +38,18 @@ def fake_obs(device="cuda", seed=0):
         "owner_land": (torch.randint(1, 33, (N, 2, H * W), generator=g) * (owners > 0)).to(torch.uint8),
         "type_mask": type_mask, "attack_mask": attack_mask, "cell_mask": cell_mask,
     }
+    # drawn after the old fields, so their values stay as they were
+    obs["cell_mask"] = torch.cat([cell_mask, torch.rand(N, 9, H * W, generator=g) < 0.1], 1)  # the 9 later heat maps
+    obs["cell_mask"][0] = False
+    obs["retreat_mask"] = torch.zeros(N, P, dtype=torch.bool)
     return {k: v.to(device) for k, v in obs.items()}
 
 
 def nets():
     """One network of every kind."""
     return {"v1": PolicyV1(DIMS), "dense": Policy(DIMS, core="dense"), "moe": Policy(DIMS, core="moe"),
-            "v3": Policy(DIMS, shares=True), "swiglu": Policy(DIMS, core="moe-swiglu", shares=True)}
+            "v3": Policy(DIMS, shares=True), "swiglu": Policy(DIMS, core="moe-swiglu", shares=True),
+            "v4": Policy(DIMS, shares=True, full=True)}
 
 
 def randomized(net):
@@ -69,9 +75,17 @@ def exact_fp32(test):
 def brute_kl(p_out, q_out, obs, troops):
     """Per row, the sum over every joint action of p log(p / q); `troops` are the percents a troop head can send."""
     hw, players = obs["cell_mask"].shape[-1], obs["attack_mask"].shape[-1]
-    acts = torch.tensor([[0, 0, 0, 0]] + [[SPAWN, c, 0, 0] for c in range(hw)]
-                        + [[ATTACK, 0, t, s] for t in range(players) for s in troops]
-                        + [[BOAT, c, 0, s] for c in range(hw) for s in troops] + [[BUILD, c, 0, 0] for c in range(hw)])
+    acts = [[0, 0, 0, 0]]
+    for t in range(1, p_out["type"].shape[-1]):
+        if t == ATTACK:
+            acts += [[t, 0, p, s] for p in range(players) for s in troops]
+        elif t == BOAT:
+            acts += [[t, c, 0, s] for c in range(hw) for s in troops]
+        elif t == RETREAT:
+            acts += [[t, 0, p, 0] for p in range(players)]
+        else:
+            acts += [[t, c, 0, 0] for c in range(hw)]
+    acts = torch.tensor(acts)
     rows = []
     for i in range(len(obs["type_mask"])):
         one = lambda d: {k: v[i:i + 1].expand(len(acts), *v.shape[1:]) for k, v in d.items()}
@@ -97,6 +111,24 @@ def share_out(seed=0):
             "ptr": torch.randn(3, 4, generator=g), "shares": torch.randn(3, 2, 4, SHARES, generator=g) * 2}
 
 
+def full_obs(seed=0):
+    """small_obs with the masks of a v4 network: 15 types, 12 heat maps and the retreat pointer."""
+    g = torch.Generator().manual_seed(seed + 100)
+    obs = small_obs(seed)
+    obs.update(type_mask=torch.ones(3, 15, dtype=torch.bool), cell_mask=torch.rand(3, 12, 16, generator=g) < 0.6,
+               retreat_mask=torch.tensor([[True, False, True, False]] * 3))
+    return obs
+
+
+def full_out(seed=0):
+    """Random outputs of a v4 network for full_obs."""
+    g = torch.Generator().manual_seed(seed + 100)
+    out = share_out(seed)
+    out.update(type=torch.randn(3, 15, generator=g), maps=torch.randn(3, 12, 16, generator=g) * 3,
+               retreat=torch.randn(3, 4, generator=g))
+    return out
+
+
 class ModelTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
@@ -107,12 +139,14 @@ class ModelTest(unittest.TestCase):
             with self.subTest(name):
                 with torch.autocast("cuda", torch.bfloat16):
                     out = net.cuda()(self.obs)
-                self.assertEqual(out["type"].shape, (N, 5))
-                self.assertEqual(out["maps"].shape, (N, 3, H * W))
-                if name in ("v3", "swiglu"):
+                full = name == "v4"
+                self.assertEqual(out["type"].shape, (N, 15 if full else 5))
+                self.assertEqual(out["maps"].shape, (N, 12 if full else 3, H * W))
+                if name in ("v3", "swiglu", "v4"):
                     self.assertEqual(out["shares"].shape, (N, 2, P, SHARES))
                 else:
                     self.assertEqual(out["bins"].shape, (N, 2, 5))
+                self.assertEqual("retreat" in out, full)
                 self.assertEqual(out["ptr"].shape, (N, P))
                 self.assertEqual(out["value"].shape, (N,))
 
@@ -395,6 +429,33 @@ class ShareDistTest(unittest.TestCase):
         gap = d.log_prob(acts, sizes=True) - d.log_prob(acts)  # 25%'s 20 percents against one
         self.assertTrue(torch.allclose(gap, torch.full((3,), math.log(20)), atol=1e-5))
 
+    def test_kl_covers_every_action_of_a_v4_network(self):
+        obs, p_out, q_out = full_obs(), full_out(1), full_out(2)
+        kl = ActionDist(p_out, obs).kl(ActionDist(q_out, obs))
+        for i, want in enumerate(brute_kl(p_out, q_out, obs, range(1, SHARES + 1))):
+            self.assertAlmostEqual(float(kl[i]), want, delta=1e-4 * max(1.0, want))
+
+    def test_each_type_takes_its_own_heat_map_and_retreat_its_pointer(self):
+        obs, out = full_obs(), full_out()
+        dist = ActionDist(out, obs)
+        for t in range(15):
+            a = dist.complete(torch.full((3,), t))
+            m = int(MAP_OF[t])
+            for i in range(3):
+                if m >= 0:
+                    self.assertTrue(obs["cell_mask"][i, m, a[i, 1]], (t, i))
+                if t == RETREAT:
+                    self.assertTrue(obs["retreat_mask"][i, a[i, 2]])
+            self.assertTrue(torch.isfinite(dist.log_prob(a)).all(), t)
+        self.assertTrue(torch.isfinite(dist.entropy()).all())
+
+    def test_old_networks_see_only_their_own_actions(self):
+        obs, old = full_obs(), share_out()  # a 5-type, 3-map network in a game with 15 types
+        dist = ActionDist(old, obs)
+        self.assertEqual((dist.type.logits.shape[-1], dist.cells.logits.shape[1], dist.retreat), (5, 3, None))
+        for _ in range(20):
+            self.assertTrue((dist.sample()[:, 0] < 5).all())
+
     def test_the_kl_needs_the_same_troop_head(self):
         obs, out = small_obs(), share_out()
         sizes = {k: v for k, v in out.items() if k != "shares"} | {"bins": torch.zeros(3, 2, 5)}
@@ -410,13 +471,15 @@ class LoadTest(unittest.TestCase):
                                ({"arch": "v2", "core": "dense", "widths": "64,128,192"}, Policy),
                                ({"arch": "v2", "core": "moe", "widths": "64,128,192"}, Policy),
                                ({"arch": "v3", "core": "moe", "widths": "64,128,192"}, Policy),
-                               ({"arch": "v3", "core": "moe-swiglu", "widths": "64,128,192"}, Policy)):
+                               ({"arch": "v3", "core": "moe-swiglu", "widths": "64,128,192"}, Policy),
+                               ({"arch": "v4", "core": "moe", "widths": "64,128,192"}, Policy)):
                 path = Path(d) / "net.pt"
                 torch.save({"model": new_net(DIMS, args).state_dict(), "args": args}, path)
                 net = load_net(path, DIMS)
                 self.assertIsInstance(net, kind)
                 self.assertEqual(getattr(net, "moe", False), args.get("core", "dense") != "dense")
-                self.assertEqual(getattr(net, "shares", False), args.get("arch") == "v3")
+                self.assertEqual(getattr(net, "shares", False), args.get("arch") in ("v3", "v4"))
+                self.assertEqual(getattr(net, "full", False), args.get("arch") == "v4")
                 with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                     self.assertEqual(tuple(net(obs)["value"].shape), (N,))
 
