@@ -1,13 +1,13 @@
 import fs from "node:fs";
 import zlib from "node:zlib";
-import { Player, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import { Player } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
 import { GameRecord, StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
 import { decompressGameRecord, toWireGameStartInfo } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
-import { Act } from "./actions";
+import { Act, BUILDS } from "./actions";
 import { EnvGame, STEP_TICKS } from "./game";
 
 /** Label types of windows that stay out of the loss (PLAN Phase 2, b). */
-export const OUT_OF_SET = -1; // a command the 5 actions cannot express, e.g. building a silo
+export const OUT_OF_SET = -1; // a command the actions cannot express: diplomacy, chat, warship moves, MIRVs
 export const UNMAPPED = -2; // a command of an expressible type whose label could not be built
 /** Commands a seat may have queued; more are dropped and counted (humans rarely issue 2 in one window). */
 export const MAX_PENDING = 3;
@@ -27,6 +27,9 @@ export function shareOf(troops: number, have: number): number {
   return Math.min(100, Math.max(1, Math.round((100 * troops) / Math.max(have, 1))));
 }
 
+/** The action of each unit a build_unit command can place (BUILDS reversed). */
+const BUILD_ACT = new Map([...BUILDS].map(([act, unit]) => [unit, act]));
+
 /** A human command as the [type, cell, target, share] action the agent would take for it, from the current state. */
 export function labelOf(env: EnvGame, seat: Player, intent: StampedIntent): number[] {
   const { game, frame } = env;
@@ -41,8 +44,20 @@ export function labelOf(env: EnvGame, seat: Player, intent: StampedIntent): numb
     }
     case "boat":
       return [Act.Boat, frame.cellOf(intent.dst), 0, shareOf(intent.troops, seat.troops())];
-    case "build_unit":
-      return intent.unit === UnitType.City ? [Act.BuildCity, frame.cellOf(intent.tile), 0, 0] : [OUT_OF_SET, 0, 0, 0];
+    case "build_unit": {
+      const act = BUILD_ACT.get(intent.unit);
+      return act === undefined ? [OUT_OF_SET, 0, 0, 0] : [act, frame.cellOf(intent.tile), 0, 0];
+    }
+    case "upgrade_structure": {
+      const unit = game.unit(intent.unitId);
+      return unit === undefined ? [UNMAPPED, 0, 0, 0] : [Act.Upgrade, frame.cellOf(unit.tile()), 0, 0];
+    }
+    case "cancel_attack": {
+      const attack = seat.outgoingAttacks().find((a) => a.id() === intent.attackID);
+      if (attack === undefined) return [UNMAPPED, 0, 0, 0];
+      const target = attack.target();
+      return [Act.Retreat, 0, target.isPlayer() ? target.smallID() : 0, 0];
+    }
     default:
       return [OUT_OF_SET, 0, 0, 0];
   }

@@ -7,11 +7,11 @@ import { UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Gam
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
 import { GameRecord, GameRecordSchema, StampedIntent, Turn } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
 import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
-import { Act } from "./actions";
+import { Act, BUILDS } from "./actions";
 import { EnvGame, seatClientID } from "./game";
-import { OUT_OF_SET, readRecord, RecordGame, shareOf } from "./replay";
+import { labelOf, OUT_OF_SET, readRecord, RecordGame, shareOf, UNMAPPED } from "./replay";
 import { gameConfigOf } from "./setups";
-import { landTile, ONION } from "./testkit";
+import { landTile, ONION, script } from "./testkit";
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "testdata/ranked1v1.json.gz");
 
@@ -68,7 +68,7 @@ test("extra commands queue into later windows; unexpressible ones stay out of th
   const a = seatClientID(0);
   const b = seatClientID(1);
   const attack = (troops: number): StampedIntent => ({ type: "attack", targetID: null, troops, clientID: a });
-  const silo: StampedIntent = { type: "build_unit", unit: UnitType.MissileSilo, tile: 0, clientID: b };
+  const silo: StampedIntent = { type: "build_unit", unit: UnitType.MIRV, tile: 0, clientID: b };
   const record = synthetic(
     [
       { turnNumber: 300, intents: [attack(100), attack(50), silo] },
@@ -110,4 +110,37 @@ test("a recorded game passes the record schema and replays to the same state", a
   assert.equal(rg.desync, false);
   assert.equal(rg.env.hash, env.hash);
   assert.deepEqual(rg.env.observe(true), env.observe(true), "a replay sees what the agent saw");
+});
+
+test("every command maps to an action, except diplomacy, chat and MIRVs", async () => {
+  const env = await EnvGame.create(ONION, "labels");
+  script(env, 260);
+  const seat = env.seats[0];
+  seat.addGold(1_000_000_000n);
+  const clientID = seatClientID(0);
+  let home = 0;
+  for (const t of seat.tiles()) {
+    home = t;
+    break;
+  }
+  const build = (unit: UnitType): StampedIntent => ({ type: "build_unit", unit, tile: home, clientID });
+  for (const [act, unit] of BUILDS) {
+    assert.deepEqual(labelOf(env, seat, build(unit)), [act, env.frame.cellOf(home), 0, 0], unit);
+  }
+  assert.deepEqual(labelOf(env, seat, build(UnitType.MIRV)), [OUT_OF_SET, 0, 0, 0]);
+  env.tickWith([build(UnitType.City)]);
+  env.tickWith([]); // an intent executes on the tick after the one that receives it
+  const city = seat.units(UnitType.City)[0];
+  const upgrade = (unitId: number): StampedIntent => ({ type: "upgrade_structure", unit: UnitType.City, unitId, clientID });
+  assert.deepEqual(labelOf(env, seat, upgrade(city.id())), [Act.Upgrade, env.frame.cellOf(city.tile()), 0, 0]);
+  assert.deepEqual(labelOf(env, seat, upgrade(999_999)), [UNMAPPED, 0, 0, 0], "a unit that does not exist");
+  env.tickWith([{ type: "attack", targetID: null, troops: seat.troops() / 2, clientID }]);
+  env.tickWith([]);
+  const attack = seat.outgoingAttacks().find((a) => !a.target().isPlayer())!;
+  const cancel = (attackID: string): StampedIntent => ({ type: "cancel_attack", attackID, clientID });
+  assert.deepEqual(labelOf(env, seat, cancel(attack.id())), [Act.Retreat, 0, 0, 0]);
+  assert.deepEqual(labelOf(env, seat, cancel("gone")), [UNMAPPED, 0, 0, 0], "an attack that already ended");
+  const enemy = env.game.players().find((p) => p !== seat)!;
+  const ally: StampedIntent = { type: "allianceRequest", recipient: enemy.id(), clientID };
+  assert.deepEqual(labelOf(env, seat, ally), [OUT_OF_SET, 0, 0, 0]);
 });
