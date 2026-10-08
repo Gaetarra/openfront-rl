@@ -819,22 +819,25 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         sitting.
         - It survived one driver event (nvlddmkm id 13, not the fatal 153).
         - Its checkpoint holds 16.3M parameters (195 MB).
-      - **Next:** one scoring run of the three networks (~10 min, needs the user's go):
-        `--score checkpoints/bc3-moe/latest.pt checkpoints/bc3b/latest.pt checkpoints/bc3b-moe-swiglu/latest.pt`.
-        - It decides the experts' keep rule on `bc/nll_shares`, within 0.02. Their PPO speed already passed: 98% of
-          the MoE core.
-        - It also gives the closeness numbers.
+      - **Rescore** of the three networks, 2026-10-08 (`runs/score/20261008-151318.json`), bc3-moe / bc3b /
+        bc3b-moe-swiglu:
+        - `bc/nll` 0.8425 / 0.8364 / 0.8386; `bc/nll_shares` 1.1255 (bc3b) against 1.1296 (SwiGLU).
+        - **The SwiGLU experts stay**: 0.004 behind, inside the 0.02 fixed in advance, and their PPO speed passed (98%
+          of the MoE core). They lead on nothing, though: spawn cell NLL 8.89 against bc3b's 8.72.
+        - Closeness, the first numbers (close for all three): city 3.4–3.7% within 16 tiles, 177–181 tiles expected
+          distance; boat 9.4–10.6%, 322–349 tiles; spawn 1.3–2.0%, 396–417 tiles. The heat maps are spread wide.
+          Reading them needs a baseline, still missing: what a uniform pick over the legal cells gets.
       - The heat maps are also scored by closeness (the user's suggestion, 2026-10-07). Exact-cell accuracy and NLL
         treat a near miss like a far one, so two closeness numbers are added:
         - `bc/*_cell_near`: the chance the bot's cell lands within 16 tiles of the human's;
         - `bc/*_cell_dist`: its expected distance in tiles.
-        All three networks are rescored after the twin's night. A spatial soft label (the human's cell spread over
+        All three were rescored after the twin's night (above). A spatial soft label (the human's cell spread over
         its neighbours, like the shares' 0.05) is a candidate for step 4's BC refresh, decided on these numbers.
   - **Actions**, as flat types:
     - today's 5;
     - build defense post / silo / factory / port / SAM / warship;
     - atom bomb and hydrogen bomb;
-    - upgrade: the own structure nearest the chosen cell;
+    - upgrade: the own structure in the chosen cell, on its own heat map (see the decisions below);
     - retreat: a pointer; it cancels the largest attack on that target.
     - One heat map per cell action (12 instead of 3).
     - Nukes use the default arc and one missile, and upgrades are by one level ("Action space": amounts deferred). In
@@ -846,19 +849,25 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - Left out of the loss: alliances, embargo, emoji, chat, donations, cancel boat, warship moves and MIRV (0.4% of 1v1
       commands).
     - **Task list, part 1**, `docs/superpowers/plans/2026-10-07-phase3b-actions.md`: written 2026-10-07, reviewed by
-      the user 2026-10-08, not started.
+      the user 2026-10-08, started 2026-10-08.
       - Decisions:
         - retreat gets its own pointer;
         - **self-nukes stay legal**: top players nuke their own buildings before a capture, so the enemy gets nothing,
           and an over-extended front leaves their own land open. The game refuses only a teammate's land;
         - a cell action is legal only while its heat map has a legal cell;
         - new networks are arch v4;
+        - upgrades point at a cell of their own heat map, not at a list of buildings (the user asked, 2026-10-08).
+          Masked to the buildings the seat can upgrade, the map is that list's pointer, and each score reads the map
+          around its building. The mask is exact: own, finished, and the gold for its type;
         - Gate 3B is judged on match strength, and a network is scored only on the rows its actions can express.
       - Part 2, the observations, is still to be written.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
-    GPU from the channels. The exact check stays in the worker, and failures are counted no-ops.
+    GPU from the channels, and the upgrade map from the unit records (exact). The exact check stays in the worker,
+    and failures are counted no-ops.
   - **Observations**: nukes in flight and their targets, SAM and defense-post coverage, silo readiness, and unit costs
     as scalars. The bridge sends nuke targets and unit levels.
+    - Buildings need their state too (found 2026-10-08): one under construction reads as a finished level 1 today,
+      and levels from 4 up saturate at 3.98, the top of the inputs' 64ths byte.
     - SAM coverage counts the ready interceptors on each cell, by relation (decision 4; the brief's idea D): over the
       covering SAMs, level minus missiles reloading.
     - SAMs under construction are left out, and each SAM's current range is used (it ramps after an upgrade).

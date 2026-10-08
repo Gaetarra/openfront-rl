@@ -32,8 +32,8 @@ Older networks keep playing with their five actions.
 ("Observations": nukes in flight, coverage, silo readiness, unit costs) are Part 2, a separate task list. The BC refresh
 (3B step 4) comes after both.
 
-**Status (2026-10-08):** reviewed by the user (answers under "Decisions"); not started. Execution: native (inline),
-with a self-review at the end. Before Task 1, run the three-network rescore if it hasn't run (PLAN 3B, "Results").
+**Status (2026-10-08):** reviewed by the user (answers under "Decisions"); started 2026-10-08, after the three-network
+rescore (PLAN 3B, "Results"). Execution: native (inline), with a self-review at the end.
 
 ## Game facts this plan relies on (checked in v0.34.23)
 
@@ -50,8 +50,9 @@ with a self-review at the end. Before Task 1, run the three-network rescore if i
   - atom and hydrogen bombs (`nukeSpawn`): refused during spawn immunity, on impassable tiles and on teammates' land.
     It returns the nearest ready silo: active, not cooling down, finished. A nuke has no range limit.
 - **Upgrades:** `findUnitToUpgrade` takes the own unit of that type nearest the tile within 15 tiles.
-  `canUpgradeUnit(u)` needs an upgradable type, gold for that type, a finished unit and ownership. Upgradable: city,
-  port, factory, silo and SAM; defense posts and warships are not.
+  `canUpgradeUnit(u)` needs an upgradable type, the gold to build another of that type (`canBuildUnitType`, the
+  check behind the build type masks), a finished unit not marked for deletion, and ownership. Upgradable: city, port,
+  factory, silo and SAM; defense posts and warships are not.
 - **Attacks:** `Player.outgoingAttacks()` → `Attack {id(), target(): Player | TerraNullius, troops(), isActive(),
   retreating()}`.
 - **Construction** takes 2 s (city, factory), 5 s (port, defense post), 10 s (silo) or 30 s (SAM).
@@ -67,8 +68,13 @@ with a self-review at the end. Before Task 1, run the three-network rescore if i
    - The game refuses only a teammate's land (`nukeSpawn`). `isOnSameTeam` is false for oneself, and allies are not
      teammates.
    - So the nuke heat maps allow every cell except those mostly held by friends.
-3. An upgrade raises the seat's upgradable structure in the chosen cell. That is a fact, not a choice: the 15-tile
-   spacing leaves at most one structure per cell.
+3. **An upgrade points at a cell of the upgrade heat map**, and the bridge upgrades the seat's building in that cell.
+   - The game's command names one building by its id, which the network cannot output. A cell names one building:
+     a cell is at most 8 × 8 tiles, and structures stay 15 tiles apart.
+   - The user asked whether a pointer over a list of the seat's buildings would be cleaner. Masked to those
+     buildings, the map is that pointer, and each building's score reads the map around it (land, front, enemy
+     buildings) and the whole game through the core, which a list would have to be fed.
+   - The mask is exact (the user's question exposed it, Task 3): own, finished, and the gold for its type.
 4. **A cell action is legal only while its heat map has a legal cell**, which rules out illegal actions (Gate 3B:
    invalid actions < 1%).
 5. **New networks are arch v4**: 15 actions and 100 troop shares. v1–v3 keep 5 actions and 3 heat maps.
@@ -567,7 +573,9 @@ git commit -m "Extractor: every command ranked players give maps to an action la
 - Consumes (Task 1): the 15-type `"types"` blob and the `"retreat"` blob.
 - Produces:
   - `MAP_TYPES = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)`, the action type of each heat map;
-  - obs `"type_mask"` [N, 15], `"cell_mask"` [N, 12, H·W] and `"retreat_mask"` [N, P] (bool).
+  - obs `"type_mask"` [N, 15], `"cell_mask"` [N, 12, H·W] and `"retreat_mask"` [N, P] (bool);
+  - the upgrade map (`cell_mask[:, 11]`) is exact: the seat's finished buildings of the types it can afford
+    (`BUILD_OF`), as the game's `canUpgradeUnit`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -593,12 +601,40 @@ git commit -m "Extractor: every command ranked players give maps to an action la
             env.close()
 ```
 
-(`OWN` joins the import from `trainer.env`.)
+(`OWN`, `UPGRADABLE` and `BUILD_OF` join the import from `trainer.env`.)
+
+In `ChannelTest`, the replay checks the upgrade map against its definition at every observation:
+- in `setUpClass`, `cls.upgrade = np.zeros(3, int)  # wrong cells, open cells, own buildings left shut` follows
+  `cls.seen, cls.legacy_error = None, 0.0`;
+- in `keep`, `_observe`'s new arguments unpack as `players, rel, _, types, _, _, units = args`;
+- in `keep`, after `rec = np.concatenate([u for _, u in units])`:
+
+```python
+            for seat in range(2):  # the upgrade map: own, finished buildings whose type the seat can afford
+                want, shut = np.zeros(env.H * env.W, bool), np.zeros(env.H * env.W, bool)
+                for u in rec:
+                    name = env.dims["unitTypes"][u["type"]]
+                    if name in BUILDING_TYPES[:UPGRADABLE] and rel[0][seat][u["owner"]] == 1:
+                        ok = u["level"] > 0 and types[0][seat][BUILD_OF[BUILDING_TYPES.index(name)]] > 0
+                        (want if ok else shut)[u["cell"]] = True
+                got = obs["cell_mask"][seat, MAP_TYPES.index(13)].cpu().numpy()
+                cls.upgrade += [int((got != want).sum()), int(want.sum()), int((shut & ~want).sum())]
+```
+
+- and the test:
+
+```python
+    def test_the_upgrade_map_opens_exactly_the_upgradable_buildings(self):
+        wrong, opened, shut = self.upgrade
+        self.assertEqual(wrong, 0)
+        self.assertGreater(opened, 0, "a building the seat could upgrade was seen")
+        self.assertGreater(shut, 0, "an own building it could not upgrade (unfinished or unaffordable) was seen")
+```
 
 - [ ] **Step 2: Run it to see it fail**
 
 Run: `.venv/Scripts/python -m unittest trainer.test_env -k legal_cell 2>&1 | tail -3`
-Expected: `ImportError: cannot import name 'MAP_TYPES'`.
+Expected: `ImportError: cannot import name` one of the new names (`MAP_TYPES`, `UPGRADABLE`, `BUILD_OF`).
 
 - [ ] **Step 3: Implement**
 
@@ -608,7 +644,8 @@ Expected: `ImportError: cannot import name 'MAP_TYPES'`.
 # The action type of each heat map (bridge/actions.ts Act): spawn, boat, the nine builds (city, defense post, silo,
 # factory, port, SAM, warship, atom bomb, hydrogen bomb) and upgrade. Networks before 3B step 3 have the first three.
 MAP_TYPES = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
-UPGRADABLE = 5  # BUILDING_TYPES[:5] (city, port, factory, silo, SAM) can be upgraded; the worker checks it exactly
+UPGRADABLE = 5  # BUILDING_TYPES[:5] (city, port, factory, silo, SAM) can be upgraded
+BUILD_OF = (4, 8, 7, 6, 9)  # their build actions: an upgrade needs the gold to build another one (canUpgradeUnit)
 ```
 
 In `_absorb`:
@@ -620,20 +657,39 @@ In `_observe`:
 - the signature becomes `def _observe(self, players, rel, scalars, types, attack, retreat, units):`;
 - the docstring's last line becomes `- the scalars and the masks: 15 action types, 12 heat maps (MAP_TYPES), the attack
   and retreat pointers.`;
+- replace `buildings = self._add_units(x, units, rel_t)` with:
+
+```python
+        type_mask = torch.from_numpy(types.reshape(N, self.T)).to(dev)
+        buildings, upgradable = self._add_units(x, units, rel_t, type_mask[:, list(BUILD_OF)] > 0)
+```
+
 - replace the `cell_mask = ...` statement with:
 
 ```python
         mine, shore = x[:, OWN] > 0, x[:, SHORE] > 0
-        upgradable = (x[:, BUILDINGS:BUILDINGS + 4 * UPGRADABLE].unflatten(1, (UPGRADABLE, 4))[:, :, 0] > 0).any(1)
         nukable = x[:, OWN + 1] < 0.5  # not mostly a friend's land; self-nukes stay legal (the user, 2026-10-08)
         cell_mask = torch.stack([x[:, UNOWNED] > 0, shore & (x[:, LAND] - x[:, OWN] > 1e-6),  # spawn, boat
                                  mine, mine, mine, mine, mine & shore, mine,  # city, defense post, silo, factory, port, SAM
                                  x[:, OCEAN] > 0, nukable, nukable, upgradable], 1) & valid[:, None]  # warship, nukes, upgrade
-        type_mask = torch.from_numpy(types.reshape(N, self.T)).to(dev)
         type_mask[:, list(MAP_TYPES)] &= cell_mask.any(-1)  # a cell action needs a legal cell on its heat map
 ```
 
 - in the returned dict, `"type_mask"` becomes `type_mask`, and `"retreat_mask": torch.from_numpy(retreat.reshape(N, P)).to(dev),` follows `"attack_mask"`.
+
+In `_add_units`:
+- the signature becomes `def _add_units(self, x, units, rel_t, afford):`;
+- the docstring gains `Also returns the upgrade map [N, H·W]: each seat's finished buildings of the types it can
+  afford (afford [N, UPGRADABLE]), the game's canUpgradeUnit.`;
+- `upgradable = torch.zeros(self.N, self.H * self.W, dtype=torch.bool, device=self.device)` follows `buildings = ...`,
+  and both returns become `return buildings, upgradable`;
+- in the seat loop, after `x.index_put_(...)`:
+
+```python
+            up = keep & (r == 1) & (kind < UPGRADABLE) & (level > 0)  # own, finished, upgradable
+            up &= afford[row, kind.clamp(0, UPGRADABLE - 1)]  # and the gold to build another of its type
+            upgradable[row[up], cell[up]] = True
+```
 
 - [ ] **Step 4: Run the env tests**
 
@@ -644,7 +700,7 @@ Expected: OK. The networks' tests still run on fake observations; Task 4 fits th
 
 ```bash
 git add trainer/env.py trainer/test_env.py
-git commit -m "Environment: 12 cell masks (spawn, boat, city, defense post, silo, factory, port, SAM, warship, atom and hydrogen bombs, upgrade), the retreat mask, and a cell action stays legal only while its heat map has a legal cell"
+git commit -m "Environment: 12 cell masks (spawn, boat, city, defense post, silo, factory, port, SAM, warship, atom and hydrogen bombs, upgrade), the retreat mask, an exact upgrade map (the seat's finished buildings of the types it can afford), and a cell action stays legal only while its heat map has a legal cell"
 ```
 
 ---
@@ -1199,7 +1255,7 @@ A new bullet after the troops bullet:
   SAM / warship, atom bomb, hydrogen bomb, upgrade (the seat's structure in the chosen cell) and retreat (cancels
   the largest attack on the chosen target).
   - The bridge masks types by gold, a ready silo outside spawn immunity, a finished port, an upgradable structure and
-    an attack to cancel; the GPU masks the cells.
+    an attack to cancel; the GPU masks the cells, the upgrade map exactly (own, finished, gold for its type).
   - The game's `canBuild` / `canUpgradeUnit` decide in the worker, and a failed action is a counted no-op.
   - Outside the set: diplomacy, chat, warship moves and MIRVs.
 ```

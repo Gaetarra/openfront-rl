@@ -39,8 +39,8 @@ night".
 - R2: the pair trained at 71% of one network's speed, so the twin got its own night.
 - The bc3b night crashed once (GPU driver) and resumed from update 5000.
 - R4: `bc/nll` 0.8425 → 0.8364. R5: 0.660 against the 3A clone, so the shares stay.
-- The twin (`bc3b-moe-swiglu`) finished 2026-10-08 04:17. Its rescore with the other two is still to run (PLAN 3B,
-  "Results").
+- The twin (`bc3b-moe-swiglu`) finished 2026-10-08 04:17. The rescore of all three keeps its SwiGLU experts:
+  `bc/nll_shares` 1.1296 against bc3b's 1.1255, inside the 0.02 (PLAN 3B, "Results").
 
 ## Global Constraints
 
