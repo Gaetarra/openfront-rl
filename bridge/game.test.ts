@@ -101,7 +101,7 @@ test("a seat that never spawns ends the game last as soon as the spawn phase is 
 test("observe returns the blobs in protocol order with consistent sizes", async () => {
   const env = await EnvGame.create(ONION, "blobs");
   const blobs = env.observe(true);
-  assert.deepEqual(blobs.map(([n]) => n), ["cells", "units", "players", "rel", "scalars", "types", "attack"]);
+  assert.deepEqual(blobs.map(([n]) => n), ["cells", "units", "players", "rel", "scalars", "types", "attack", "retreat"]);
   assert.equal(blob(blobs, "cells").byteLength, env.frame.n * 11);
   assert.equal(blob(blobs, "players").byteLength, env.slots * 17 * 4);
   assert.equal(env.terrain().byteLength, 5 * env.frame.n);

@@ -1,18 +1,49 @@
-import { Game, Player, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import {
+  Attack,
+  Game,
+  Player,
+  TerraNullius,
+  Unit,
+  UnitType,
+} from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
 import { TileRef } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameMap";
 import { canBuildTransportShip } from "../OpenFront_Source_Code/openfrontio/src/core/game/TransportShipUtils";
 import { Intent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
 import { CellFrame } from "./frame";
 
-/** Phase 1 action types (PLAN "Phase 1": no-op, spawn, attack, boat, build city). */
+/** Action types (PLAN 3B "Actions"): Phase 1's five, then every other command ranked 1v1 players give, except
+ * diplomacy, chat, warship moves and MIRVs. */
 export enum Act {
   Noop = 0,
   Spawn = 1,
   Attack = 2,
   Boat = 3,
   BuildCity = 4,
+  BuildDefensePost = 5,
+  BuildSilo = 6,
+  BuildFactory = 7,
+  BuildPort = 8,
+  BuildSAM = 9,
+  BuildWarship = 10,
+  AtomBomb = 11,
+  HydrogenBomb = 12,
+  Upgrade = 13,
+  Retreat = 14,
 }
-export const N_ACTS = 5;
+export const N_ACTS = 15;
+/** The unit each build action places: structures on own land, a port on own shore, a warship on water, a nuke on any
+ * tile the game lets it hit. */
+export const BUILDS: ReadonlyMap<Act, UnitType> = new Map([
+  [Act.BuildCity, UnitType.City],
+  [Act.BuildDefensePost, UnitType.DefensePost],
+  [Act.BuildSilo, UnitType.MissileSilo],
+  [Act.BuildFactory, UnitType.Factory],
+  [Act.BuildPort, UnitType.Port],
+  [Act.BuildSAM, UnitType.SAMLauncher],
+  [Act.BuildWarship, UnitType.Warship],
+  [Act.AtomBomb, UnitType.AtomBomb],
+  [Act.HydrogenBomb, UnitType.HydrogenBomb],
+]);
 /** Attacks and boats send a whole percent of the seat's current troops, 1-100 (PLAN 3B: troop shares). */
 const isShare = (s: number) => Number.isInteger(s) && s >= 1 && s <= 100;
 /** A spawn intent must still execute inside the spawn phase after up to 3 turns of latency. */
@@ -45,8 +76,23 @@ export function attackMask(game: Game, seat: Player, slots: number): Uint8Array 
   return mask;
 }
 
-/** Which action types are legal now (1 = allowed). */
-export function typeMask(game: Game, seat: Player, attack: Uint8Array): Uint8Array {
+/** Which table rows the seat is attacking over land now, for a retreat: row = smallID, row 0 = unowned land. */
+export function retreatMask(seat: Player, slots: number): Uint8Array {
+  const mask = new Uint8Array(slots);
+  for (const a of seat.outgoingAttacks()) {
+    const row = rowOf(a.target());
+    if (a.isActive() && !a.retreating() && row < slots) mask[row] = 1;
+  }
+  return mask;
+}
+
+/** Which action types are legal now (1 = allowed). `retreat`: retreatMask, or nothing to cancel. */
+export function typeMask(
+  game: Game,
+  seat: Player,
+  attack: Uint8Array,
+  retreat: Uint8Array = new Uint8Array(0),
+): Uint8Array {
   const m = new Uint8Array(N_ACTS);
   if (game.inSpawnPhase()) {
     const end = game.config().numSpawnPhaseTurns();
@@ -60,9 +106,20 @@ export function typeMask(game: Game, seat: Player, attack: Uint8Array): Uint8Arr
   if (!seat.isAlive()) return m;
   m[Act.Attack] = attack.includes(1) ? 1 : 0;
   m[Act.Boat] = seat.unitCount(UnitType.TransportShip) < game.config().boatMaxNumber() ? 1 : 0;
-  m[Act.BuildCity] = seat.gold() >= game.unitInfo(UnitType.City).cost(game, seat) ? 1 : 0;
+  for (const [act, unit] of BUILDS) {
+    m[act] = !game.config().isUnitDisabled(unit) && seat.gold() >= game.unitInfo(unit).cost(game, seat) ? 1 : 0;
+  }
+  if (!seat.units(UnitType.Port).some(finished)) m[Act.BuildWarship] = 0;
+  if (game.isSpawnImmunityActive() || !seat.units(UnitType.MissileSilo).some((s) => finished(s) && !s.isInCooldown())) {
+    m[Act.AtomBomb] = m[Act.HydrogenBomb] = 0;
+  }
+  m[Act.Upgrade] = seat.units().some((u) => u.isActive() && seat.canUpgradeUnit(u)) ? 1 : 0;
+  m[Act.Retreat] = retreat.includes(1) ? 1 : 0;
   return m;
 }
+
+const finished = (u: Unit) => u.isActive() && !u.isUnderConstruction();
+const rowOf = (target: Player | TerraNullius) => (target.isPlayer() ? target.smallID() : 0);
 
 export interface Decoded {
   intent: Intent | null;
@@ -71,10 +128,8 @@ export interface Decoded {
 }
 const DROP: Decoded = { intent: null, valid: false };
 
-/**
- * Turns a sampled [type, cell, target, share] into a game intent (null intent = no-op). share: the percent of its
- * current troops an attack or boat sends.
- */
+/** Turns a sampled [type, cell, target, share] into a game intent (null intent = no-op). share: the percent of its
+ * current troops an attack or boat sends. `retreat`: retreatMask, or nothing to cancel. */
 export function decodeAction(
   game: Game,
   seat: Player,
@@ -82,6 +137,7 @@ export function decodeAction(
   types: Uint8Array,
   attack: Uint8Array,
   action: number[],
+  retreat: Uint8Array = new Uint8Array(0),
 ): Decoded {
   const [type, cell, target, share] = action;
   if (!Number.isInteger(type) || types[type] !== 1) return DROP;
@@ -91,10 +147,18 @@ export function decodeAction(
     const targetID = target === 0 ? null : (game.playerBySmallID(target) as Player).id();
     return { intent: { type: "attack", targetID, troops: (share / 100) * seat.troops() }, valid: true };
   }
+  if (type === Act.Retreat) {
+    if (!Number.isInteger(target) || retreat[target] !== 1) return DROP;
+    const largest = seat
+      .outgoingAttacks()
+      .filter((a) => a.isActive() && !a.retreating() && rowOf(a.target()) === target)
+      .reduce<Attack | null>((best, a) => (best === null || a.troops() > best.troops() ? a : best), null);
+    return largest === null ? DROP : { intent: { type: "cancel_attack", attackID: largest.id() }, valid: true };
+  }
   if (!Number.isInteger(cell) || cell < 0 || cell >= frame.n) return DROP;
   if (type === Act.Spawn) {
-    const tile = spawnTile(game, frame, cell);
-    return tile === null ? DROP : { intent: { type: "spawn", tile }, valid: true };
+    const tile = byCentre(game, frame, cell).find((t) => game.isLand(t) && !game.isImpassable(t) && !game.hasOwner(t));
+    return tile === undefined ? DROP : { intent: { type: "spawn", tile }, valid: true };
   }
   if (type === Act.Boat) {
     if (!isShare(share)) return DROP;
@@ -107,29 +171,21 @@ export function decodeAction(
     }
     return DROP;
   }
-  if (type === Act.BuildCity) {
-    for (const tile of frame.tilesOf(cell)) {
-      if (game.ownerID(tile) === seat.smallID() && seat.canBuild(UnitType.City, tile) !== false) {
-        return { intent: { type: "build_unit", unit: UnitType.City, tile }, valid: true };
-      }
-    }
+  if (type === Act.Upgrade) {
+    // A cell holds at most one structure (the 15-tile spacing), so the seat's upgradable one in it is the choice.
+    const unit = seat.units().find((u) => frame.cellOf(u.tile()) === cell && seat.canUpgradeUnit(u));
+    if (unit === undefined) return DROP;
+    return { intent: { type: "upgrade_structure", unit: unit.type(), unitId: unit.id() }, valid: true };
   }
-  return DROP;
+  const unit = BUILDS.get(type);
+  if (unit === undefined) return DROP;
+  const tile = byCentre(game, frame, cell).find((t) => seat.canBuild(unit, t) !== false);
+  return tile === undefined ? DROP : { intent: { type: "build_unit", unit, tile }, valid: true };
 }
 
-/** The unowned land tile of the cell closest to its centre. */
-function spawnTile(game: Game, frame: CellFrame, cell: number): TileRef | null {
+/** The cell's tiles, nearest its centre first (a stable sort: ties keep the frame's order). */
+function byCentre(game: Game, frame: CellFrame, cell: number): TileRef[] {
   const [cx, cy] = frame.center(cell);
-  let best: TileRef | null = null;
-  let bestDist = Infinity;
-  for (const t of frame.tilesOf(cell)) {
-    if (!game.isLand(t) || game.isImpassable(t) || game.hasOwner(t)) continue;
-    const dx = game.x(t) - cx;
-    const dy = game.y(t) - cy;
-    if (dx * dx + dy * dy < bestDist) {
-      bestDist = dx * dx + dy * dy;
-      best = t;
-    }
-  }
-  return best;
+  const d = (t: TileRef) => (game.x(t) - cx) ** 2 + (game.y(t) - cy) ** 2;
+  return [...frame.tilesOf(cell)].sort((a, b) => d(a) - d(b));
 }

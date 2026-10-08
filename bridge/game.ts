@@ -21,7 +21,7 @@ import {
   Winner,
 } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
 import { createPartialGameRecord, simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
-import { Act, attackMask, decodeAction, N_ACTS, typeMask } from "./actions";
+import { Act, attackMask, decodeAction, N_ACTS, retreatMask, typeMask } from "./actions";
 import { CellFrame, encodeUnits, terrainCells } from "./frame";
 import { LatencyQueue } from "./latency";
 import { loadFreshTerrain, resetGameStatics } from "./maps";
@@ -59,7 +59,7 @@ export class EnvGame {
   /** Per seat: its last action could not be applied and was dropped. */
   invalid: boolean[];
   private turn = 0;
-  private masks: { types: Uint8Array; attack: Uint8Array }[] | null = null;
+  private masks: { types: Uint8Array; attack: Uint8Array; retreat: Uint8Array }[] | null = null;
   /** Executed turns while the game is recorded (record()). */
   private turns: Turn[] | null = null;
 
@@ -213,6 +213,7 @@ export class EnvGame {
           masks[i].types,
           masks[i].attack,
           flat.slice(k, k + 4),
+          masks[i].retreat,
         );
         if (intent !== null) this.latency.push({ ...intent, clientID: seatClientID(i) } as StampedIntent, this.turn);
         invalid ||= !valid;
@@ -232,11 +233,13 @@ export class EnvGame {
     const scalars = new Float32Array(S * SCALARS);
     const types = new Uint8Array(S * N_ACTS);
     const attack = new Uint8Array(S * P);
+    const retreat = new Uint8Array(S * P);
     this.masks = this.currentMasks();
     this.seats.forEach((seat, i) => {
       const m = this.masks![i];
       types.set(m.types, i * N_ACTS);
       attack.set(m.attack, i * P);
+      retreat.set(m.retreat, i * P);
       encodeSeat(
         this.game,
         seat,
@@ -256,6 +259,7 @@ export class EnvGame {
       ["scalars", bytes(scalars)],
       ["types", types],
       ["attack", attack],
+      ["retreat", retreat],
     ];
   }
 
@@ -263,10 +267,11 @@ export class EnvGame {
     return terrainCells(this.game.map(), this.frame);
   }
 
-  private currentMasks(): { types: Uint8Array; attack: Uint8Array }[] {
+  private currentMasks(): { types: Uint8Array; attack: Uint8Array; retreat: Uint8Array }[] {
     return this.seats.map((seat) => {
       const attack = attackMask(this.game, seat, this.slots);
-      return { types: typeMask(this.game, seat, attack), attack };
+      const retreat = retreatMask(seat, this.slots);
+      return { types: typeMask(this.game, seat, attack, retreat), attack, retreat };
     });
   }
 
