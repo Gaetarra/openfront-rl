@@ -158,8 +158,9 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     m.add("labels/out_of_set", (t == -1).sum(), n)
     m.add("labels/unmapped", (t == -2).sum(), n)
     m.add("labels/illegal", ((t >= 0) & ~legal).sum(), n)
-    for k, name in enumerate(ACT_NAMES):
+    for k, name in enumerate(ACT_NAMES[1:], 1):  # the label mix; labels/noop stays the share of the legal rows
         m.add(f"labels/{name}", (t == k).sum(), n)
+    m.add("labels/out_of_set_commands", (t == -1).sum(), (t != 0).sum())  # Gate 3B: under 0.5% of the commands
     n_types = dist.type.logits.shape[-1]
     m.add("labels/beyond_net", (legal & (t >= n_types)).sum(), n)
     legal = legal & (t < n_types)  # rows this network's actions can express

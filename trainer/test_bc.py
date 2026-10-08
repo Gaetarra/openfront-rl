@@ -138,6 +138,19 @@ class RandomPolicy5(torch.nn.Module):
 
 
 class MeasureTest(unittest.TestCase):
+    def test_label_shares_keep_their_denominators(self):
+        obs = fake_obs()
+        obs["type_mask"][:] = True
+        obs["cell_mask"][:] = True
+        labels = torch.tensor([[0, 0, 0, 0]] * 2 + [[4, 7, 0, 0]] + [[-1, 0, 0, 0]] * 3, device="cuda")
+        legal = label_legal(obs, labels)
+        m, zero = Meter(), torch.zeros(ROWS, device="cuda")
+        measure(m, obs, labels, legal, ActionDist(RandomPolicy5()(obs), obs), zero, zero)
+        s = m.means()
+        self.assertAlmostEqual(s["labels/noop"], 2 / 3)  # of the legal rows, as before the label mix
+        self.assertAlmostEqual(s["labels/build_city"], 1 / 6)  # of all rows
+        self.assertAlmostEqual(s["labels/out_of_set_commands"], 3 / 4)  # of the commands: Gate 3B's measure
+
     def test_new_labels_need_their_heat_map_cell_or_an_attack_to_cancel(self):
         obs = fake_obs()
         obs["type_mask"][:] = True
