@@ -103,11 +103,12 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   over `--updates` (default: one pass over the training records). BC checkpoints from before Phase 3 cannot resume;
   start from them with `--init`. Runs with the same `--seed` replay the same records in the same order.
 - Networks: new runs record theirs in the checkpoint (`args["arch"]`, `"core"`): v1 is Phase 2, v2 is Phase 3A (5 troop
-  sizes), v3 is Phase 3B (100 troop shares); `--init` keeps the checkpoint's. A checkpoint without `"arch"` (Phase 2)
-  loads as `PolicyV1`, which rebuilds its 22 input channels from today's 49 (`v1_spatial`), so the Phase 2 bots still
-  play.
+  sizes), v3 is Phase 3B (100 troop shares), v4 adds every action (15 types, 12 heat maps, a retreat pointer);
+  `--init` keeps the checkpoint's. A checkpoint without `"arch"` (Phase 2) loads as `PolicyV1`, which rebuilds its 22
+  input channels from today's 49 (`v1_spatial`), so the Phase 2 bots still play. v1–v3 see only their 5 types and 3
+  heat maps of the 15 (`ActionDist`), and BC scores each network on the rows its types can express.
 - Troops are a whole percent of current troops (1–100) in actions and labels. v1 and v2 networks send
-  10/25/50/75/100%, exactly what their five bins sent. v3 networks read the share with a player's token: the attack's
+  10/25/50/75/100%, exactly what their five bins sent. v3 and v4 networks read the share with a player's token: the attack's
   target, or the main owner of the boat's landing cell.
   - BC labels the human's share, rounded and clamped to 1–100. The loss puts 0.05 on each neighbouring percent
     (`SHARE_SMOOTH`).
@@ -118,6 +119,13 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     is its expected distance in tiles.
   - `--twin CORE` trains a second network on the same windows, from the same weights outside the core. It saves to
     `checkpoints/<run>-<core>`, and the run resumes both together.
+- Actions (bridge/actions.ts `Act`): no-op, spawn, attack, boat, build city / defense post / silo / factory / port /
+  SAM / warship, atom bomb, hydrogen bomb, upgrade (the seat's structure in the chosen cell) and retreat (cancels
+  the largest attack on the chosen target).
+  - The bridge masks types by gold, a ready silo outside spawn immunity, a finished port, an upgradable structure and
+    an attack to cancel; the GPU masks the cells, the upgrade map exactly (own, finished, gold for its type).
+  - The game's `canBuild` / `canUpgradeUnit` decide in the worker, and a failed action is a counted no-op.
+  - Outside the set: diplomacy, chat, warship moves and MIRVs.
 - GPU memory: ranked PPO with a Phase 3 network needs `--minibatches 12` on the 12 GB card (peak ~10.9 GB). At the
   default 8 it overflows by 1.2–1.9 GB, Windows pages the rest into system RAM without an error, and the run gets 2–4×
   slower (watch "Shared GPU memory" in Task Manager).
@@ -136,6 +144,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - Stepping: `createGameRunner(gameStart, clientID, mapLoader, callback)` (`src/core/GameRunner.ts`), then per tick
   `runner.addTurn({ turnNumber, intents })` and `runner.executeNextTick()`. Intents are `StampedIntent`s
   (intent + the player's `clientID`), defined in `src/core/Schemas.ts`.
+- An intent's execution starts on the tick after the one that receives it: a built unit or a launched attack exists
+  one tick later, so tests tick once more before reading it.
 - Use `GameType.Private` or `Public` for training games: Singleplayer has no spawn timer.
 - Determinism: the core uses `PseudoRandom` (never `Math.random`) and `src/core/DetMath.ts` instead of
   `Math.exp/log/pow/atan2`. Anything we add that feeds the simulation must follow the same rules.

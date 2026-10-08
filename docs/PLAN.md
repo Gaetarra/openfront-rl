@@ -849,7 +849,14 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - Left out of the loss: alliances, embargo, emoji, chat, donations, cancel boat, warship moves and MIRV (0.4% of 1v1
       commands).
     - **Task list, part 1**, `docs/superpowers/plans/2026-10-07-phase3b-actions.md`: written 2026-10-07, reviewed by
-      the user 2026-10-08, started 2026-10-08.
+      the user 2026-10-08, coded 2026-10-08 (3dbc878..; 41 bridge and 114 trainer tests pass).
+      - Code: 15 types, 12 heat maps (spawn, boat, nine builds, upgrade) and a retreat pointer (arch v4); masks in
+        the bridge (types) and on the GPU (cells, the upgrade map exact); a cell type needs a legal cell; the extractor
+        labels every command except diplomacy, chat, warship moves and MIRVs; the v1–v3 networks keep their 5 types
+        and 3 maps, and BC scores each network only on the rows its types express (`labels/beyond_net`).
+      - Still to run: the coverage check on the fixed rows (`--score checkpoints/bc3b/latest.pt`, ~10 min, the user's
+        go): `labels/out_of_set_commands` must fall under 0.5% (Gate 3B counts commands, not rows). With the five
+        actions it was ~7% of commands (`labels/out_of_set` 1.2% of rows in the 2026-10-08 rescore).
       - Decisions:
         - retreat gets its own pointer;
         - **self-nukes stay legal**: top players nuke their own buildings before a capture, so the enemy gets nothing,
