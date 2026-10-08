@@ -15,7 +15,7 @@ from trainer import bc, crawl
 from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, lr_at, main, measure, one_pass, score,
                         table)
 from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import ATTACK, BUILD, SHARES, ActionDist, Policy, PolicyV1, new_net
+from trainer.model import ACT_NAMES, ATTACK, BUILD, RETREAT, SHARES, ActionDist, Policy, PolicyV1, new_net
 from trainer.test_model import DIMS, N as ROWS, exact_fp32, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
@@ -25,7 +25,7 @@ class LabelTest(unittest.TestCase):
     def test_label_legal(self):
         obs = {"type_mask": torch.ones(4, 5, dtype=torch.bool),
                "cell_mask": torch.zeros(4, 3, 16, dtype=torch.bool),
-               "attack_mask": torch.zeros(4, 5, dtype=torch.bool)}
+               "attack_mask": torch.zeros(4, 5, dtype=torch.bool), "retreat_mask": torch.zeros(4, 5, dtype=torch.bool)}
         obs["cell_mask"][3, 0, 5] = True
         obs["attack_mask"][:, 2] = True
         labels = torch.tensor([[-1, 0, 0, 0], [2, 0, 2, 1], [2, 0, 3, 1], [1, 5, 0, 0]])
@@ -126,7 +126,42 @@ class CloneTest(unittest.TestCase):
         self.assertLess(losses[-1], losses[0] - 0.3)  # at least the no-op prior is learnt
 
 
+class RandomPolicy5(torch.nn.Module):
+    """Uniform outputs of a network with the 5 types and 3 heat maps of before 3B step 3."""
+
+    def forward(self, obs):
+        n, dev = len(obs["type_mask"]), obs["type_mask"].device
+        return {"type": torch.zeros(n, 5, device=dev), "bins": torch.zeros(n, 2, 5, device=dev),
+                "maps": torch.zeros(n, 3, obs["cell_mask"].shape[-1], device=dev),
+                "ptr": torch.zeros(obs["attack_mask"].shape, device=dev),
+                "value": torch.zeros(n, device=dev)}
+
+
 class MeasureTest(unittest.TestCase):
+    def test_new_labels_need_their_heat_map_cell_or_an_attack_to_cancel(self):
+        obs = fake_obs()
+        obs["type_mask"][:] = True
+        obs["cell_mask"][:] = False
+        obs["cell_mask"][:, 4, 7] = True  # the silo map allows cell 7 only
+        obs["retreat_mask"][:, 3] = True  # the seat attacks player 3
+        labels = torch.tensor([[6, 7, 0, 0], [6, 8, 0, 0], [RETREAT, 0, 3, 0], [RETREAT, 0, 2, 0], [13, 7, 0, 0],
+                               [-1, 0, 0, 0]], device="cuda")
+        self.assertEqual(label_legal(obs, labels).tolist(), [True, False, True, False, False, False])
+
+    def test_a_network_learns_and_is_scored_only_on_the_rows_its_actions_express(self):
+        obs = fake_obs()
+        obs["type_mask"][:] = True
+        obs["cell_mask"][:] = True
+        old = RandomPolicy5()(obs)
+        labels = torch.tensor([[6, 7, 0, 0]] * 3 + [[4, 7, 0, 0]] * 3, device="cuda")  # 3 silos, 3 cities
+        legal = label_legal(obs, labels)
+        m, zero = Meter(), torch.zeros(ROWS, device="cuda")
+        measure(m, obs, labels, legal, ActionDist(old, obs), zero, zero)
+        s = m.means()
+        self.assertAlmostEqual(s["labels/beyond_net"], 0.5)
+        self.assertAlmostEqual(s["labels/build_silo"], 0.5)
+        self.assertAlmostEqual(s["bc/nll_type"], math.log(5), places=4)  # only the 3 city rows, over 5 types
+
     def test_a_share_networks_troops_score_like_for_like_and_on_its_own_shares(self):
         obs = fake_obs()  # rows 3-5: no-op, attack (only on player 2) and city are legal
         hw, players = obs["cell_mask"].shape[-1], obs["attack_mask"].shape[-1]
@@ -170,7 +205,8 @@ class ScoreTest(unittest.TestCase):
             paths = []
             for name, args in (("old", {"widths": "64,128,192"}),
                                ("moe", {"arch": "v2", "core": "moe", "widths": "64,128,192"}),
-                               ("shares", {"arch": "v3", "core": "moe", "widths": "64,128,192"})):
+                               ("shares", {"arch": "v3", "core": "moe", "widths": "64,128,192"}),
+                               ("full", {"arch": "v4", "core": "moe", "widths": "64,128,192"})):
                 torch.manual_seed(0)
                 path = Path(d) / name / "update0000001.pt"
                 path.parent.mkdir()
@@ -185,7 +221,8 @@ class ScoreTest(unittest.TestCase):
             self.assertEqual(a.keys(), b.keys())
             for k in a:
                 self.assertTrue(math.isclose(a[k], b[k], abs_tol=1e-4) or (math.isnan(a[k]) and math.isnan(b[k])), k)
-        old, moe, shares = first["metrics"]
+        old, moe, shares, full = first["metrics"]
+        self.assertIn("labels/build_silo", full)
         for k in ("bc/nll", "bc/nll_type", "bc/nll_compact", "bc/type_acc", "bc/value_mse", "value/outcome_corr"):
             self.assertIn(k, old)
         self.assertFalse(any(k.startswith("router/") for k in old), "the Phase 2 network has no router")

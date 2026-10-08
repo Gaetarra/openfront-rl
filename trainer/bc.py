@@ -23,13 +23,12 @@ from torch.utils.tensorboard import SummaryWriter
 
 from trainer import crawl
 from trainer.control import Control, serve
-from trainer.env import RANKED_1V1, ROOT, VecEnv
+from trainer.env import MAP_TYPES, RANKED_1V1, ROOT, VecEnv
 from trainer.eval import tag
-from trainer.model import (ATTACK, BOAT, BUILD, CORES, SHARES, SIZE_OF, SPAWN, ActionDist, describe, load_net,
-                           new_net)
+from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, MAP_NAMES, MAP_OF, RETREAT, SHARES, SIZE_OF, ActionDist,
+                           describe, load_net, new_net)
 from trainer.ppo import game_commit, network_args, resume_args, save_checkpoint
 
-CELL_HEAD = {SPAWN: 0, BOAT: 1, BUILD: 2}  # the heat map each type's cell comes from (trainer/model.py)
 PHASES = ("spawn", "early", "mid", "late")
 SCORE_CUTOFF = 1790812800000  # 2026-10-01 00:00 UTC, in ms: the scoring set comes from the Phase 2 crawl's games
 SCORE_LAYOUT = {"workers": 12, "games_per_worker": 6, "steps": 2000}  # fixed, so every scoring run sees the same rows
@@ -94,17 +93,16 @@ def run_info(a, train, val):
 
 def label_legal(obs, labels):
     """Rows whose label can enter the loss: an action type (not a command outside the set) that the observation's
-    masks allow, with a legal cell or target."""
+    masks allow, with a legal cell on its heat map, a legal attack target or an attack to cancel."""
     t, cell, target = labels[:, 0], labels[:, 1], labels[:, 2]
     rows = torch.arange(len(t), device=t.device)
     ok = (t >= 0) & obs["type_mask"][rows, t.clamp(min=0)]
-    head = torch.full_like(t, -1)
-    for typ, h in CELL_HEAD.items():
-        head[t == typ] = h
-    cell_ok = obs["cell_mask"][rows, head.clamp(min=0), cell.clamp(0, obs["cell_mask"].shape[-1] - 1)]
-    ok &= torch.where(head >= 0, cell_ok, True)
-    target_ok = obs["attack_mask"][rows, target.clamp(0, obs["attack_mask"].shape[-1] - 1)]
-    return ok & torch.where(t == ATTACK, target_ok, True)
+    m = MAP_OF.to(t.device)[t.clamp(min=0)]
+    cell_ok = obs["cell_mask"][rows, m.clamp(min=0), cell.clamp(0, obs["cell_mask"].shape[-1] - 1)]
+    ok &= torch.where(m >= 0, cell_ok, True)
+    target = target.clamp(0, obs["attack_mask"].shape[-1] - 1)
+    ok &= torch.where(t == ATTACK, obs["attack_mask"][rows, target], True)
+    return ok & torch.where(t == RETREAT, obs["retreat_mask"][rows, target], True)
 
 
 def value_targets(env, gamma, device):
@@ -120,6 +118,7 @@ def bc_loss(model, obs, labels, legal, target, vf_coef, smooth=0.0):
     with torch.autocast("cuda", torch.bfloat16):
         out = model(obs)
     dist = ActionDist(out, obs)
+    legal = legal & (labels[:, 0] < dist.type.logits.shape[-1])  # rows this network's actions can express
     safe = torch.where(legal[:, None], labels, torch.zeros_like(labels))  # other rows: a no-op
     nll = -(dist.log_prob(safe, smooth=smooth) * legal).sum() / len(legal)
     value = out["value"].float()
@@ -146,6 +145,8 @@ class Meter:
 def measure(m, obs, labels, legal, dist, value, target, gates=None):
     """For one batch:
     - label statistics;
+    - rows a network cannot express (a type it lacks) are left out of its scores and counted (labels/beyond_net), so
+      networks with different action sets are not comparable on bc/nll;
     - accuracy and NLL per head. bc/nll and the troop heads' bc/*_bin are like for like for every network: a
       100-share network's shares are summed into the five sizes' ranges (SIZE_OF). Its own 100-share NLL is
       bc/nll_shares, with bc/nll_*_share per head;
@@ -153,14 +154,19 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
       hit: the chance it falls within NEAR_TILES (bc/*_cell_near) and its expected distance in tiles (bc/*_cell_dist);
     - NLL per bucket (game phase and map size);
     - the router's mean weight per expert and bucket, for MoE networks."""
-    t = labels[:, 0]
-    safe = torch.where(legal[:, None], labels, torch.zeros_like(labels))  # rows outside the loss: a no-op
-    _, cell, tgt, b = safe.unbind(1)
-    n, nl = len(t), legal.sum()
-    logp = dist.log_prob(safe, sizes=True)
+    t, n = labels[:, 0], len(labels)
     m.add("labels/out_of_set", (t == -1).sum(), n)
     m.add("labels/unmapped", (t == -2).sum(), n)
     m.add("labels/illegal", ((t >= 0) & ~legal).sum(), n)
+    for k, name in enumerate(ACT_NAMES):
+        m.add(f"labels/{name}", (t == k).sum(), n)
+    n_types = dist.type.logits.shape[-1]
+    m.add("labels/beyond_net", (legal & (t >= n_types)).sum(), n)
+    legal = legal & (t < n_types)  # rows this network's actions can express
+    nl = legal.sum()
+    safe = torch.where(legal[:, None], labels, torch.zeros_like(labels))  # rows outside the loss: a no-op
+    _, cell, tgt, b = safe.unbind(1)
+    logp = dist.log_prob(safe, sizes=True)
     m.add("labels/noop", ((t == 0) & legal).sum(), nl)
     m.add("bc/nll", -(logp * legal).sum(), nl)
     if dist.shares:
@@ -169,7 +175,7 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     m.add("bc/type_acc", ((dist.type.logits.argmax(1) == t) & legal).sum(), nl)
     m.add("bc/act_rate_human", ((t > 0) & legal).sum(), nl)
     m.add("bc/act_rate_policy", ((1 - dist.type.probs[:, 0]) * legal).sum(), nl)
-    lc = dist.cells.log_prob(cell[:, None].expand(-1, 3))  # [N, maps]
+    lc = dist.cells.log_prob(cell[:, None].expand(-1, dist.cells.logits.shape[1]))  # [N, maps]
     rows = legal & (t == ATTACK)
     m.add("bc/attack_target_acc", ((dist.ptr.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
     m.add("bc/nll_attack_target", -(dist.ptr.log_prob(tgt) * rows).sum(), rows.sum())
@@ -186,14 +192,18 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     w = obs["spatial"].shape[-1]
     side = 8 * obs["scalars"][:, 14:15].clamp(min=0).sqrt()  # tiles per cell side: 8 on Normal maps, 4 on Compact
     tiles = torch.hypot((every // w - cell[:, None] // w).float(), (every % w - cell[:, None] % w).float()) * side
-    for typ, name in ((SPAWN, "spawn"), (BOAT, "boat"), (BUILD, "city")):
-        rows = legal & (t == typ)
-        hit = dist.cells.logits[:, CELL_HEAD[typ]].argmax(1) == cell
+    for k in range(dist.cells.logits.shape[1]):  # the network's heat maps; the first three keep their old names
+        name, rows = MAP_NAMES[k], legal & (t == MAP_TYPES[k])
+        hit = dist.cells.logits[:, k].argmax(1) == cell
         m.add(f"bc/{name}_cell_acc", (hit & rows).sum(), rows.sum())
-        m.add(f"bc/nll_{name}_cell", -(lc[:, CELL_HEAD[typ]] * rows).sum(), rows.sum())
-        p = dist.cells.probs[:, CELL_HEAD[typ]]  # [N, cells]
+        m.add(f"bc/nll_{name}_cell", -(lc[:, k] * rows).sum(), rows.sum())
+        p = dist.cells.probs[:, k]  # [N, cells]
         m.add(f"bc/{name}_cell_near", ((p * (tiles <= NEAR_TILES)).sum(1) * rows).sum(), rows.sum())
         m.add(f"bc/{name}_cell_dist", ((p * tiles).sum(1) * rows).sum(), rows.sum())
+    if dist.retreat is not None:
+        rows = legal & (t == RETREAT)
+        m.add("bc/retreat_target_acc", ((dist.retreat.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
+        m.add("bc/nll_retreat_target", -(dist.retreat.log_prob(tgt) * rows).sum(), rows.sum())
     phase = torch.where(obs["scalars"][:, 1] > 0, 0, 1 + (obs["scalars"][:, 0] * 3).long().clamp(max=2))
     buckets = {name: phase == i for i, name in enumerate(PHASES)}
     normal = obs["scalars"][:, 14] > 0.5  # tiles per cell / 64: Normal maps 1, Compact 0.25
