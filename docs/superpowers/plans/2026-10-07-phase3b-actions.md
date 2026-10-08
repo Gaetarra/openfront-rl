@@ -32,6 +32,9 @@ Older networks keep playing with their five actions.
 ("Observations": nukes in flight, coverage, silo readiness, unit costs) are Part 2, a separate task list. The BC refresh
 (3B step 4) comes after both.
 
+**Status (2026-10-08):** reviewed by the user (answers under "Decisions"); not started. Execution: native (inline),
+with a self-review at the end. Before Task 1, run the three-network rescore if it hasn't run (PLAN 3B, "Results").
+
 ## Game facts this plan relies on (checked in v0.34.23)
 
 - **Intents** (`src/core/Schemas.ts`):
@@ -55,18 +58,22 @@ Older networks keep playing with their five actions.
 - **Test record:** `bridge/testdata/ranked1v1.json.gz` holds cities, factories, a port, silos, atom bombs and defense
   posts, but no SAM, warship, hydrogen bomb, upgrade or cancel. Those labels are tested on a live scripted game.
 
-## Choices to confirm (not fixed by PLAN)
+## Decisions (the user's answers, 2026-10-08)
 
-1. Retreat gets its own pointer (a second query over the player tokens), not the attack pointer: "which attack to
-   cancel" is a different question from "whom to attack".
-2. Nuke heat maps allow every map cell that is less than half own or friendly land. That rules out self-nukes, which
-   the game allows.
-3. An upgrade raises the own upgradable structure in the chosen cell. A cell holds at most one structure, because of
-   the 15-tile spacing.
-4. A cell action stays legal only while its heat map has a legal cell. That cuts invalid actions (Gate 3B: < 1%).
-5. New networks are arch v4: 15 actions and 100 troop shares. v1–v3 keep 5 actions and 3 heat maps.
-6. A network is scored on the rows its actions can express. Networks with different action sets therefore aren't
-   comparable on `bc/nll`; the match decides, as Gate 3B does.
+1. **Retreat gets its own pointer** (a second query over the player tokens), not the attack pointer. "Which attack to
+   cancel" differs from "whom to attack", and retreating is how troops get moved to where they are needed (user).
+2. **Self-nukes stay legal** (user). Top players nuke their own buildings before a capture, so the enemy gains nothing
+   from them, and an over-extended front leaves their own land open.
+   - The game refuses only a teammate's land (`nukeSpawn`). `isOnSameTeam` is false for oneself, and allies are not
+     teammates.
+   - So the nuke heat maps allow every cell except those mostly held by friends.
+3. An upgrade raises the seat's upgradable structure in the chosen cell. That is a fact, not a choice: the 15-tile
+   spacing leaves at most one structure per cell.
+4. **A cell action is legal only while its heat map has a legal cell**, which rules out illegal actions (Gate 3B:
+   invalid actions < 1%).
+5. **New networks are arch v4**: 15 actions and 100 troop shares. v1–v3 keep 5 actions and 3 heat maps.
+6. **A network is scored on the rows its actions can express**, so networks with different action sets aren't
+   comparable on `bc/nll`. Gate 3B is judged on match strength (user).
 
 ## Global Constraints
 
@@ -88,9 +95,10 @@ Older networks keep playing with their five actions.
 1. **Old networks in the new game.** The v1–v3 clones are the opponents of every 3B match. They must sample only their
    5 types and 3 maps. Tests: `test_old_networks_see_only_their_own_actions` and
    `test_old_and_new_networks_play_each_other` (v4 against v1).
-2. **Nukes and warships that the game refuses** (spawn immunity, no ready silo, no port in that water body) are masked
-   or dropped as counted no-ops, never thrown. Test: bridge "nukes need a ready silo and no spawn immunity; warships a
-   finished port".
+2. **Nukes and warships that the game refuses** (spawn immunity, no ready silo, a teammate's land, no port in that
+   water body) are masked or dropped as counted no-ops, never thrown. Self-nukes stay legal (the user's decision).
+   Tests: bridge "nukes need a ready silo and no spawn immunity; warships a finished port" (it decodes a self-nuke too)
+   and `test_a_cell_action_is_legal_only_with_a_legal_cell` (own cells on the atom map).
 3. **An upgrade of a structure still under construction, or one the seat can't afford**, is refused through
    `canUpgradeUnit`. Test: bridge "an upgrade raises the seat's structure in the chosen cell".
 4. **Stale targets:** an attack that ended between the observation and the decision (latency up to 3 turns), or an
@@ -197,6 +205,7 @@ test("nukes need a ready silo and no spawn immunity; warships a finished port", 
   const { intent, valid } = decode(env, seat, [Act.AtomBomb, env.frame.cellOf(ownTile(enemy)), 0, 0]);
   assert.ok(valid);
   assert.equal(intent?.type === "build_unit" && intent.unit, UnitType.AtomBomb);
+  assert.ok(decode(env, seat, [Act.AtomBomb, env.frame.cellOf(ownTile(seat)), 0, 0]).valid, "self-nukes stay legal");
   assert.equal(m.types[Act.BuildWarship], 0, "no port");
   const shore = [...seat.tiles()].find((t) => env.game.isShore(t));
   assert.ok(shore !== undefined, "the scripted seat reaches a coast on this seed");
@@ -578,9 +587,13 @@ git commit -m "Extractor: every command ranked players give maps to an action la
                 self.assertEqual(obs["retreat_mask"].shape, obs["attack_mask"].shape)
                 self.assertFalse((obs["type_mask"][:, list(MAP_TYPES)] & ~obs["cell_mask"].any(-1)).any())
                 env.step(policy(obs))
+            own = obs["spatial"][:, OWN].flatten(1) > 0
+            self.assertTrue((obs["cell_mask"][:, 9] & own).any(), "the atom map keeps own cells: self-nukes stay legal")
         finally:
             env.close()
 ```
+
+(`OWN` joins the import from `trainer.env`.)
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -612,7 +625,7 @@ In `_observe`:
 ```python
         mine, shore = x[:, OWN] > 0, x[:, SHORE] > 0
         upgradable = (x[:, BUILDINGS:BUILDINGS + 4 * UPGRADABLE].unflatten(1, (UPGRADABLE, 4))[:, :, 0] > 0).any(1)
-        nukable = x[:, OWN] + x[:, OWN + 1] < 0.5  # less than half own or friendly land: no self-nukes
+        nukable = x[:, OWN + 1] < 0.5  # not mostly a friend's land; self-nukes stay legal (the user, 2026-10-08)
         cell_mask = torch.stack([x[:, UNOWNED] > 0, shore & (x[:, LAND] - x[:, OWN] > 1e-6),  # spawn, boat
                                  mine, mine, mine, mine, mine & shore, mine,  # city, defense post, silo, factory, port, SAM
                                  x[:, OCEAN] > 0, nukable, nukable, upgradable], 1) & valid[:, None]  # warship, nukes, upgrade
@@ -1201,8 +1214,8 @@ In 3B, under "Actions", add:
     - masks in the bridge (types) and on the GPU (cells); a cell type needs a legal cell;
     - the extractor labels every command except diplomacy, chat, warship moves and MIRVs;
     - the v1–v3 networks keep their 5 types and 3 maps;
-    - choices: retreat has its own pointer; nukes may target cells under half own or friendly land; an upgrade raises
-      the seat's structure in the chosen cell.
+    - decisions (the user, 2026-10-08): retreat has its own pointer; self-nukes stay legal (a nuke may hit any cell
+      but a friend's); a cell action needs a legal cell; Gate 3B is judged on match strength.
 ```
 
 - [ ] **Step 3: Commit**

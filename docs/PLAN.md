@@ -815,8 +815,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - Reading: a small gain in NLL (−0.006 overall, −0.038 on attack sizes) gave a large gain in play. Sizing an
         attack to its target decides fights, yet it is a small part of the loss, so NLL understates such decisions.
         The user expected a big leap. My caution (a modest gain under imitation) was wrong.
-      - Next: the SwiGLU twin's own night (`--run bc3b-moe-swiglu --core moe-swiglu`, started 2026-10-07 14:09), then
-        step 3.
+      - The twin's own night (`bc3b-moe-swiglu`) ran 2026-10-07 14:09 → 2026-10-08 04:17: all 24,981 updates in one
+        sitting.
+        - It survived one driver event (nvlddmkm id 13, not the fatal 153).
+        - Its checkpoint holds 16.3M parameters (195 MB).
+      - **Next:** one scoring run of the three networks (~10 min, needs the user's go):
+        `--score checkpoints/bc3-moe/latest.pt checkpoints/bc3b/latest.pt checkpoints/bc3b-moe-swiglu/latest.pt`.
+        - It decides the experts' keep rule on `bc/nll_shares`, within 0.02. Their PPO speed already passed: 98% of
+          the MoE core.
+        - It also gives the closeness numbers.
       - The heat maps are also scored by closeness (the user's suggestion, 2026-10-07). Exact-cell accuracy and NLL
         treat a near miss like a far one, so two closeness numbers are added:
         - `bc/*_cell_near`: the chance the bot's cell lands within 16 tiles of the human's;
@@ -838,6 +845,16 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - 92% of upgrades were by one level, and upgrades are 0.3% of commands.
     - Left out of the loss: alliances, embargo, emoji, chat, donations, cancel boat, warship moves and MIRV (0.4% of 1v1
       commands).
+    - **Task list, part 1**, `docs/superpowers/plans/2026-10-07-phase3b-actions.md`: written 2026-10-07, reviewed by
+      the user 2026-10-08, not started.
+      - Decisions:
+        - retreat gets its own pointer;
+        - **self-nukes stay legal**: top players nuke their own buildings before a capture, so the enemy gets nothing,
+          and an over-extended front leaves their own land open. The game refuses only a teammate's land;
+        - a cell action is legal only while its heat map has a legal cell;
+        - new networks are arch v4;
+        - Gate 3B is judged on match strength, and a network is scored only on the rows its actions can express.
+      - Part 2, the observations, is still to be written.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
     GPU from the channels. The exact check stays in the worker, and failures are counted no-ops.
   - **Observations**: nukes in flight and their targets, SAM and defense-post coverage, silo readiness, and unit costs

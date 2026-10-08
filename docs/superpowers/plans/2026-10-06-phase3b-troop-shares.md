@@ -31,6 +31,17 @@ network with SwiGLU experts trains on the same windows, ready for one night.
 second network in the same night". The 3B order puts this second: "the troop shares with a second network, in one
 night".
 
+**Outcome (2026-10-08): done.**
+- Tasks 1–8 are in `phase3` (d6d4530..3dbb21e). Later fixes:
+  - a new run refuses an existing run's folder, and a resume hides a crash's tail from the curves (e442fbb);
+  - heat maps are scored by closeness (4487e7d).
+- R1 passed: 0.8425 against 0.8430.
+- R2: the pair trained at 71% of one network's speed, so the twin got its own night.
+- The bc3b night crashed once (GPU driver) and resumed from update 5000.
+- R4: `bc/nll` 0.8425 → 0.8364. R5: 0.660 against the 3A clone, so the shares stay.
+- The twin (`bc3b-moe-swiglu`) finished 2026-10-08 04:17. Its rescore with the other two is still to run (PLAN 3B,
+  "Results").
+
 ## Global Constraints
 
 - No edits inside `OpenFront_Source_Code/openfrontio/`, and no new dependencies.
