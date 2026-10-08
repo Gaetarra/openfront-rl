@@ -11,7 +11,7 @@ import torch
 from trainer.control import REPLAYS
 from trainer.env import ONION
 from trainer.eval import Cooldown, label, main, name_players, play, replay_dir, seats_for, summarize, tag, two_bin_sample
-from trainer.model import ActionDist, new_net
+from trainer.model import SPAWN, ActionDist, new_net
 from trainer.test_model import DIMS
 
 ONION2 = {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1}
@@ -167,6 +167,19 @@ def dist(n, type_logits, legal_types):
 
 class TwoBinTest(unittest.TestCase):
     """The upward probe of the bandwidth test (PLAN 3B): one troop and one gold action per decision."""
+
+    def test_the_gold_bin_takes_every_gold_action(self):
+        torch.manual_seed(0)
+        n = 2000
+        out = {"type": torch.full((n, 15), -30.0), "maps": torch.zeros(n, 12, 4), "ptr": torch.zeros(n, 3),
+               "retreat": torch.zeros(n, 3), "bins": torch.zeros(n, 2, 5)}
+        out["type"][:, [0, 6]] = 0.0  # no-op or a silo, half each
+        obs = {"type_mask": torch.ones(n, 15, dtype=torch.bool), "cell_mask": torch.ones(n, 12, 4, dtype=torch.bool),
+               "attack_mask": torch.ones(n, 3, dtype=torch.bool), "retreat_mask": torch.ones(n, 3, dtype=torch.bool)}
+        obs["type_mask"][:, SPAWN] = False
+        a = two_bin_sample(ActionDist(out, obs), obs)
+        self.assertAlmostEqual((a[:, 4] == 6).float().mean().item(), 0.5, delta=0.04)
+        self.assertEqual(a[:, 0].abs().sum().item(), 0, "no troop action has any weight")
 
     def test_each_kind_of_action_keeps_its_own_probability_and_both_can_happen_together(self):
         torch.manual_seed(0)

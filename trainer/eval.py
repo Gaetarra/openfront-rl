@@ -18,12 +18,13 @@ import torch
 
 from trainer.control import REPLAYS
 from trainer.env import ONION, RANKED_1V1, VecEnv
-from trainer.model import ATTACK, BOAT, BUILD, SPAWN, ActionDist, RandomPolicy, load_net
+from trainer.model import ATTACK, BOAT, BUILD, RETREAT, SPAWN, ActionDist, RandomPolicy, load_net
 from trainer.ppo import game_commit
 
 SETUPS = {"onion": ONION, "ranked1v1": RANKED_1V1}
 RESULTS = Path(__file__).resolve().parents[1] / "runs" / "eval"  # every match's result, as runs/score/ for BC
-TROOP_TYPES, GOLD_TYPES = [ATTACK, BOAT], [BUILD]  # the two kinds of action the bins would split (PLAN decision 11)
+TROOP_TYPES = [ATTACK, BOAT, RETREAT]  # the two kinds of action the bins would split (PLAN decision 11)
+GOLD_TYPES = list(range(BUILD, RETREAT))  # the nine builds and upgrade
 
 
 def summarize(results):
@@ -114,22 +115,22 @@ def load_policy(spec, dims, device="cuda", two_bins=False):
 
 
 def two_bin_sample(dist, obs):
-    """The upward probe of the bandwidth test (PLAN 3B): per decision a troop action (attack, boat or no-op) and then a
-    gold action (city or no-op), [n, 8]. Each kind keeps the policy's own probability, as bins trained by imitation
-    would, so the bot acts as often as before and only acting in parallel is new. In the spawn phase the first action
-    is an ordinary sample and the second a no-op."""
+    """The upward probe of the bandwidth test (PLAN 3B): per decision a troop action (attack, boat, retreat or no-op)
+    and then a gold action (a build, a nuke, an upgrade or no-op), [n, 8]. Each kind keeps the policy's own
+    probability, as bins trained by imitation would, so the bot acts as often as before and only acting in parallel
+    is new. In the spawn phase the first action is an ordinary sample and the second a no-op."""
     p = dist.type.probs
     u = torch.rand(len(p), 2, device=p.device)
-    troop = torch.where(u[:, 0] < p[:, ATTACK], ATTACK, torch.where(u[:, 0] < p[:, ATTACK] + p[:, BOAT], BOAT, 0))
-    gold = torch.where(u[:, 1] < p[:, BUILD], BUILD, 0)
-    cells, target, zero = dist.cells.sample(), dist.ptr.sample(), torch.zeros_like(troop)
-    pct = dist.troop_sample(target, cells[:, 1])
-    first = torch.stack([troop, torch.where(troop == BOAT, cells[:, 1], zero),
-                         torch.where(troop == ATTACK, target, zero),
-                         torch.where(troop == ATTACK, pct[:, 0], torch.where(troop == BOAT, pct[:, 1], zero))], 1)
-    second = torch.stack([gold, torch.where(gold == BUILD, cells[:, 2], zero), zero, zero], 1)
+    first, second = dist.complete(pick(p, TROOP_TYPES, u[:, 0])), dist.complete(pick(p, GOLD_TYPES, u[:, 1]))
     single = torch.cat([dist.sample(), torch.zeros_like(first)], 1)
     return torch.where(obs["type_mask"][:, SPAWN, None], single, torch.cat([first, second], 1))
+
+
+def pick(probs, kinds, u):
+    """Per row, one of `kinds` with the policy's own probability of it (u uniform in [0, 1)), else no-op (0)."""
+    kinds = [k for k in kinds if k < probs.shape[1]]
+    i = (u[:, None] >= probs[:, kinds].cumsum(1)).sum(1)
+    return torch.tensor(kinds + [0], device=probs.device)[i]
 
 
 class Cooldown:
@@ -158,7 +159,8 @@ class Cooldown:
         probs = getattr(self.policy, "type_probs", None)
         both = torch.zeros_like(acted)
         if probs is not None:
-            both = (probs[:, TROOP_TYPES].sum(1) >= 0.25) & (probs[:, GOLD_TYPES].sum(1) >= 0.25)
+            troop, gold = ([k for k in kinds if k < probs.shape[1]] for kinds in (TROOP_TYPES, GOLD_TYPES))
+            both = (probs[:, troop].sum(1) >= 0.25) & (probs[:, gold].sum(1) >= 0.25)
         for key, rows in (("decisions", live), ("acted", acted), ("parallel", live & (actions > 1)),
                           ("follows", acted & self.prev), ("wanted", wanted), ("blocked", blocked),
                           ("both", both & live)):
