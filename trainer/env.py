@@ -34,6 +34,11 @@ BUILDINGS = 17  # 17..48: BUILDING_TYPES x relation (self, friendly, enemy, bot)
 BUILDING_TYPES = ("City", "Port", "Factory", "Missile Silo", "SAM Launcher", "Defense Post", "Transport", "Warship")
 N_CHANNELS = BUILDINGS + 4 * len(BUILDING_TYPES)
 DENSITY_FEATURE = 16  # player feature: log troops per tile
+# The action type of each heat map (bridge/actions.ts Act): spawn, boat, the nine builds (city, defense post, silo,
+# factory, port, SAM, warship, atom bomb, hydrogen bomb) and upgrade. Networks before 3B step 3 have the first three.
+MAP_TYPES = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+UPGRADABLE = 5  # BUILDING_TYPES[:5] (city, port, factory, silo, SAM) can be upgraded
+BUILD_OF = (4, 8, 7, 6, 9)  # their build actions: an upgrade needs the gold to build another one (canUpgradeUnit)
 
 
 def quantize_(x):
@@ -200,6 +205,7 @@ class VecEnv:
         scalars = np.empty((E, S, K), np.float32)
         types = np.empty((E, S, T), bool)
         attack = np.empty((E, S, P), bool)
+        retreat = np.empty((E, S, P), bool)
         labels = np.zeros((E, S, 4), np.int64)
         cells, units, infos, resets = [], [], [], []
         e = 0
@@ -235,11 +241,12 @@ class VecEnv:
                 scalars[e] = np.frombuffer(b["scalars"], np.float32).reshape(S, K)
                 types[e] = np.frombuffer(b["types"], np.uint8).reshape(S, T)
                 attack[e] = np.frombuffer(b["attack"], np.uint8).reshape(S, P)
+                retreat[e] = np.frombuffer(b["retreat"], np.uint8).reshape(S, P)
                 e += 1
         if self.replay:
             self.labels = torch.from_numpy(labels.reshape(-1, 4)).to(self.device)
         self._apply_cells(resets, cells)
-        obs = self._observe(players, rel, scalars, types, attack, units)
+        obs = self._observe(players, rel, scalars, types, attack, retreat, units)
         return obs, rewards.reshape(-1), dones.reshape(-1), infos, invalid.reshape(-1)
 
     def _apply_cells(self, resets, cells):
@@ -255,14 +262,14 @@ class VecEnv:
         for name, t in (("o1", self.o1), ("o2", self.o2), ("n1", self.n1), ("n2", self.n2), ("fo", self.fo)):
             t[idx] = torch.from_numpy(rec[name].astype(np.int64 if name[0] == "o" else np.float32)).to(dev)
 
-    def _observe(self, players, rel, scalars, types, attack, units):
+    def _observe(self, players, rel, scalars, types, attack, retreat, units):
         """The model's inputs, one row per seat:
         - "spatial": uint8 [N, N_CHANNELS, H, W], in 64ths;
         - "players": [N, P, F + len(BUILDING_TYPES)], the worker's features, then the player's buildings by type
           (log1p of their summed values, / 3);
         - "owners" (int16) and "owner_land" (uint8) [N, 2, H * W]: each cell's two largest owners and their shares of
           it in 64ths, for the model's per-player map features;
-        - the scalars and the masks."""
+        - the scalars and the masks: 15 action types, 12 heat maps (MAP_TYPES), the attack and retreat pointers."""
         N, S, P, hw, dev = self.N, self.S, self.P, self.H * self.W, self.device
         row_env = torch.arange(N, device=dev) // S
         area = self.area[row_env][:, None]  # [N, 1]
@@ -291,29 +298,38 @@ class VecEnv:
         x[:, OWN:OWN + 4] = own
         x[:, UNOWNED] = (x[:, LAND] - own.sum(1)).clamp(min=0)
         x[:, FALLOUT] = self.fo[flat] / area
-        buildings = self._add_units(x, units, rel_t)
-        cell_mask = torch.stack([x[:, UNOWNED] > 0,
-                                 (x[:, SHORE] > 0) & (x[:, LAND] - x[:, OWN] > 1e-6),
-                                 x[:, OWN] > 0], 1) & valid[:, None]
+        type_mask = torch.from_numpy(types.reshape(N, self.T)).to(dev)
+        buildings, upgradable = self._add_units(x, units, rel_t, type_mask[:, list(BUILD_OF)] > 0)
+        mine, shore = x[:, OWN] > 0, x[:, SHORE] > 0
+        nukable = x[:, OWN + 1] < 0.5  # not mostly a friend's land; self-nukes stay legal (the user, 2026-10-08)
+        cell_mask = torch.stack([
+            x[:, UNOWNED] > 0, shore & (x[:, LAND] - x[:, OWN] > 1e-6),  # spawn, boat
+            mine, mine, mine, mine, mine & shore, mine,  # city, defense post, silo, factory, port, SAM
+            x[:, OCEAN] > 0, nukable, nukable, upgradable,  # warship, atom and hydrogen bombs, upgrade
+        ], 1) & valid[:, None]
+        type_mask[:, list(MAP_TYPES)] &= cell_mask.any(-1)  # a cell action needs a legal cell on its heat map
         return {
             "spatial": quantize_(x).view(N, N_CHANNELS, self.H, self.W),
             "scalars": torch.from_numpy(scalars.reshape(N, self.K)).to(dev),
             "players": torch.cat([pl, torch.log1p(buildings[row_env]) / 3], 2),
             "owners": torch.stack(owners, 1).to(torch.int16),
             "owner_land": quantize_(torch.stack(shares, 1)),
-            "type_mask": torch.from_numpy(types.reshape(N, self.T)).to(dev),
+            "type_mask": type_mask,
             "attack_mask": torch.from_numpy(attack.reshape(N, P)).to(dev),
+            "retreat_mask": torch.from_numpy(retreat.reshape(N, P)).to(dev),
             "cell_mask": cell_mask,
         }
 
-    def _add_units(self, x, units, rel_t):
+    def _add_units(self, x, units, rel_t, afford):
         """Paints each seat's buildings into x by type and relation, and returns every player's buildings by type
         [E, P, len(BUILDING_TYPES)]. A structure counts its level (under construction: 1), a transport its log troops
-        / 10, a warship 1."""
+        / 10, a warship 1. Also returns the upgrade map [N, H·W]: each seat's finished buildings of the types it can
+        afford (afford [N, UPGRADABLE]), the game's canUpgradeUnit."""
         buildings = torch.zeros(self.E, self.P, len(BUILDING_TYPES), device=self.device)
+        upgradable = torch.zeros(self.N, self.H * self.W, dtype=torch.bool, device=self.device)
         rec = np.concatenate([u for _, u in units])
         if len(rec) == 0:
-            return buildings
+            return buildings, upgradable
         dev = self.device
         env = torch.from_numpy(np.concatenate([np.full(len(u), e, np.int64) for e, u in units])).to(dev)
         typ = torch.from_numpy(rec["type"].astype(np.int64)).to(dev)
@@ -330,4 +346,7 @@ class VecEnv:
             r = rel_t[row, owner]
             k = keep & (r > 0)
             x.index_put_((row[k], BUILDINGS + 4 * kind[k] + r[k] - 1, cell[k]), value[k], accumulate=True)
-        return buildings
+            up = keep & (r == 1) & (kind < UPGRADABLE) & (level > 0)  # own, finished, upgradable
+            up &= afford[row, kind.clamp(0, UPGRADABLE - 1)]  # and the gold to build another of its type
+            upgradable[row[up], cell[up]] = True
+        return buildings, upgradable

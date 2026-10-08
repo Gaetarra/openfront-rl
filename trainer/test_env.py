@@ -4,8 +4,9 @@ import unittest
 import numpy as np
 import torch
 
-from trainer.env import (BUILDING_TYPES, BUILDINGS, LAND, N_CHANNELS, OWN, OWNER, OWNER_FEATURES, RANKED_1V1, ROOT,
-                         VALID, VecEnv, quantize_)
+from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, LAND, MAP_TYPES, N_CHANNELS, OWN, OWNER, OWNER_FEATURES,
+                         RANKED_1V1, ROOT, UPGRADABLE, VALID, VecEnv, quantize_)
+from trainer.eval import Scripted
 from trainer.model import v1_spatial
 
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
@@ -93,7 +94,7 @@ class VecEnvTest(unittest.TestCase):
             self.assertEqual(obs["players"].shape, (2, 5, 25))
             self.assertEqual((obs["owners"].shape, obs["owners"].dtype), ((2, 2, 64 * 64), torch.int16))
             self.assertEqual(obs["owner_land"].dtype, torch.uint8)
-            self.assertEqual(obs["cell_mask"].shape, (2, 3, 64 * 64))
+            self.assertEqual(obs["cell_mask"].shape, (2, len(MAP_TYPES), 64 * 64))
             self.assertTrue(obs["cell_mask"][:, 0].any(), "spawn cells exist at the start")
             rng = np.random.default_rng(0)
             for _ in range(80):
@@ -102,6 +103,22 @@ class VecEnvTest(unittest.TestCase):
                 self.assertTrue(torch.isfinite(x).all())
                 self.assertLessEqual(float(x[:, LAND:OWN + 4].max()), 1.0 + 1e-3)
             self.assertGreater(float(obs["spatial"][:, OWN].float().sum()), 0, "the seats own land")
+        finally:
+            env.close()
+
+    def test_a_cell_action_is_legal_only_with_a_legal_cell(self):
+        env = VecEnv(ONION, workers=1, games_per_worker=2, seed="masks")
+        try:
+            policy = Scripted()
+            for _ in range(80):  # the spawn phase and some 25 s after it
+                obs = env.obs
+                self.assertEqual(obs["type_mask"].shape[1], 15)
+                self.assertEqual(obs["cell_mask"].shape[1], len(MAP_TYPES))
+                self.assertEqual(obs["retreat_mask"].shape, obs["attack_mask"].shape)
+                self.assertFalse((obs["type_mask"][:, list(MAP_TYPES)] & ~obs["cell_mask"].any(-1)).any())
+                env.step(policy(obs).cpu().numpy())
+            own = obs["spatial"][:, OWN].flatten(1) > 0
+            self.assertTrue((obs["cell_mask"][:, 9] & own).any(), "the atom map keeps own cells: self-nukes stay legal")
         finally:
             env.close()
 
@@ -192,14 +209,24 @@ class ChannelTest(unittest.TestCase):
     def setUpClass(cls):
         env = VecEnv(RANKED_1V1, workers=1, games_per_worker=1, seed="channels", records=[FIXTURE])
         cls.seen, cls.legacy_error = None, 0.0
+        cls.upgrade = np.zeros(3, int)  # wrong cells, open cells, own buildings left shut
         structures = [env.dims["unitTypes"].index(t) for t in BUILDING_TYPES[:6]]
 
         def keep(args, obs):
-            players, rel, _, _, _, units = args
+            players, rel, _, types, _, _, units = args
             old = phase2_spatial(env, players, rel, units).to(torch.bfloat16).float()
             new = v1_spatial(obs["spatial"]).to(torch.bfloat16).float() / 64  # what PolicyV1 reads
             cls.legacy_error = max(cls.legacy_error, float((new - old).abs().max()))
             rec = np.concatenate([u for _, u in units])
+            for seat in range(2):  # the upgrade map: own, finished buildings whose type the seat can afford
+                want, shut = np.zeros(env.H * env.W, bool), np.zeros(env.H * env.W, bool)
+                for u in rec:
+                    name = env.dims["unitTypes"][u["type"]]
+                    if name in BUILDING_TYPES[:UPGRADABLE] and rel[0][seat][u["owner"]] == 1:
+                        ok = u["level"] > 0 and types[0][seat][BUILD_OF[BUILDING_TYPES.index(name)]] > 0
+                        (want if ok else shut)[u["cell"]] = True
+                got = obs["cell_mask"][seat, MAP_TYPES.index(13)].cpu().numpy()
+                cls.upgrade += [int((got != want).sum()), int(want.sum()), int((shut & ~want).sum())]
             n = int(np.isin(rec["type"], structures).sum())
             if cls.seen is None or n >= cls.seen["structures"]:  # keep the observation with the most structures
                 cls.seen = {"structures": n, "players": players[0].copy(), "rel": rel[0].copy(), "units": rec.copy(),
@@ -218,6 +245,12 @@ class ChannelTest(unittest.TestCase):
 
     def test_old_networks_get_the_phase2_inputs(self):
         self.assertLessEqual(self.legacy_error, 1 / 32)  # 1/64 rounding of up to 3 summed channels, then bf16
+
+    def test_the_upgrade_map_opens_exactly_the_upgradable_buildings(self):
+        wrong, opened, shut = self.upgrade
+        self.assertEqual(wrong, 0)
+        self.assertGreater(opened, 0, "a building the seat could upgrade was seen")
+        self.assertGreater(shut, 0, "an own building it could not upgrade (unfinished or unaffordable) was seen")
 
     def test_owner_and_building_channels_follow_their_definitions(self):
         s = self.seen
