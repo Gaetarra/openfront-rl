@@ -884,8 +884,9 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         | MIRVs | 0.006% |
         | deleted units | 0.004% |
 
-        Proposed (the user's call): read Gate 3B's coverage on all held-out records (0.40%, passed). Which games the
-        228-game subset holds moves it by ±0.15 points.
+        **Decided by the user (2026-10-09): Gate 3B's coverage is read on all held-out records: 0.40%, passed.** Which
+        games the 228-game subset holds moves it by ±0.15 points. `scripts/coverage.py` gives the number in seconds,
+        and `trainer/test_env.py` checks it against the extractor's labels on the fixture record.
       - Decisions:
         - retreat gets its own pointer;
         - **self-nukes stay legal**: top players nuke their own buildings before a capture, so the enemy gets nothing,
@@ -913,8 +914,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - **Extractor**: every intent type is mapped. A wrapper masks the new types for 5-action checkpoints. Then a BC
     refresh.
   - **Gate 3B**:
-    - commands outside the action set < 0.5% (0.60% on the score's rows, 0.40% on all held-out records: see the
-      coverage check);
+    - commands outside the action set < 0.5%: **passed**, 0.40% on all held-out records (`scripts/coverage.py`; the
+      user's reading, 2026-10-09; 0.60% on the score's 228 games);
     - invalid actions < 1%;
     - 1,000 ranked games without errors;
     - beats the 3A clone ≥ 0.545;

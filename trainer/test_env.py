@@ -1,4 +1,6 @@
 import collections
+import gzip
+import json
 import unittest
 
 import numpy as np
@@ -6,6 +8,7 @@ import torch
 
 from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, LAND, MAP_TYPES, N_CHANNELS, OWN, OWNER, OWNER_FEATURES,
                          RANKED_1V1, ROOT, UPGRADABLE, VALID, VecEnv, quantize_)
+from scripts.coverage import label_kinds
 from trainer.eval import Scripted
 from trainer.model import v1_spatial
 
@@ -192,6 +195,22 @@ class VecEnvTest(unittest.TestCase):
             self.assertEqual(len(env.seats_of[0]), 2)
         finally:
             env.close()
+
+    def test_the_coverage_script_counts_the_commands_the_extractor_labels(self):
+        kinds = label_kinds(json.loads(gzip.decompress(FIXTURE.read_bytes())))
+        env = VecEnv(RANKED_1V1, workers=1, games_per_worker=1, seed="coverage", records=[FIXTURE])
+        try:
+            passes, commands, outside = 0, 0, 0
+            while passes < 2:  # a slot's first record starts at a random window, the next one at window 0
+                if passes == 1:
+                    t = env.labels[:, 0]
+                    commands += int((t != 0).sum())
+                    outside += int((t == -1).sum())
+                passes += sum("record" in i for i in env.step()[3])
+        finally:
+            env.close()
+        self.assertEqual((commands, outside), (len(kinds), sum(k != "in" for k in kinds)))
+        self.assertEqual(outside, 1, "the fixture's one alliance request")
 
 
 

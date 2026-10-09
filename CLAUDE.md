@@ -50,6 +50,7 @@ node node_modules/typescript/bin/tsc -p ../../tsconfig.json    # typecheck bridg
 npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a real record (run from the game dir)
 npx tsx ../../scripts/troop_shares.ts 60                    # share of their troops humans send per attack/boat, 60 replayed records (~10 min, game dir)
 .venv/Scripts/python scripts/bench_gpu.py                   # GPU encoder throughput (run from the repo root)
+.venv/Scripts/python scripts/coverage.py                    # Gate 3B's coverage: commands outside the 15 actions over all held-out records (seconds)
 .venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s and peak VRAM (Phase 2, 3B MoE, 3B SwiGLU experts), BC rows/s of one network and of a twin pair (~20 min, PC idle)
 ```
 
