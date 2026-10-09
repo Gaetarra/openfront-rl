@@ -1,7 +1,9 @@
 import { Game, Player, PlayerType, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import { BUILDS } from "./actions";
+import { loaded } from "./frame";
 
 export const PLAYER_FEATURES = 17;
-export const SCALARS = 16;
+export const SCALARS = 26;
 
 /** How a player-table row relates to the seat; the trainer maps cells and units through it. */
 export enum Rel {
@@ -23,7 +25,9 @@ const logScale = (v: number, div: number) => Math.log1p(Math.max(0, v)) / div;
  * 14 log troops the seat sends at it, 15 spawned, 16 log troops per tile.
  * Scalars: 0 game progress, 1 spawn phase, 2 spawn-phase progress, 3 spawned, 4 alive, 5 log troops, 6 troops / max,
  * 7 log gold, 8 gold / city cost, 9 tiles / land, 10 boats / max boats, 11 alive players share, 12 time left,
- * 13 spawn immunity, 14 tiles per cell / 64, 15 share of players ahead in tiles.
+ * 13 spawn immunity, 14 tiles per cell / 64, 15 share of players ahead in tiles, 16-24 gold / the current cost of
+ * each build in BUILDS order (city, defense post, silo, factory, port, SAM, warship, atom bomb, hydrogen bomb; at
+ * most 4, / 4), 25 missiles loaded in the seat's silos / 16 (at most 1).
  */
 export function encodeSeat(
   game: Game,
@@ -105,4 +109,10 @@ export function encodeSeat(
   scalars[13] = game.isSpawnImmunityActive() ? 1 : 0;
   scalars[14] = (cellSize * cellSize) / 64;
   scalars[15] = seat.isAlive() ? ahead / Math.max(nonBot.length - 1, 1) : 1;
+  let k = 16;
+  for (const unit of BUILDS.values()) {
+    scalars[k++] = Math.min(gold / Math.max(Number(game.unitInfo(unit).cost(game, seat)), 1), 4) / 4;
+  }
+  const silos = seat.units(UnitType.MissileSilo).reduce((n, u) => n + loaded(u), 0);
+  scalars[25] = Math.min(silos, 16) / 16;
 }

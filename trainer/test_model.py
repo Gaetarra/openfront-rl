@@ -12,7 +12,7 @@ from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, OLD_CHA
                            SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, load_net,
                            new_net, relevance, v1_spatial)
 
-DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5}
+DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 26, "acts": 5}
 N, P, H, W = 6, 5, 32, 32
 
 
@@ -42,6 +42,7 @@ def fake_obs(device="cuda", seed=0):
     obs["cell_mask"] = torch.cat([cell_mask, torch.rand(N, 9, H * W, generator=g) < 0.1], 1)  # the 9 later heat maps
     obs["cell_mask"][0] = False
     obs["retreat_mask"] = torch.zeros(N, P, dtype=torch.bool)
+    obs["scalars"] = torch.cat([obs["scalars"], torch.rand(N, 10, generator=g)], 1)  # the 10 scalars of 3B part 2
     return {k: v.to(device) for k, v in obs.items()}
 
 
