@@ -903,9 +903,19 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         rule fixed in advance.
         - In progress: Task 1's script and Tasks 3, 4, 5 and 7 are coded (6df6dc1..30b176e; 43 bridge and 118
           trainer tests pass).
-        - Still to do: Task 1's run (the user's go, PC idle), Task 2 if its rule calls for it, Task 6 (the channels)
-          and Task 8 (docs and the final speed check). The ledger,
-          `.superpowers/sdd/2026-10-09-phase3b-observations/progress.md`, holds the rulings.
+        - **Task 1's speed check** (2026-10-10, `--ppo-minibatches 12`; a video playing in Chrome kept the GPU ~20%
+          busy, the same for every arm):
+          - PPO: Phase 2 network 164.5 decisions/s, v4 11.2: **7%** of it (bar: 75%).
+          - Memory: 1,447 MiB in use before the runs; v4's peak 11,965 MiB, so **10,518 MiB its own** (rule: ≤ 9,400).
+            The peak comes from nvidia-smi, which cannot read past the card's 12,282 MiB: v4 filled the card, Windows
+            paged the rest into system RAM, and the run got 13× slower (v3's spills cost 2–4×).
+          - BC: v4 611 rows/s, peak 9,880 MiB (v3: 779 rows/s with one network).
+          - **Verdict: Task 2 runs.** The masks are probably not the whole excess. Each learning minibatch builds its
+            12 heat maps' distributions in float32 (128 rows × 12 × 49,152 cells, 0.3 GB a tensor), keeps the exact
+            KL's and the entropy's for the backward pass, and v3 had 3 maps.
+        - Still to do: Task 2 and its re-measure (the user's go), Task 6 (the channels) and Task 8 (docs and the
+          final speed check). The ledger, `.superpowers/sdd/2026-10-09-phase3b-observations/progress.md`, holds the
+          rulings.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
     GPU from the channels, and the upgrade map from the unit records (exact). The exact check stays in the worker,
     and failures are counted no-ops.
