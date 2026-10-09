@@ -33,7 +33,8 @@ first.
 
 The BC refresh (3B step 4) comes after this list.
 
-**Status (2026-10-09):** written, waiting for the user's review.
+**Status (2026-10-09):** approved by the user (native execution, decisions 1–6 accepted). In progress; the ledger
+`.superpowers/sdd/2026-10-09-phase3b-observations/progress.md` says which tasks are done and every ruling.
 
 ## Global Constraints
 
