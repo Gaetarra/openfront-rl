@@ -13,6 +13,7 @@ ACT_NAMES = ["noop", "spawn", "attack", "boat", "build_city", "build_defense_pos
              "build_port", "build_sam", "build_warship", "atom_bomb", "hydrogen_bomb", "upgrade", "retreat"]
 SPAWN, ATTACK, BOAT, BUILD, RETREAT = 1, 2, 3, 4, 14
 OLD_ACTS, OLD_MAPS = 5, 3  # the action types and heat maps of the networks before 3B step 3 (v1-v3)
+OLD_CHANNELS, OLD_SCALARS = BUILDINGS + 4 * len(BUILDING_TYPES), 16  # the inputs before 3B step 3, part 2 (v1-v3)
 MAP_NAMES = ("spawn", "boat", "city", "defense_post", "silo", "factory", "port", "sam", "warship", "atom", "hydrogen",
              "upgrade")  # one per MAP_TYPES entry
 MAP_OF = torch.full((len(ACT_NAMES),), -1, dtype=torch.long)
@@ -58,7 +59,7 @@ def v1_spatial(spatial):
     - The game keeps structures structureMinDist = 15 tiles apart and a cell spans at most 8 x 8 tiles, so a cell holds
       at most one structure: its count is whether its channel is non-zero."""
     total = lambda t: t.sum(1, dtype=torch.int16)
-    b = spatial[:, BUILDINGS:].unflatten(1, (len(BUILDING_TYPES), 4))  # [N, type, relation, H, W]
+    b = spatial[:, BUILDINGS:OLD_CHANNELS].unflatten(1, (len(BUILDING_TYPES), 4))  # [N, type, relation, H, W]
     built = (b[:, :6] > 0).to(torch.int16) * 64
     ships = b[:, 6:].to(torch.int16)
     groups = (built[:, 0], built[:, 1], total(built[:, 2:]), ships[:, 0], ships[:, 1])  # each [N, relation, H, W]
@@ -154,12 +155,14 @@ class Policy(nn.Module):
       SwiGLU experts, 512 -> 1024 -> 512).
     - troops: with shares=True (arch v3, PLAN 3B), per kind a hidden layer reads the core and one player's token, then
       100 shares; otherwise the 3A network's 5 sizes from the core alone.
-    - full=True (arch v4, 3B step 3): 15 action types, 12 heat maps (MAP_TYPES) and the retreat pointer; otherwise the
-      5 types and 3 heat maps of the networks before."""
+    - full=True (arch v4, 3B step 3): 15 action types, 12 heat maps (MAP_TYPES), the retreat pointer and every input;
+      otherwise the 5 types, 3 heat maps, OLD_CHANNELS channels and OLD_SCALARS scalars of the networks before."""
 
     def __init__(self, dims, widths=(64, 128, 192), core="moe", shares=False, full=False):
         super().__init__()
         c_in, n_feat, n_scal = dims["channels"], dims["playerFeatures"], dims["scalars"]
+        if not full:  # v2 and v3 networks were trained on the inputs before 3B step 3, part 2
+            c_in, n_scal = OLD_CHANNELS, OLD_SCALARS
         c1, c2, c3 = widths
         self.full, self.n_maps = full, len(MAP_TYPES) if full else OLD_MAPS
         self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
@@ -200,7 +203,7 @@ class Policy(nn.Module):
         self.core = SoftMoE(512, hidden=1024 if core == "moe-swiglu" else None) if self.moe else nn.Linear(512, 512)
 
     def forward(self, obs):
-        x = _spatial_input(obs["spatial"], self.stem.weight)
+        x = _spatial_input(obs["spatial"][:, :self.stem.in_channels], self.stem.weight)
         f1 = self.s1(self.stem(x))
         f2 = self.s2(self.d2(F.relu(f1)))
         f3 = self.s3(self.d3(F.relu(f2)))
@@ -214,7 +217,7 @@ class Policy(nn.Module):
         for layer in self.encoder:
             attended = layer(attended, src_key_padding_mask=~exists.gather(1, top))
         tokens = self.encoder_norm(t.scatter(1, index, attended.to(t.dtype)))  # back in place; the rest unattended
-        s = self.scalars(obs["scalars"])
+        s = self.scalars(obs["scalars"][:, :self.scalars[0].in_features])
         ask = self.ask(torch.cat([pooled, s], 1)).unsqueeze(1)
         attended = self.pool(ask, tokens, tokens, key_padding_mask=~exists, need_weights=False)[0].squeeze(1)
         groups = [masked_mean(tokens, (players[..., k] > 0) & exists) for k in (2, 3, 4, 5)]  # self, friends, enemies, bots
@@ -245,12 +248,12 @@ class Policy(nn.Module):
 
 
 class PolicyV1(nn.Module):
-    """The Phase 2 network, kept for its checkpoints (those without "arch"). It reads its 22 input channels and 17
-    player features, rebuilt from today's observations."""
+    """The Phase 2 network, kept for its checkpoints (those without "arch"). It reads its 22 input channels, 17 player
+    features and 16 scalars, rebuilt from today's observations."""
 
     def __init__(self, dims, widths=(64, 128, 192)):
         super().__init__()
-        n_scal = dims["scalars"]
+        n_scal = OLD_SCALARS
         self.n_bins = len(SIZES)
         c1, c2, c3 = widths
         self.stem = nn.Conv2d(V1_CHANNELS, c1, 4, stride=4)
@@ -283,7 +286,7 @@ class PolicyV1(nn.Module):
         emb = self.players(players)
         exists = players[..., :1]
         p_pool = (emb * exists).sum(1) / exists.sum(1).clamp(min=1)
-        h = self.core(torch.cat([pooled, p_pool, self.scalars(obs["scalars"])], 1))
+        h = self.core(torch.cat([pooled, p_pool, self.scalars(obs["scalars"][:, :OLD_SCALARS])], 1))
         g = f2 + F.interpolate(self.u3(F.relu(f3)), scale_factor=2)
         g = f1 + F.interpolate(self.u2(F.relu(g)), scale_factor=2)
         gamma, beta = self.film(h).chunk(2, 1)

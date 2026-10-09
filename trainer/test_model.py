@@ -8,9 +8,9 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, RETREAT, SHARES, SIZE_OF, SIZES, SPAWN,
-                           ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, load_net, new_net, relevance,
-                           v1_spatial)
+from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, OLD_CHANNELS, OLD_SCALARS, RETREAT, SHARES,
+                           SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, load_net,
+                           new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 16, "acts": 5}
 N, P, H, W = 6, 5, 32, 32
@@ -463,7 +463,48 @@ class ShareDistTest(unittest.TestCase):
             ActionDist(out, obs).kl(ActionDist(sizes, obs))
 
 
+class InputsTest(unittest.TestCase):
+    """Part 2 of 3B step 3 adds channels and scalars after the old ones. The v1-v3 networks keep reading theirs."""
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.obs = fake_obs()
+        self.wide = {**DIMS, "channels": self.obs["spatial"].shape[1] + 8, "scalars": self.obs["scalars"].shape[1] + 10}
+        extra = torch.full((N, 8, H, W), 64, dtype=torch.uint8, device="cuda")
+        self.more = dict(self.obs, spatial=torch.cat([self.obs["spatial"], extra], 1),
+                         scalars=torch.cat([self.obs["scalars"], torch.ones(N, 10, device="cuda")], 1))
+
+    def test_older_networks_ignore_the_inputs_added_after_theirs(self):
+        exact_fp32(self)
+        old = {"v1": PolicyV1(self.wide), "v2": Policy(self.wide), "v3": Policy(self.wide, shares=True)}
+        for name, net in old.items():
+            with self.subTest(name):
+                net = randomized(net).cuda().eval()
+                with torch.no_grad():
+                    a, b = net(self.obs), net(self.more)
+                for k in a:
+                    self.assertTrue(torch.allclose(a[k], b[k], rtol=1e-5, atol=1e-6), k)
+
+    def test_v4_networks_read_every_input(self):
+        net = randomized(Policy(self.wide, shares=True, full=True)).cuda().eval()
+        self.assertEqual((net.stem.in_channels, net.scalars[0].in_features),
+                         (self.wide["channels"], self.wide["scalars"]))
+        with torch.no_grad():
+            a, b = net(self.more), net(dict(self.more, scalars=self.more["scalars"] * 0))
+        self.assertFalse(torch.allclose(a["value"], b["value"]))
+
+
 class LoadTest(unittest.TestCase):
+    def test_networks_saved_before_part_2_load_with_todays_wider_inputs(self):
+        old = {**DIMS, "channels": OLD_CHANNELS, "scalars": OLD_SCALARS}
+        wide = {**DIMS, "channels": OLD_CHANNELS + 8, "scalars": OLD_SCALARS + 10}
+        with tempfile.TemporaryDirectory() as d:
+            for args in ({"widths": "64,128,192"}, {"arch": "v3", "core": "moe-swiglu", "widths": "64,128,192"}):
+                with self.subTest(args.get("arch", "v1")):
+                    path = Path(d) / "net.pt"
+                    torch.save({"model": new_net(old, args).state_dict(), "args": args}, path)
+                    load_net(path, wide)  # a shape mismatch raises
+
     def test_checkpoints_load_as_the_network_they_hold(self):
         obs = fake_obs()
         with tempfile.TemporaryDirectory() as d:
