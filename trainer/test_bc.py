@@ -211,6 +211,21 @@ class MeasureTest(unittest.TestCase):
         self.assertAlmostEqual(s["bc/city_cell_near"], 0.5, places=4)  # within 16 tiles: rows 0-2 only
         self.assertAlmostEqual(s["bc/city_cell_dist"], (8 + 24) / 2, places=3)
 
+    def test_closeness_has_a_uniform_pick_as_its_baseline(self):
+        obs = fake_obs()
+        obs["scalars"][:, 14] = 1.0  # a Normal map: cells of 8 x 8 tiles
+        obs["type_mask"][:] = True
+        w = obs["spatial"].shape[-1]
+        human = 10 * w + 10
+        obs["cell_mask"][:] = False
+        obs["cell_mask"][:, 2, [human, human + 1, human + 3 * w]] = True  # 0, 8 and 24 tiles from the human's city
+        labels = torch.tensor([[BUILD, human, 0, 0]] * ROWS, device="cuda")
+        m, zero = Meter(), torch.zeros(ROWS, device="cuda")
+        measure(m, obs, labels, label_legal(obs, labels), ActionDist(RandomPolicy5()(obs), obs), zero, zero)
+        s = m.means()
+        self.assertAlmostEqual(s["bc/city_cell_near_uniform"], 2 / 3, places=5)  # 2 of the 3 within 16 tiles
+        self.assertAlmostEqual(s["bc/city_cell_dist_uniform"], 32 / 3, places=4)  # (0 + 8 + 24) / 3
+
 
 class ScoreTest(unittest.TestCase):
     def test_scores_are_repeatable_and_per_head(self):

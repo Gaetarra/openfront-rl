@@ -151,7 +151,8 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
       100-share network's shares are summed into the five sizes' ranges (SIZE_OF). Its own 100-share NLL is
       bc/nll_shares, with bc/nll_*_share per head;
     - for the cell heads, also how close the bot's cell lands to the human's, since a near miss is almost as good as a
-      hit: the chance it falls within NEAR_TILES (bc/*_cell_near) and its expected distance in tiles (bc/*_cell_dist);
+      hit: the chance it falls within NEAR_TILES (bc/*_cell_near) and its expected distance in tiles (bc/*_cell_dist),
+      and both for a uniform pick over the legal cells, their baseline (bc/*_uniform);
     - NLL per bucket (game phase and map size);
     - the router's mean weight per expert and bucket, for MoE networks."""
     t, n = labels[:, 0], len(labels)
@@ -201,6 +202,10 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
         p = dist.cells.probs[:, k]  # [N, cells]
         m.add(f"bc/{name}_cell_near", ((p * (tiles <= NEAR_TILES)).sum(1) * rows).sum(), rows.sum())
         m.add(f"bc/{name}_cell_dist", ((p * tiles).sum(1) * rows).sum(), rows.sum())
+        u = obs["cell_mask"][:, k].float()
+        u = u / u.sum(1, keepdim=True).clamp(min=1)  # the baseline: a uniform pick over the legal cells
+        m.add(f"bc/{name}_cell_near_uniform", ((u * (tiles <= NEAR_TILES)).sum(1) * rows).sum(), rows.sum())
+        m.add(f"bc/{name}_cell_dist_uniform", ((u * tiles).sum(1) * rows).sum(), rows.sum())
     if dist.retreat is not None:
         rows = legal & (t == RETREAT)
         m.add("bc/retreat_target_acc", ((dist.retreat.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
