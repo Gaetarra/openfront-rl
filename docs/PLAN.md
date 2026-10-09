@@ -913,7 +913,22 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           - **Verdict: Task 2 runs.** The masks are probably not the whole excess. Each learning minibatch builds its
             12 heat maps' distributions in float32 (128 rows × 12 × 49,152 cells, 0.3 GB a tensor), keeps the exact
             KL's and the entropy's for the backward pass, and v3 had 3 maps.
-        - Still to do: Task 2 and its re-measure (the user's go), Task 6 (the channels) and Task 8 (docs and the
+        - **Task 2** (masks as bits, 16825a1; PPO now logs its share of time in rollouts and the allocator's peak,
+          which reads past the card, f6d8150), re-measured 2026-10-10 with `--skip-bc`:
+          - 12 minibatches: v1 152.7, v4 40.6 decisions/s (27%). v4's allocator peaked at 11,992 MiB, so it still
+            spilled, and learning took 99% of the time.
+          - 16 minibatches (the plan's fallback): v1 170.6, v4 99.3 decisions/s (**58%**), with no spill (allocator
+            10,460 MiB; own 11,172 MiB, against the rule's 9,400).
+          - **Neither holds the rule, so the plan stops here for the user.**
+          - Profile of one learning minibatch (96 rows, the ranked grid, every type legal; the log-probability, the
+            entropy and the exact KL as PPO computes them):
+            - v3: 104 ms, 86 of them the network;
+            - v4: 155 ms, 96 of them the network.
+            - v4's 12 heat maps cost 59 ms of distribution math, v3's 3 cost 18.
+          - Rollouts also take 7.3 s per update, against v1's 5.2. Not yet split between GPU work and the random
+            network's play: it acts on most decisions and builds every unit type.
+          - Triton is not installed, so `torch.compile` cannot fuse that math.
+        - Still to do: the user's call on the speed and memory, then Task 6 (the channels) and Task 8 (docs and the
           final speed check). The ledger, `.superpowers/sdd/2026-10-09-phase3b-observations/progress.md`, holds the
           rulings.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
