@@ -5,7 +5,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical
+from torch.distributions import Categorical, Distribution
 
 from trainer.env import BUILDING_TYPES, BUILDINGS, MAP_TYPES, OWNER
 
@@ -314,10 +314,20 @@ class RandomPolicy(nn.Module):
                 "value": torch.zeros(n, device=dev)}
 
 
+class _Normalized(Categorical):
+    """A Categorical over log-probabilities that are already normalized: torch's would normalize and check them again.
+    On 12 heat maps of 49,152 cells that took a pass each and one more map-sized tensor kept for the backward pass."""
+
+    def __init__(self, logp):
+        self.logits = self._param = logp
+        self._num_events = logp.shape[-1]
+        Distribution.__init__(self, logp.shape[:-1], validate_args=False)
+
+
 def _masked(logits, mask):
     mask = mask.clone()
     mask[..., 0] |= ~mask.any(-1)  # rows without a legal entry get a dummy one; their head is never used
-    return Categorical(logits=torch.where(mask, logits, MASK_VALUE))
+    return _Normalized(torch.where(mask, logits, MASK_VALUE).log_softmax(-1))
 
 
 class ActionDist:

@@ -8,9 +8,9 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from trainer.env import BUILDINGS, N_CHANNELS
-from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, OLD_CHANNELS, OLD_SCALARS, RETREAT, SHARES,
-                           SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, load_net,
-                           new_net, relevance, v1_spatial)
+from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, MASK_VALUE, OLD_CHANNELS, OLD_SCALARS, RETREAT,
+                           SHARES, SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE,
+                           load_net, new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 26, "acts": 5}
 N, P, H, W = 6, 5, 32, 32
@@ -429,6 +429,47 @@ class ShareDistTest(unittest.TestCase):
         acts = torch.tensor([[ATTACK, 0, 2, 20]] * 3)
         gap = d.log_prob(acts, sizes=True) - d.log_prob(acts)  # 25%'s 20 percents against one
         self.assertTrue(torch.allclose(gap, torch.full((3,), math.log(20)), atol=1e-5))
+
+    def test_the_ppo_loss_keeps_three_heat_map_sized_tensors_for_the_backward_pass(self):
+        """The taken action's log-probability and the exact KL, as PPO learns from them. On 12 heat maps of 49,152
+        cells every map-sized float tensor kept for the backward pass weighs 0.3 GB in a 128-row minibatch, and
+        torch's Categorical kept four (3B step 3, part 2)."""
+        obs, out, ref = full_obs(), full_out(1), full_out(2)
+        with torch.no_grad():
+            act = ActionDist(out, obs).sample()
+        out["maps"].requires_grad_()
+        n, kept = out["maps"].numel(), set()
+
+        def pack(t):
+            if t.is_floating_point() and t.numel() == n:
+                kept.add(t.untyped_storage().data_ptr())
+            return t
+        with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+            d = ActionDist(out, obs)
+            (d.log_prob(act) + d.kl(ActionDist(ref, obs))).sum().backward()
+        self.assertLessEqual(len(kept), 3)
+
+    def test_the_heat_maps_score_and_learn_as_torchs_categoricals_did(self):
+        obs, out, ref = full_obs(), full_out(1), full_out(2)
+        with torch.no_grad():
+            act = ActionDist(out, obs).sample()
+        out["maps"].requires_grad_()
+
+        def as_torch(d, maps):
+            mask = obs["cell_mask"].clone()
+            mask[..., 0] |= ~mask.any(-1)
+            d.cells = Categorical(logits=torch.where(mask, maps.float(), MASK_VALUE))
+            return d
+
+        results = []
+        for build in (lambda o: ActionDist(o, obs), lambda o: as_torch(ActionDist(o, obs), o["maps"])):
+            d = build(out)
+            terms = torch.stack([d.log_prob(act), d.kl(build(ref)), d.entropy()])
+            grad, = torch.autograd.grad(terms.sum(), out["maps"])
+            results.append((terms.detach(), grad))
+        (mine, my_grad), (torchs, torchs_grad) = results
+        self.assertTrue(torch.allclose(mine, torchs, atol=1e-5), (mine, torchs))
+        self.assertTrue(torch.allclose(my_grad, torchs_grad, atol=1e-6), (my_grad - torchs_grad).abs().max())
 
     def test_kl_covers_every_action_of_a_v4_network(self):
         obs, p_out, q_out = full_obs(), full_out(1), full_out(2)
