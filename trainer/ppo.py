@@ -223,6 +223,19 @@ class Outcomes:
         return out
 
 
+def pack_bits(m):
+    """A bool tensor [..., n] (n a multiple of 8) as uint8 [..., n / 8]. The rollout keeps its cell masks this way: 12
+    heat maps of 49,152 cells take 74 KB a row instead of 590 KB."""
+    bits = torch.arange(8, device=m.device, dtype=torch.uint8)
+    return (m.unflatten(-1, (-1, 8)).to(torch.uint8) << bits).sum(-1, dtype=torch.uint8)
+
+
+def unpack_bits(b):
+    """pack_bits undone."""
+    bits = torch.arange(8, device=b.device, dtype=torch.uint8)
+    return ((b.unsqueeze(-1) >> bits) & 1).bool().flatten(-2)
+
+
 def main(argv=None):
     a = parse_args(argv)
     ckpt_dir = ROOT / "checkpoints" / a.run
@@ -296,8 +309,12 @@ def main(argv=None):
 
     T, N = a.steps, envs.E
     obs = envs.obs
+    def stored(o):
+        """A seat's rows as the rollout keeps them: the cell masks as bits."""
+        return {**o, "cell_mask": pack_bits(o["cell_mask"])}
+
     buf = {k: torch.zeros((T,) + tuple(v.shape), dtype=v.dtype, device=device)
-           for k, v in rows(obs, learner).items()}
+           for k, v in stored(rows(obs, learner)).items()}
     actions = torch.zeros(T, N, 4, dtype=torch.long, device=device)
     logps, values, rewards, dones = (torch.zeros(T, N, device=device) for _ in range(4))
     outcomes = Outcomes(N)
@@ -313,7 +330,7 @@ def main(argv=None):
                 return False
             t0 = time.perf_counter()
             mine = rows(obs, learner)
-            for k, v in mine.items():
+            for k, v in stored(mine).items():
                 buf[k][step] = v
             full = torch.zeros(envs.N, 4, dtype=torch.long, device=device)
             with torch.no_grad():
@@ -350,6 +367,7 @@ def main(argv=None):
         for _ in range(a.epochs):
             for mb in torch.randperm(T * N, device=device).split(T * N // a.minibatches):
                 o = {k: v[mb] for k, v in flat.items()}
+                o["cell_mask"] = unpack_bits(o["cell_mask"])
                 with torch.autocast("cuda", torch.bfloat16):
                     out = model(o)
                 dist = ActionDist(out, o)

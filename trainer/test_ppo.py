@@ -6,7 +6,8 @@ import torch
 
 from trainer.env import ROOT
 from trainer.model import PolicyV1
-from trainer.ppo import Outcomes, gae, main, parse_args, parser, resume_args, run_info, seat_rows
+from trainer.ppo import (Outcomes, gae, main, pack_bits, parse_args, parser, resume_args, run_info, seat_rows,
+                         unpack_bits)
 
 
 class RunInfoTest(unittest.TestCase):
@@ -93,6 +94,14 @@ class OutcomesTest(unittest.TestCase):
         s = o.summary()
         self.assertEqual(s["value/outcome_acc_late"], 1.0)  # trivially right: why the gate uses the correlation
         self.assertNotIn("value/outcome_corr_late", s)
+
+
+class PackTest(unittest.TestCase):
+    def test_cell_masks_come_back_exactly_from_their_bits(self):
+        m = torch.rand(3, 12, 64, device="cuda") < 0.3
+        b = pack_bits(m)
+        self.assertEqual((b.dtype, tuple(b.shape)), (torch.uint8, (3, 12, 8)))
+        self.assertTrue(torch.equal(unpack_bits(b), m))
 
 
 class GaeTest(unittest.TestCase):
