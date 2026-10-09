@@ -320,11 +320,11 @@ def main(argv=None):
     outcomes = Outcomes(N)
     if state and "outcomes" in state:  # older checkpoints lack it
         outcomes.load(state["outcomes"])
-    act_counts, invalid_count = np.zeros(envs.T), 0
+    act_counts, invalid_count, env_time = np.zeros(envs.T), 0, 0.0
 
     def rollout():
         """Collects T steps from every game; False if a stop was requested meanwhile."""
-        nonlocal obs, global_step, invalid_count
+        nonlocal obs, global_step, invalid_count, env_time
         for step in range(T):
             if not control.wait():
                 return False
@@ -346,7 +346,10 @@ def main(argv=None):
                         out_o = opponent(theirs)
                     full[r] = ActionDist(out_o, theirs).sample()
             outcomes.record(mine["scalars"][:, 0].tolist(), values[step].tolist())
-            obs, rew, done, infos, invalid = envs.step(full.cpu().numpy())
+            acts = full.cpu().numpy()  # waits for the GPU
+            te = time.perf_counter()
+            obs, rew, done, infos, invalid = envs.step(acts)
+            env_time += time.perf_counter() - te
             rewards[step] = torch.from_numpy(rew.reshape(envs.E, S)[games, seat]).to(device)
             dones[step] = torch.from_numpy(done.reshape(envs.E, S)[games, seat]).to(device)
             outcomes.finish([i for i in infos if i["seat"] == seat[i["env"]]])
@@ -371,13 +374,17 @@ def main(argv=None):
                 with torch.autocast("cuda", torch.bfloat16):
                     out = model(o)
                 dist = ActionDist(out, o)
-                logp, ent = dist.log_prob(b_act[mb]), dist.entropy()
+                logp = dist.log_prob(b_act[mb])
+                # The entropy enters the graph only with a weight: 12 heat maps of it. At 0 it is logged after the
+                # backward pass, since torch's Categorical caches each head's probabilities, and caching them without
+                # a graph before the KL would cut the KL's gradients.
+                ent = dist.entropy() if a.ent_coef else None
                 log_ratio = logp - b_logp[mb]
                 ratio = log_ratio.exp()
                 mb_adv = (b_adv[mb] - b_adv[mb].mean()) / (b_adv[mb].std() + 1e-8)
                 pg_loss = torch.max(-mb_adv * ratio, -mb_adv * ratio.clamp(1 - a.clip, 1 + a.clip)).mean()
                 v_loss = 0.5 * (out["value"].float() - b_ret[mb]).pow(2).mean()
-                loss = pg_loss - a.ent_coef * ent.mean() + a.vf_coef * v_loss
+                loss = pg_loss + a.vf_coef * v_loss - (a.ent_coef * ent.mean() if ent is not None else 0)
                 if ref is not None:
                     with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                         out_r = ref(o)
@@ -391,7 +398,7 @@ def main(argv=None):
                 with torch.no_grad():
                     stats["loss/policy"].append(pg_loss.item())
                     stats["loss/value"].append(v_loss.item())
-                    stats["loss/entropy"].append(ent.mean().item())
+                    stats["loss/entropy"].append((dist.entropy() if ent is None else ent).mean().item())
                     stats["loss/approx_kl"].append(((ratio - 1) - log_ratio).mean().item())
                     stats["loss/clip_frac"].append(((ratio - 1).abs() > a.clip).float().mean().item())
         metrics = {k: float(np.mean(v)) for k, v in stats.items()}
@@ -413,12 +420,13 @@ def main(argv=None):
             dt = time.perf_counter() - t0
             metrics["perf/decisions_per_s"] = T * N / dt
             metrics["perf/rollout_share"] = (t1 - t0) / dt
+            metrics["perf/env_share"] = env_time / dt  # the workers' simulation and the pipes, within the rollouts
             # past the card's size when Windows pages GPU memory into system RAM (nvidia-smi stops at the card)
             metrics["perf/gpu_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             metrics["actions/invalid_rate"] = invalid_count / (T * N)
             for i, name in enumerate(ACT_NAMES):
                 metrics[f"actions/{name}"] = float(act_counts[i] / (T * N))
-            act_counts[:], invalid_count = 0, 0
+            act_counts[:], invalid_count, env_time = 0, 0, 0.0
             for k, v in metrics.items():
                 writer.add_scalar(k, v, global_step)
             control.update(update=update, global_step=global_step, metrics=metrics)

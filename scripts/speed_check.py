@@ -56,7 +56,7 @@ def run(name, module, flags):
     acc.Reload()
     tag = "perf/decisions_per_s" if module == "trainer.ppo" else "perf/samples_per_s"
     points = [e.value for e in acc.Scalars(tag)][2:]
-    last = {t: acc.Scalars(t)[-1].value for t in ("perf/rollout_share", "perf/gpu_reserved_gb")
+    last = {t: acc.Scalars(t)[-1].value for t in ("perf/rollout_share", "perf/env_share", "perf/gpu_reserved_gb")
             if t in acc.Tags()["scalars"]}
     return sum(points) / max(len(points), 1), peak[0], last
 
@@ -106,7 +106,8 @@ def main(argv=None):
         extra = f"  {rate / v1:.0%} of v1, {rate / PHASE2_PPO_SPEED:.0%} of Phase 2's {PHASE2_PPO_SPEED}" \
             if "ppo" in name and name != "speed-ppo-v1" else ""
         if last:
-            extra += (f"  (rollouts {last['perf/rollout_share']:.0%} of the time, "
+            extra += (f"  (rollouts {last['perf/rollout_share']:.0%} of the time, the simulation "
+                      f"{last['perf/env_share']:.0%}, "
                       f"allocator peak {last['perf/gpu_reserved_gb'] * 1024:.0f} MiB)")
         print(f"{name:20} {rate:8.1f} {unit:12} peak {peak} MiB{extra}")
     rate, peak, last = results["speed-ppo-v4"]
