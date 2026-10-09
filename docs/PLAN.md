@@ -854,9 +854,38 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         the bridge (types) and on the GPU (cells, the upgrade map exact); a cell type needs a legal cell; the extractor
         labels every command except diplomacy, chat, warship moves and MIRVs; the v1–v3 networks keep their 5 types
         and 3 maps, and BC scores each network only on the rows its types express (`labels/beyond_net`).
-      - Still to run: the coverage check on the fixed rows (`--score checkpoints/bc3b/latest.pt`, ~10 min, the user's
-        go): `labels/out_of_set_commands` must fall under 0.5% (Gate 3B counts commands, not rows). With the five
-        actions it was ~7% of commands (`labels/out_of_set` 1.2% of rows in the 2026-10-08 rescore).
+      - Coverage check (2026-10-09, `runs/score/20261009-030123.json`, bc3b on the fixed rows): Gate 3B counts
+        commands, not rows. `labels/out_of_set_commands` is 0.60%, against the bar of 0.5% and ~7% with the five
+        actions. Other labels:
+        - `labels/out_of_set` 0.10% of rows (1.2% before);
+        - `labels/unmapped` 0;
+        - `labels/illegal` 0.59% of rows;
+        - `labels/beyond_net` 1.04%: the new actions' rows, which a v3 network cannot express.
+
+        The share is heavy-tailed.
+        - The extractor's label stream, emulated on all 766 held-out records (its queue and windows, no simulation),
+          gives 0.40%: 927 of 231,453 commands.
+        - One game alone holds 153 of the 927 (123 troop donations and 21 alliance requests, of its 286 commands).
+        - Random 228-game subsets (the score replays 228) read 0.37% at the median, 0.58% at the 90th percentile and
+          0.64% at the 95th.
+
+        Outside the set, as a share of all commands:
+
+        | Commands | Share |
+        |---|---|
+        | alliance requests | 0.16% |
+        | troop donations | 0.06% |
+        | embargoes | 0.04% |
+        | emoji | 0.04% |
+        | breaking, rejecting or extending alliances | 0.04% |
+        | cancelled boats | 0.03% |
+        | warship moves | 0.02% |
+        | quick chat | 0.01% |
+        | MIRVs | 0.006% |
+        | deleted units | 0.004% |
+
+        Proposed (the user's call): read Gate 3B's coverage on all held-out records (0.40%, passed). Which games the
+        228-game subset holds moves it by ±0.15 points.
       - Decisions:
         - retreat gets its own pointer;
         - **self-nukes stay legal**: top players nuke their own buildings before a capture, so the enemy gets nothing,
@@ -867,7 +896,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           Masked to the buildings the seat can upgrade, the map is that list's pointer, and each score reads the map
           around its building. The mask is exact: own, finished, and the gold for its type;
         - Gate 3B is judged on match strength, and a network is scored only on the rows its actions can express.
-      - Part 2, the observations, is still to be written.
+      - **Task list, part 2** (the observations), `docs/superpowers/plans/2026-10-09-phase3b-observations.md`: written
+        2026-10-09, waiting for the user's review. It measures v4's PPO speed and memory first (Part 1 took the heat
+        maps from 3 to 12) against a rule fixed in advance, and proposes the coverage counts by side (ours, theirs)
+        rather than by relation.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
     GPU from the channels, and the upgrade map from the unit records (exact). The exact check stays in the worker,
     and failures are counted no-ops.
@@ -881,7 +913,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - **Extractor**: every intent type is mapped. A wrapper masks the new types for 5-action checkpoints. Then a BC
     refresh.
   - **Gate 3B**:
-    - commands outside the action set < 0.5% (~6% now);
+    - commands outside the action set < 0.5% (0.60% on the score's rows, 0.40% on all held-out records: see the
+      coverage check);
     - invalid actions < 1%;
     - 1,000 ranked games without errors;
     - beats the 3A clone ≥ 0.545;
