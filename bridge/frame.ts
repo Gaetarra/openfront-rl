@@ -1,10 +1,38 @@
-import { Game, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import { Game, Unit, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
 import { GameMap, TileRef } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameMap";
 
 /** Cell record: u32 cell, u16 owner 1, u16 owner 2, u8 tiles of owner 1, u8 tiles of owner 2, u8 fallout tiles. */
 export const CELL_BYTES = 11;
-/** Unit record: u8 type index (UNIT_TYPES), u8 level (0 = under construction), u16 owner, u32 cell, f32 troops. */
-export const UNIT_BYTES = 12;
+/**
+ * Unit record: u8 type index (UNIT_TYPES), u8 level (0 = under construction), u16 owner, u32 cell, f32 troops,
+ * u8 missiles loaded (silos and SAMs), u8 zero, then the unit's zone: u16 x, u16 y and u16 radius in tiles (radius 0:
+ * none). A zone is a finished SAM's current range or a finished defense post's range around it, or a nuke's outer
+ * blast around its target.
+ */
+export const UNIT_BYTES = 20;
+
+/** Missiles a finished silo or SAM holds: its level minus the ones reloading. */
+export const loaded = (u: Unit): number =>
+  u.isUnderConstruction() ? 0 : Math.max(0, u.level() - u.missileTimerQueue().length);
+
+/** The disk a unit acts on, as [centre, radius in tiles], or null. */
+function zone(game: Game, u: Unit): [TileRef, number] | null {
+  const config = game.config();
+  switch (u.type()) {
+    case UnitType.SAMLauncher:
+      return u.isUnderConstruction() ? null : [u.tile(), config.dynamicSamRange(u, game.ticks())];
+    case UnitType.DefensePost:
+      return u.isUnderConstruction() ? null : [u.tile(), config.defensePostRange()];
+    case UnitType.AtomBomb:
+    case UnitType.HydrogenBomb:
+    case UnitType.MIRVWarhead: {
+      const target = u.targetTile();
+      return target === undefined ? null : [target, config.nukeMagnitudes(u.type()).outer];
+    }
+    default:
+      return null;
+  }
+}
 /** Unit types sent to the trainer, by index. Shells, SAM missiles and trains are not observed. */
 export const UNIT_TYPES: UnitType[] = [
   UnitType.City,
@@ -228,6 +256,13 @@ export function encodeUnits(game: Game, frame: CellFrame): Uint8Array {
     dv.setUint16(off + 2, u.owner().smallID(), true);
     dv.setUint32(off + 4, frame.cellOf(u.tile()), true);
     dv.setFloat32(off + 8, u.troops(), true);
+    if (u.type() === UnitType.MissileSilo || u.type() === UnitType.SAMLauncher) out[off + 12] = Math.min(loaded(u), 255);
+    const z = zone(game, u);
+    if (z !== null) {
+      dv.setUint16(off + 14, game.x(z[0]), true);
+      dv.setUint16(off + 16, game.y(z[0]), true);
+      dv.setUint16(off + 18, Math.min(Math.round(z[1]), 65535), true);
+    }
     off += UNIT_BYTES;
   }
   return out.subarray(0, off);

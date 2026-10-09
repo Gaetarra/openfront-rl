@@ -19,8 +19,9 @@ GAME_DIR = ROOT / "OpenFront_Source_Code" / "openfrontio"
 WORKER_TS = ROOT / "bridge" / "worker.ts"
 
 CELL = np.dtype([("idx", "<u4"), ("o1", "<u2"), ("o2", "<u2"), ("n1", "u1"), ("n2", "u1"), ("fo", "u1")])
-UNIT = np.dtype([("type", "u1"), ("level", "u1"), ("owner", "<u2"), ("cell", "<u4"), ("troops", "<f4")])
-assert CELL.itemsize == 11 and UNIT.itemsize == 12
+UNIT = np.dtype([("type", "u1"), ("level", "u1"), ("owner", "<u2"), ("cell", "<u4"), ("troops", "<f4"),
+                 ("ready", "u1"), ("pad", "u1"), ("zx", "<u2"), ("zy", "<u2"), ("zr", "<u2")])  # bridge/frame.ts
+assert CELL.itemsize == 11 and UNIT.itemsize == 20
 
 # Spatial channels. They reach the model as uint8 in 64ths of a unit (quantize_; trainer/model.py divides by 64): tile
 # shares stay exact, other values move by at most 1/128, and PPO stores its rollouts as 8 bits. Tile counts are divided
