@@ -410,7 +410,11 @@ def main(argv=None):
             control.throttle(time.perf_counter() - t1)
             update += 1
             metrics.update(outcomes.summary())
-            metrics["perf/decisions_per_s"] = T * N / (time.perf_counter() - t0)
+            dt = time.perf_counter() - t0
+            metrics["perf/decisions_per_s"] = T * N / dt
+            metrics["perf/rollout_share"] = (t1 - t0) / dt
+            # past the card's size when Windows pages GPU memory into system RAM (nvidia-smi stops at the card)
+            metrics["perf/gpu_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             metrics["actions/invalid_rate"] = invalid_count / (T * N)
             for i, name in enumerate(ACT_NAMES):
                 metrics[f"actions/{name}"] = float(act_counts[i] / (T * N))

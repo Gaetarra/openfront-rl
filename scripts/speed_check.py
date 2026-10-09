@@ -56,7 +56,9 @@ def run(name, module, flags):
     acc.Reload()
     tag = "perf/decisions_per_s" if module == "trainer.ppo" else "perf/samples_per_s"
     points = [e.value for e in acc.Scalars(tag)][2:]
-    return sum(points) / max(len(points), 1), peak[0]
+    last = {t: acc.Scalars(t)[-1].value for t in ("perf/rollout_share", "perf/gpu_reserved_gb")
+            if t in acc.Tags()["scalars"]}
+    return sum(points) / max(len(points), 1), peak[0], last
 
 
 def main(argv=None):
@@ -99,12 +101,15 @@ def main(argv=None):
         shutil.rmtree(speed, ignore_errors=True)
     v1 = results["speed-ppo-v1"][0]
     print(f"\nGPU memory before the runs: {idle} MiB (other programs)")
-    for name, (rate, peak) in results.items():
+    for name, (rate, peak, last) in results.items():
         unit = "decisions/s" if "ppo" in name else "rows/s"
         extra = f"  {rate / v1:.0%} of v1, {rate / PHASE2_PPO_SPEED:.0%} of Phase 2's {PHASE2_PPO_SPEED}" \
             if "ppo" in name and name != "speed-ppo-v1" else ""
+        if last:
+            extra += (f"  (rollouts {last['perf/rollout_share']:.0%} of the time, "
+                      f"allocator peak {last['perf/gpu_reserved_gb'] * 1024:.0f} MiB)")
         print(f"{name:20} {rate:8.1f} {unit:12} peak {peak} MiB{extra}")
-    rate, peak = results["speed-ppo-v4"]
+    rate, peak, last = results["speed-ppo-v4"]
     print(f"\nPPO, v4: {rate / v1:.0%} of the Phase 2 network's decisions/s in this run (Gate 3B: >= 75%); "
           f"its own peak {peak - (idle or 0)} MiB")
 
