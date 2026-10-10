@@ -6,8 +6,8 @@ import unittest
 import numpy as np
 import torch
 
-from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, LAND, MAP_TYPES, N_CHANNELS, OWN, OWNER, OWNER_FEATURES,
-                         RANKED_1V1, ROOT, UPGRADABLE, VALID, VecEnv, quantize_)
+from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, LAND, LEVEL, MAP_TYPES, N_CHANNELS, OWN, OWNER,
+                         OWNER_FEATURES, RANKED_1V1, ROOT, UPGRADABLE, VALID, ZONE_KINDS, VecEnv, disk_cells, quantize_)
 from scripts.coverage import label_kinds
 from trainer.eval import Scripted
 from trainer.model import v1_spatial
@@ -85,6 +85,25 @@ def phase2_spatial(env, players, rel, units):
             ch = 12 + 2 * group + (r != 1).long()
             x.index_put_((row[keep], ch[keep], cell[keep]), value[keep], accumulate=True)
     return x.view(N, 22, env.H, env.W)
+
+
+def new_channels(units, rel, names, side, H, W):
+    """One seat's channels from LEVEL on, from the unit records by their definitions in trainer/env.py."""
+    want = np.zeros((N_CHANNELS - LEVEL, H * W))
+    cy, cx = np.divmod(np.arange(H * W), W)
+    for u in units:
+        name, r = names[u["type"]], int(rel[u["owner"]])
+        if r == 0:
+            continue
+        if name in BUILDING_TYPES[:6]:  # structures, one per cell at most
+            want[0, u["cell"]] += u["level"] / 16
+            want[1, u["cell"]] += u["ready"] / 16
+        kind = ZONE_KINDS.get(name)
+        if kind is not None and u["zr"] > 0:
+            x, y, radius = int(u["zx"]), int(u["zy"]), int(u["zr"])
+            near = ((2 * cx + 1) * side - 2 * x) ** 2 + ((2 * cy + 1) * side - 2 * y) ** 2 <= (2 * radius) ** 2
+            want[2 + 2 * kind + int(r >= 3), near] += u["ready"] / 16 if kind == 0 else 1
+    return want
 
 
 class VecEnvTest(unittest.TestCase):
@@ -221,6 +240,19 @@ class QuantizeTest(unittest.TestCase):
         self.assertEqual(q.tolist(), [0, 0, 1, 32, 64, 255, 255])  # 5.0 saturates: it does not wrap to 64
 
 
+class DiskTest(unittest.TestCase):
+    def test_a_disk_covers_the_cells_whose_centres_lie_within_its_radius(self):
+        H, W = 6, 8
+        long = lambda *v: torch.tensor(v, dtype=torch.long, device="cuda")
+        disks = [(4, 4, 8, 8), (0, 0, 4, 4)]  # x, y, radius, tiles per cell side: a Normal map's, a Compact corner's
+        n, cell = disk_cells(*(long(*v) for v in zip(*disks)), H, W)
+        want = {(k, c) for k, (x, y, r, s) in enumerate(disks) for c in range(H * W)
+                if ((c % W + 0.5) * s - x) ** 2 + ((c // W + 0.5) * s - y) ** 2 <= r * r}
+        self.assertEqual({(int(a), int(c)) for a, c in zip(n, cell)}, want)
+        self.assertIn((0, 1), want, "a centre exactly 8 tiles away is inside")
+        self.assertEqual(len(disk_cells(*(long() for _ in range(4)), H, W)[0]), 0, "no disks, no cells")
+
+
 class ChannelTest(unittest.TestCase):
     """One replay of the fixture record, checked against the channel definitions and against the Phase 2 code."""
 
@@ -229,6 +261,7 @@ class ChannelTest(unittest.TestCase):
         env = VecEnv(RANKED_1V1, workers=1, games_per_worker=1, seed="channels", records=[FIXTURE])
         cls.seen, cls.legacy_error = None, 0.0
         cls.upgrade = np.zeros(3, int)  # wrong cells, open cells, own buildings left shut
+        cls.new_error, cls.zones = 0, np.zeros(3, int)  # worst error from LEVEL on; observations with each zone kind
         structures = [env.dims["unitTypes"].index(t) for t in BUILDING_TYPES[:6]]
 
         def keep(args, obs):
@@ -253,6 +286,12 @@ class ChannelTest(unittest.TestCase):
                             "features": obs["players"][:, :, 17:].cpu().numpy(),
                             "cells": [t[:env.H * env.W].cpu().numpy() for t in (env.o1, env.n1, env.o2, env.n2)],
                             "area": float(env.area[0])}
+            side = round(float(env.area[0]) ** 0.5)
+            for seat in range(2):
+                want = new_channels(rec, rel[0][seat], env.dims["unitTypes"], side, env.H, env.W)
+                got = obs["spatial"][seat, LEVEL:].reshape(N_CHANNELS - LEVEL, -1).cpu().numpy().astype(np.int64)
+                cls.new_error = max(cls.new_error, int(np.abs(got - np.clip(np.round(want * 64), 0, 255)).max()))
+                cls.zones += want[2:].reshape(3, 2, -1).any((1, 2))
 
         try:
             watch_observations(env, keep)
@@ -290,9 +329,14 @@ class ChannelTest(unittest.TestCase):
                     value = np.log1p(u["troops"]) / 10 if name == "Transport" else max(int(u["level"]), 1)
                     want[BUILDINGS + 4 * k + int(rel[u["owner"]]) - 1, u["cell"]] += value
                     levels[u["owner"], k] += value
-            got = s["spatial"][seat].reshape(N_CHANNELS, -1)[OWNER:].astype(np.int64)
-            self.assertLessEqual(np.abs(got - np.clip(np.round(want[OWNER:] * 64), 0, 255)).max(), 1)
+            got = s["spatial"][seat].reshape(N_CHANNELS, -1)[OWNER:LEVEL].astype(np.int64)
+            self.assertLessEqual(np.abs(got - np.clip(np.round(want[OWNER:LEVEL] * 64), 0, 255)).max(), 1)
             np.testing.assert_allclose(s["features"][seat], np.log1p(levels) / 3, atol=1e-5)
+
+    def test_level_missile_and_zone_channels_follow_their_definitions(self):
+        self.assertEqual(self.new_error, 0)  # 1/16 steps and whole counts are exact in 64ths
+        self.assertGreater(self.zones[1], 0, "a defense post's zone was seen")
+        self.assertGreater(self.zones[2], 0, "a nuke in flight was seen")
 
 
 if __name__ == "__main__":

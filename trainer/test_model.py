@@ -31,7 +31,7 @@ def fake_obs(device="cuda", seed=0):
     players[:, 4] = 0
     owners = torch.randint(0, 4, (N, 2, H * W), generator=g)
     obs = {
-        "spatial": torch.randint(0, 65, (N, N_CHANNELS, H, W), generator=g).to(torch.uint8),
+        "spatial": torch.randint(0, 65, (N, OLD_CHANNELS, H, W), generator=g).to(torch.uint8),
         "scalars": torch.rand(N, 16, generator=g),
         "players": players,
         "owners": owners.to(torch.int16),
@@ -43,6 +43,8 @@ def fake_obs(device="cuda", seed=0):
     obs["cell_mask"][0] = False
     obs["retreat_mask"] = torch.zeros(N, P, dtype=torch.bool)
     obs["scalars"] = torch.cat([obs["scalars"], torch.rand(N, 10, generator=g)], 1)  # the 10 scalars of 3B part 2
+    new = torch.randint(0, 65, (N, N_CHANNELS - OLD_CHANNELS, H, W), generator=g).to(torch.uint8)
+    obs["spatial"] = torch.cat([obs["spatial"], new], 1)  # the 8 channels of 3B part 2
     return {k: v.to(device) for k, v in obs.items()}
 
 

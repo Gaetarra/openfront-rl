@@ -33,11 +33,16 @@ OWNER = 12  # 12..16: the cell's owners' player features OWNER_FEATURES, weighte
 OWNER_FEATURES = (8, 9, 10, 13, 14)  # log troops, troops / max, log gold, troops attacking the seat, sent at it
 BUILDINGS = 17  # 17..48: BUILDING_TYPES x relation (self, friendly, enemy, bot), see VecEnv._add_units
 BUILDING_TYPES = ("City", "Port", "Factory", "Missile Silo", "SAM Launcher", "Defense Post", "Transport", "Warship")
-N_CHANNELS = BUILDINGS + 4 * len(BUILDING_TYPES)
+LEVEL = BUILDINGS + 4 * len(BUILDING_TYPES)  # 49: the cell's structure's level / 16; 0 while under construction
+READY = LEVEL + 1  # 50: the missiles loaded in the cell's silo or SAM / 16
+ZONES = READY + 1  # 51..56: ZONES + 2 * kind + side (0 ours: self and friends; 1 theirs: enemies and bots)
+ZONE_KINDS = {"SAM Launcher": 0, "Defense Post": 1, "Atom Bomb": 2, "Hydrogen Bomb": 2, "MIRV Warhead": 2}
+N_CHANNELS = ZONES + 2 * 3  # a SAM's zone counts its loaded interceptors / 16, a post's or a nuke's 1
 DENSITY_FEATURE = 16  # player feature: log troops per tile
 # The action type of each heat map (bridge/actions.ts Act): spawn, boat, the nine builds (city, defense post, silo,
 # factory, port, SAM, warship, atom bomb, hydrogen bomb) and upgrade. Networks before 3B step 3 have the first three.
 MAP_TYPES = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+STRUCTURES = 6  # BUILDING_TYPES[:6] are structures, at most one per cell
 UPGRADABLE = 5  # BUILDING_TYPES[:5] (city, port, factory, silo, SAM) can be upgraded
 BUILD_OF = (4, 8, 7, 6, 9)  # their build actions: an upgrade needs the gold to build another one (canUpgradeUnit)
 
@@ -46,6 +51,24 @@ def quantize_(x):
     """x in 64ths as uint8 (x itself is overwritten on the way). Values above 255/64 (a structure above level 3,
     several warships in one cell) saturate."""
     return x.mul_(64).round_().clamp_(0, 255).to(torch.uint8)
+
+
+def disk_cells(zx, zy, zr, side, H, W):
+    """The cells of an H x W grid that disks cover, as (disk index, cell index) pairs. A cell is in when its centre lies
+    within zr tiles of the tile (zx, zy), by Euclidean distance. All int64 tensors; side is the tiles per cell side of
+    each disk's game. The arithmetic stays in integers (positions doubled), so the edge is exact."""
+    if len(zr) == 0:
+        return zr, zr
+    R = int(((zr + side - 1) // side).max()) + 1  # cells from a centre's cell to the farthest one inside
+    # ponytail: one window size for every disk (the largest); chunk the disks if their memory ever matters
+    d = torch.arange(-R, R + 1, device=zr.device)
+    s = side[:, None, None]
+    gy = (zy // side)[:, None, None] + d[:, None]  # [n, 2R + 1, 1]
+    gx = (zx // side)[:, None, None] + d  # [n, 1, 2R + 1]
+    dy, dx = (2 * gy + 1) * s - 2 * zy[:, None, None], (2 * gx + 1) * s - 2 * zx[:, None, None]
+    near = (dx * dx + dy * dy <= (2 * zr[:, None, None]) ** 2) & (gx >= 0) & (gx < W) & (gy >= 0) & (gy < H)
+    n, i, j = near.nonzero(as_tuple=True)
+    return n, gy[n, i, 0] * W + gx[n, 0, j]
 
 
 # The Phase 1 gate setup, and ranked 1v1 games (the worker draws map, size, bots and timer from the official ranked 1v1
@@ -155,6 +178,7 @@ class VecEnv:
         self.building = torch.tensor([BUILDING_TYPES.index(t) if t in BUILDING_TYPES else -1 for t in d["unitTypes"]],
                                      device=dev)
         self.transport = d["unitTypes"].index("Transport")
+        self.zone_kind = torch.tensor([ZONE_KINDS.get(t, -1) for t in d["unitTypes"]], device=dev)
         self.terrain = torch.zeros(self.E, 5, hw, device=dev)  # land, shore, ocean, height, inside the map
         self.area = torch.full((self.E,), 64.0, device=dev)  # tiles per cell of each game
         self.o1 = torch.zeros(self.E * hw, dtype=torch.long, device=dev)
@@ -322,10 +346,14 @@ class VecEnv:
         }
 
     def _add_units(self, x, units, rel_t, afford):
-        """Paints each seat's buildings into x by type and relation, and returns every player's buildings by type
-        [E, P, len(BUILDING_TYPES)]. A structure counts its level (under construction: 1), a transport its log troops
-        / 10, a warship 1. Also returns the upgrade map [N, H·W]: each seat's finished buildings of the types it can
-        afford (afford [N, UPGRADABLE]), the game's canUpgradeUnit."""
+        """Paints each seat's units into x, and returns every player's buildings by type [E, P, len(BUILDING_TYPES)].
+        - By type and relation, a structure counts its level (under construction: 1), a transport its log troops / 10,
+          a warship 1.
+        - LEVEL and READY hold each structure's level (0 under construction) and its loaded missiles, / 16.
+        - ZONES hold each zone (bridge/frame.ts) by kind and by its owner's side. A SAM's zone counts its loaded
+          interceptors / 16, a post's or a nuke's 1.
+        Also returns the upgrade map [N, H·W]: each seat's finished buildings of the types it can afford (afford
+        [N, UPGRADABLE]), the game's canUpgradeUnit."""
         buildings = torch.zeros(self.E, self.P, len(BUILDING_TYPES), device=self.device)
         upgradable = torch.zeros(self.N, self.H * self.W, dtype=torch.bool, device=self.device)
         rec = np.concatenate([u for _, u in units])
@@ -338,6 +366,15 @@ class VecEnv:
         cell = torch.from_numpy(rec["cell"].astype(np.int64)).to(dev)
         level = torch.from_numpy(rec["level"].astype(np.float32)).to(dev)
         troops = torch.from_numpy(rec["troops"].astype(np.float32)).to(dev)
+        ready = torch.from_numpy(rec["ready"].astype(np.float32)).to(dev)
+        zr = torch.from_numpy(rec["zr"].astype(np.int64)).to(dev)
+        zk = self.zone_kind[typ]
+        zone = ((zk >= 0) & (zr > 0)).nonzero().squeeze(1)  # the records with a zone
+        zx, zy = (torch.from_numpy(rec[f].astype(np.int64)).to(dev)[zone] for f in ("zx", "zy"))
+        side = self.area[env[zone]].sqrt().round().long()  # tiles per cell side of each zone's game
+        disk, zcell = disk_cells(zx, zy, zr[zone], side, self.H, self.W)
+        zi = zone[disk]  # the record behind each covered cell
+        zvalue = torch.where(zk[zi] == 0, ready[zi] / 16, 1.0)
         kind = self.building[typ]
         value = torch.where(typ == self.transport, torch.log1p(troops) / 10, level.clamp(min=1))
         keep = kind >= 0
@@ -347,6 +384,13 @@ class VecEnv:
             r = rel_t[row, owner]
             k = keep & (r > 0)
             x.index_put_((row[k], BUILDINGS + 4 * kind[k] + r[k] - 1, cell[k]), value[k], accumulate=True)
+            st = k & (kind < STRUCTURES)
+            x[:, LEVEL].index_put_((row[st], cell[st]), level[st] / 16, accumulate=True)
+            x[:, READY].index_put_((row[st], cell[st]), ready[st] / 16, accumulate=True)
+            rz = r[zi]
+            on = rz > 0
+            x.index_put_((row[zi][on], ZONES + 2 * zk[zi][on] + (rz[on] >= 3).long(), zcell[on]), zvalue[on],
+                         accumulate=True)
             up = keep & (r == 1) & (kind < UPGRADABLE) & (level > 0)  # own, finished, upgradable
             up &= afford[row, kind.clamp(0, UPGRADABLE - 1)]  # and the gold to build another of its type
             upgradable[row[up], cell[up]] = True
