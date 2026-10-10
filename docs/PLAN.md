@@ -961,7 +961,13 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
             - 96- and 128-row minibatches cost the same per row and 192 rows 49% more, so PPO stays at 12 minibatches.
           - The 75% bar is judged at Gate 3B, with the BC-trained v4.
         - Then Task 6 (the 8 channels, 83a4db9) and Task 8's docs.
-        - Still to do: Task 8's final speed check with every input (the user's go). The ledger,
+        - **Final speed check** (2026-10-10, `--ppo-minibatches 12`, every input; other programs held 1,147 MiB):
+          - PPO: v1 153.0 decisions/s, v4 112.4 (**73%**; the bar is judged at Gate 3B).
+          - Memory: v4 had 5,978 MiB in use, down from 8,155 before the RAM buffer, and that includes Part 2's
+            channels. It still reserved 9,698 MiB (own 9,861) because each epoch took a new copy stream, and PyTorch
+            caches freed memory per stream, so every epoch's blocks stayed reserved. Fixed in b86fb53.
+          - BC: v4 642 rows/s (611 before the optimizations), peak 9,871 MiB.
+        - Still to do: a PPO re-measure after the fix (the user's go). The ledger,
           `.superpowers/sdd/2026-10-09-phase3b-observations/progress.md`, holds the rulings.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
     GPU from the channels, and the upgrade map from the unit records (exact). The exact check stays in the worker,
