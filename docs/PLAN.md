@@ -866,6 +866,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         - `bc/*_cell_dist`: its expected distance in tiles.
         All three were rescored after the twin's night (above). A spatial soft label (the human's cell spread over
         its neighbours, like the shares' 0.05) is a candidate for step 4's BC refresh, decided on these numbers.
+        - **Deferred to the next BC refresh (user decision 2026-10-10)**: the closeness numbers cannot decide it.
+          - A cell is 8 × 8 tiles, so 0.05 on each neighbour moves at most 10% of the mass by one cell, inside the
+            16-tile circle: near rate and expected distance barely move by construction (≤ ~1 tile).
+          - What it might change is how fast the rare maps learn, which only two nights and a match would show.
+          - Adding it would put a second untested change into the night Gate 3B judges, and would raise the exact-cell
+            NLL by up to 0.1 nats, so step 4's cell scores would lose their like-for-like comparison.
+          - Step 4's validation logs every map's near rate next to its uniform baseline (`*_cell_near_uniform`), and
+            its score gives the final numbers: a map that stays near uniform is the evidence for a spatial label (or
+            another fix) in the next refresh.
   - **Actions**, as flat types:
     - today's 5;
     - build defense post / silo / factory / port / SAM / warship;
@@ -1040,6 +1049,13 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
        version. A candidate for the next refresh.
     - No crawl until the night is done: a crawl would add v0.34.24 records to `data/`, and `trainer.bc` would mix them
       into the run at the old pin.
+  - **Step 4, the BC night** (`bc3b-v4`: arch v4, SwiGLU experts, from scratch, seed 1, 14 workers × 6 games, one pass;
+    started by the user from `pins/v0.34.23` with the start-or-resume loop, 2026-10-10):
+    - the purge runs first, so the night trains on purged records; while its last sync is under 7 days old (before
+      2026-10-12 01:09 UTC) it is one API call;
+    - ~17 h at the speed check's 642 rows/s (the v3 nights: ~14 h at ~750);
+    - first hours: every map's `val/bc/*_cell_near` should rise above its `*_cell_near_uniform`, and `val/bc/nll` fall;
+    - then the score from the pin (the 3A clone, bc3b, bc3b-moe-swiglu, bc3b-v4), and Gate 3B in the main checkout.
   - **Gate 3B**:
     - commands outside the action set < 0.5%: **passed**, 0.40% on all held-out records (`scripts/coverage.py`; the
       user's reading, 2026-10-09; 0.60% on the score's 228 games);
