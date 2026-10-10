@@ -1,4 +1,4 @@
-// ranked1v1.json.gz: ranked 1v1 game dUsm5zsWTC, Compact, v0.34.21; usernames, account IDs and tribe names blanked.
+// ranked1v1.json.gz: ranked 1v1 game c5QTvwaU5x, Compact, v0.34.24; usernames, account IDs and tribe names blanked.
 import assert from "node:assert/strict";
 import path from "node:path";
 import { test } from "node:test";

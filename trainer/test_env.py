@@ -229,7 +229,7 @@ class VecEnvTest(unittest.TestCase):
         finally:
             env.close()
         self.assertEqual((commands, outside), (len(kinds), sum(k != "in" for k in kinds)))
-        self.assertEqual(outside, 1, "the fixture's one alliance request")
+        self.assertEqual(outside, 2, "the fixture's emoji and quick chat")
 
 
 

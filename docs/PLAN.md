@@ -43,6 +43,8 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
   - it is cancelled;
   - nothing is left to conquer;
   - an alliance forms.
+  Since v0.34.24, an attack that has nothing to conquer when it starts (a target the attacker does not border, or no
+  wilderness next to it) is refunded at once.
 - **Nukes and SAMs** (checked in v0.34.22 on 2026-10-05):
   - A SAM holds as many missiles as its level and reloads each one in 9 s (`SAMCooldown`).
   - Interception is deterministic, with no hit chance.
@@ -191,6 +193,11 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
     rules → optional BC refresh from new-version replays. Balance/rule patches: fine-tune only (hours–days of GPU);
     new mechanic: bridge code + surgery + longer fine-tune; never retrain from scratch. Keep one worktree per past pin so
     old replays stay re-extractable.
+    - One worktree per simulation is enough: `pins/<its last tag>` (CLAUDE.md).
+    - A simulation change can desync every older record, not just games that use the changed rule: the replay
+      re-simulates the tribes and nations (v0.34.24).
+    - Then the replay fixture (`bridge/testdata/ranked1v1.json.gz`) must be replaced by a record of the new pin. The
+      v0.34.24 entry below lists what the tests need from it.
     Log: v0.34.17 → **v0.34.21** (2026-10-01): 32 commits of lobby, telemetry, auth, record metadata and npm changes, no
     simulation change (nothing in `src/core/game`, `execution`, `configuration`); ranked 1v1 records from v0.34.17,
     v0.34.20 and v0.34.21 replay in sync at v0.34.21 (5/5, every hash). v0.34.21 requires npm ≥ 12.1 (`engine-strict`).
@@ -200,6 +207,32 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
     v0.34.22 → **v0.34.23** (2026-10-06; live by 2026-10-06): 1 commit, client only (the WebGL map recovers after the GPU
     process crashes, `src/client/render/gl`), no `src/core` or dependency change; 5/5 recent v0.34.23 ranked 1v1
     records replay in sync at v0.34.23 (1,819 hash checkpoints).
+    v0.34.23 → **v0.34.24** (2026-10-10; live since 2026-10-06 between 18:30 and 19:00 UTC): 1 commit and a
+    **simulation change** (class: rules). `AttackExecution.init` now refunds at once an attack with nothing to conquer
+    (a target the attacker does not border, or no wilderness next to it). Before, its troops sat out one regeneration
+    step and came back a tick later, which let players grow past the troop cap. No dependency or static-field change.
+    - The bot never sends such an attack: our attack mask only offers targets with a conquerable land tile next to the
+      seat's border, a subset of the engine's test.
+    - Older records desync. 64 records spread over `data/` (v0.34.17–v0.34.22) replay with 0 desyncs at v0.34.23
+      (~27,400 hash checkpoints), but 61 of them desync at v0.34.24, at turns 250–3,120 (median 510): only 13.7% of
+      their turns come before the desync. 60 of the 61 hold no human attack with nothing to conquer, so re-simulated
+      attacks take the new branch. Most likely the tribes': they check the border when they decide, but their attack
+      starts at the end of the tick, after that tick's other attacks have moved the borders (`GameImpl.executeNextTick`).
+      Boat landings start attacks too. The game's own `NationGoldPerMinute` snapshot changed as well.
+    - So the last pin of the old simulation is kept as a worktree, as the playbook says: `pins/v0.34.23` (git-ignored).
+      It has the same bridge and trainer code, its game folder is a worktree of the game repo at v0.34.23, and junctions
+      lead to the main checkout's `node_modules` (same dependencies), `data`, `checkpoints` and `runs`. Records of
+      v0.34.17–v0.34.23 replay there in sync (commands: CLAUDE.md).
+    - The replay fixture (a v0.34.21 record) desynced. It is now ranked 1v1 game `c5QTvwaU5x` (Compact Europe
+      Classic, 272 s, v0.34.24), picked for what the trainer tests need: a nuke in flight, a finished defense post,
+      at least 5 structures (it has 7), at most 560 windows (543), and an out-of-set command (an emoji and a quick
+      chat; the coverage test's count now says 2). Short games with a nuke are rare: the first candidate had no nuke,
+      and the second's only defense post was never built. Typecheck, 43 bridge tests (determinism included) and 127
+      trainer tests pass.
+    - Not applicable this time: predictor Gate A (Phase 5), and the fine-tune and the match against the previous bot
+      (step 4 trains the v4 network, and Gate 3B measures it on v0.34.24).
+    - v0.34.24 records: 7,973 ranked 1v1 games from go-live to 2026-10-10 03:00 UTC (2,392 a day), 6,899 of them
+      with two players; none crawled yet. Which records step 4 uses is decided in 3B ("Step 4's records").
 
 ## Architecture
 ```
@@ -989,6 +1022,23 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - scalars 16–25: the gold against each build's cost, and the loaded silo missiles.
   - **Extractor**: every intent type is mapped. A wrapper masks the new types for 5-action checkpoints. Then a BC
     refresh.
+  - **Step 4's records** (after the v0.34.24 upgrade, 2026-10-10; **user decision pending**). `data/` holds 21,008
+    records of v0.34.17–v0.34.22, and at the new pin they desync within ~500 turns (decision 14's log). Options:
+    1. **Recommended:** the BC night and its scoring run from `pins/v0.34.23` on these records.
+       - Every game replays in full on its own simulation.
+       - They are the 3A night's records (less 3 purged), so the scores stay paired with the 3A clone and probe.
+       - Gate 3B's matches, PPO and evals run in the main checkout on v0.34.24. No code change.
+       - The new rule only touches attacks with nothing to conquer, and labels our masks forbid already stay out of
+         the loss (Phase 2, b), so the old records teach the same play.
+    2. v0.34.24 records only: crawl from 2026-10-06 19:00 UTC (6,899 two-player games so far, ~2,100 more a day), BC
+       at the new pin.
+       - A third of the data today.
+       - A new scoring set (the fixed one holds old records), so no paired comparison with the 3A networks.
+       - `trainer.bc` needs a version filter: it takes every indexed record.
+    3. Both, each at its own pin: the most data, but `trainer.bc` would need two worker groups split by record
+       version. A candidate for the next refresh.
+    - Until it is decided, no crawl: a crawl would add records of both simulations to `data/`, and `trainer.bc` would
+      mix them into a run at either pin.
   - **Gate 3B**:
     - commands outside the action set < 0.5%: **passed**, 0.40% on all held-out records (`scripts/coverage.py`; the
       user's reading, 2026-10-09; 0.60% on the score's 228 games);

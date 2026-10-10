@@ -18,11 +18,25 @@ read it before starting new work, and update it when a decision changes.
 
 ## Game version
 
-The submodule is pinned to the production release the official servers run (currently `v0.34.23`, commit `71154c52`).
+The submodule is pinned to the production release the official servers run (currently `v0.34.24`, commit `3f5633b9`).
 Check what production runs by reading `gitCommit` from a recent record:
 `https://api.openfront.io/public/game/<id>?turns=false` (list games via `/public/games`, see the game's `docs/API.md`).
 To upgrade, follow the playbook in `docs/PLAN.md` (decision 14): diff `src/core` between the tags, move the submodule,
-run the bridge tests and determinism check, then fine-tune from the latest checkpoint.
+run the bridge tests and determinism check, then fine-tune from the latest checkpoint. A simulation change also needs
+a replay fixture recorded at the new pin, and a worktree for the old simulation (below).
+
+Records of an older simulation desync at the pin, so each older simulation keeps a worktree at its last tag in `pins/`
+(git-ignored). `pins/v0.34.23` replays the records of v0.34.17-v0.34.23, which is all of `data/` today.
+- It holds the same bridge and trainer code on a detached HEAD. After code changes, update it with
+  `git -C pins/v0.34.23 checkout --detach <branch>`.
+- Its game folder is a worktree of the game repo at the old tag.
+- Junctions lead to the main checkout's `data`, `checkpoints`, `runs` and the game's `node_modules` (same
+  dependencies; if a later pin changes them, give the old one its own `npm ci`).
+- Run trainer commands from it with the main venv: `cd pins/v0.34.23`, then `../../.venv/Scripts/python -m trainer.bc
+  ...`. Checkpoints record the game commit they were trained on.
+- Made with `git worktree add --detach pins/<tag> <commit>`, then `git -C OpenFront_Source_Code/openfrontio worktree
+  add --detach <absolute path>/pins/<tag>/OpenFront_Source_Code/openfrontio <tag>`, then a PowerShell
+  `New-Item -ItemType Junction` for each of the four links.
 
 ## Game commands (run inside `OpenFront_Source_Code/openfrontio/`)
 
@@ -151,6 +165,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     simulation and observations).
 - `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
+- `data/` holds only records of v0.34.17-v0.34.22, which replay in full only in `pins/v0.34.23` ("Game version").
+  `trainer.bc` takes every indexed record, so do not crawl until step 4's records are decided (PLAN 3B): a crawl
+  would mix v0.34.24 records in.
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and includes the learner
   adapting to the games in progress (it read 0.84 where Gate B gave 0.63). Compare snapshots with `trainer.eval` on the
   same fixed seeds.
@@ -181,7 +198,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - Records store only non-empty turns: expand them with `decompressGameRecord` (`bridge/replay.ts: readRecord`).
 - Replays: archived records contain only human intents; nations and bots re-simulate from the game seed. A record
   replays in sync when no simulation code changed between its `gitCommit` and the pin (v0.34.17-v0.34.23 are
-  identical); the hashes it carries every 10 turns decide, not the commit string.
+  identical); the hashes it carries every 10 turns decide, not the commit string. v0.34.24 changed attacks, and
+  older records desync there within ~500 turns (median): replay them in `pins/v0.34.23`.
 - v0.34.x has no game snapshots. `loadTerrainMap` caches one mutable map per map and size per process, so the bridge
   builds a fresh map for every game (`bridge/maps.ts: loadFreshTerrain`) and resets the game's cross-game static
   fields before each game (`resetGameStatics`); several games can then share a worker process. On every upgrade, grep

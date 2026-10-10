@@ -13,3 +13,6 @@ replays/
 # Profiler output
 *.cpuprofile
 *.heapprofile
+
+# Past game pins (git worktrees with the game at an older tag), so old records stay re-extractable: PLAN decision 14
+pins/
