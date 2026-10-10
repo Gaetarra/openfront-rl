@@ -6,8 +6,8 @@ import torch
 
 from trainer.env import ROOT
 from trainer.model import PolicyV1
-from trainer.ppo import (Outcomes, gae, main, pack_bits, parse_args, parser, resume_args, run_info, seat_rows,
-                         unpack_bits)
+from trainer.ppo import (HostRows, Outcomes, gae, main, pack_bits, parse_args, parser, resume_args, run_info,
+                         seat_rows, unpack_bits)
 
 
 class RunInfoTest(unittest.TestCase):
@@ -115,6 +115,24 @@ class AllocatorTest(unittest.TestCase):
         y = torch.empty(300 * 2**20, dtype=torch.uint8, device="cuda")
         self.assertLess(torch.cuda.memory_reserved() - before, 400 * 2**20)
         del y
+
+
+class HostRowsTest(unittest.TestCase):
+    def test_minibatches_come_back_from_system_ram_as_the_rollout_wrote_them(self):
+        g = torch.Generator(device="cuda").manual_seed(0)
+        T, N = 5, 4
+        steps = [{"spatial": torch.randint(0, 65, (N, 3, 8, 8), device="cuda", generator=g).to(torch.uint8),
+                  "scalars": torch.rand(N, 6, device="cuda", generator=g)} for _ in range(T)]
+        host = HostRows(steps[0], T * N, 3)
+        for t, o in enumerate(steps):
+            host.put(t, o)
+        flat = {k: torch.cat([o[k] for o in steps]) for k in steps[0]}
+        perm = torch.randperm(T * N)
+        batches = list(zip(perm.split(3), host.batches(perm, "cuda")))
+        self.assertEqual(len(batches), 7)  # 6 minibatches of 3 and one of 2: each staging slot is reused
+        for idx, o in batches:
+            for k in flat:
+                self.assertTrue(torch.equal(o[k], flat[k][idx.cuda()]), k)
 
 
 class GaeTest(unittest.TestCase):

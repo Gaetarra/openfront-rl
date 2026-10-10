@@ -12,6 +12,7 @@ import collections
 import random
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -236,6 +237,52 @@ def unpack_bits(b):
     return ((b.unsqueeze(-1) >> bits) & 1).bool().flatten(-2)
 
 
+class HostRows:
+    """The rollout's rows in pinned system RAM, row t * N + n: on the ranked grid their observations take ~4.3 GB that
+    the card needs for learning (3B step 3). While the GPU learns from one minibatch, a worker thread gathers the next
+    into one of two pinned slots and copies it to the GPU on a stream of its own."""
+
+    def __init__(self, example, rows, size):
+        """example: one step's rows {key: [N, ...]}; rows: T * N; size: a minibatch's rows."""
+        self.n, self.size = len(next(iter(example.values()))), size
+        self.buf = {k: torch.empty((rows,) + v.shape[1:], dtype=v.dtype, pin_memory=True) for k, v in example.items()}
+        self.slots = [{k: torch.empty((size,) + v.shape[1:], dtype=v.dtype, pin_memory=True)
+                       for k, v in example.items()} for _ in range(2)]
+
+    def put(self, step, o):
+        """One step's rows (GPU tensors), copied in without waiting."""
+        for k, v in o.items():
+            self.buf[k][step * self.n:(step + 1) * self.n].copy_(v, non_blocking=True)
+
+    def batches(self, perm, device):
+        """The minibatches of the row order `perm` (CPU), `size` rows each, as GPU tensors."""
+        idx = perm.split(self.size)
+        main, side = torch.cuda.current_stream(), torch.cuda.Stream()
+        copied = [torch.cuda.Event(), torch.cuda.Event()]  # the slot's last minibatch is on the GPU
+        main.synchronize()  # the rollout's copies have landed
+
+        def fetch(i):
+            slot, m = self.slots[i % 2], len(idx[i])
+            copied[i % 2].synchronize()
+            for k, v in self.buf.items():
+                torch.index_select(v, 0, idx[i], out=slot[k][:m])
+            with torch.cuda.stream(side):
+                o = {k: v[:m].to(device, non_blocking=True) for k, v in slot.items()}
+            copied[i % 2].record(side)
+            return o
+
+        with ThreadPoolExecutor(1) as pool:
+            ahead = pool.submit(fetch, 0)
+            for i in range(len(idx)):
+                o = ahead.result()
+                main.wait_stream(side)
+                for v in o.values():
+                    v.record_stream(main)  # made on the side stream: keep it until the learning stream is done
+                if i + 1 < len(idx):
+                    ahead = pool.submit(fetch, i + 1)
+                yield o
+
+
 def main(argv=None):
     a = parse_args(argv)
     ckpt_dir = ROOT / "checkpoints" / a.run
@@ -313,8 +360,7 @@ def main(argv=None):
         """A seat's rows as the rollout keeps them: the cell masks as bits."""
         return {**o, "cell_mask": pack_bits(o["cell_mask"])}
 
-    buf = {k: torch.zeros((T,) + tuple(v.shape), dtype=v.dtype, device=device)
-           for k, v in stored(rows(obs, learner)).items()}
+    host = HostRows(stored(rows(obs, learner)), T * N, T * N // a.minibatches)
     actions = torch.zeros(T, N, 4, dtype=torch.long, device=device)
     logps, values, rewards, dones = (torch.zeros(T, N, device=device) for _ in range(4))
     outcomes = Outcomes(N)
@@ -330,8 +376,7 @@ def main(argv=None):
                 return False
             t0 = time.perf_counter()
             mine = rows(obs, learner)
-            for k, v in stored(mine).items():
-                buf[k][step] = v
+            host.put(step, stored(mine))
             full = torch.zeros(envs.N, 4, dtype=torch.long, device=device)
             with torch.no_grad():
                 with torch.autocast("cuda", torch.bfloat16):
@@ -364,12 +409,11 @@ def main(argv=None):
             last_value = model(rows(obs, learner))["value"].float()
         adv = gae(rewards, values, dones, last_value, a.gamma, a.gae_lambda)
         ret = adv + values
-        flat = {k: v.flatten(0, 1) for k, v in buf.items()}
         b_act, b_logp, b_adv, b_ret = actions.flatten(0, 1), logps.flatten(), adv.flatten(), ret.flatten()
         stats = collections.defaultdict(list)
         for _ in range(a.epochs):
-            for mb in torch.randperm(T * N, device=device).split(T * N // a.minibatches):
-                o = {k: v[mb] for k, v in flat.items()}
+            perm = torch.randperm(T * N)
+            for mb, o in zip(perm.to(device).split(host.size), host.batches(perm, device)):
                 o["cell_mask"] = unpack_bits(o["cell_mask"])
                 with torch.autocast("cuda", torch.bfloat16):
                     out = model(o)
