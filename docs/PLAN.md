@@ -1056,6 +1056,11 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - ~17 h at the speed check's 642 rows/s (the v3 nights: ~14 h at ~750);
     - first hours: every map's `val/bc/*_cell_near` should rise above its `*_cell_near_uniform`, and `val/bc/nll` fall;
     - then the score from the pin (the 3A clone, bc3b, bc3b-moe-swiglu, bc3b-v4), and Gate 3B in the main checkout.
+    - **Done 2026-10-10 06:10 → 21:44** (15.6 h, ~600 rows/s): all 24,976 updates in one sitting, no driver event.
+      Its last validations (held-out games, 5 averaged; v4's `val/bc/nll` 0.977 covers rows older networks cannot
+      express, so it is not comparable with theirs): every map's near rate beats its uniform baseline, by 1.3× (port)
+      to 21× (boat, warship); the maps of whole-map targets far more (atom 0.29 against ~0). Weakest against uniform:
+      port 1.3×, upgrade 1.5×, city, silo and factory ~2×. `val/labels/illegal` 0.47%.
   - **Gate 3B**:
     - commands outside the action set < 0.5%: **passed**, 0.40% on all held-out records (`scripts/coverage.py`; the
       user's reading, 2026-10-09; 0.60% on the score's 228 games);
