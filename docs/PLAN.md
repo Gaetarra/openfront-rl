@@ -928,7 +928,21 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           - Rollouts also take 7.3 s per update, against v1's 5.2. Not yet split between GPU work and the random
             network's play: it acts on most decisions and builds every unit type.
           - Triton is not installed, so `torch.compile` cannot fuse that math.
-        - Still to do: the user's call on the speed and memory, then Task 6 (the channels) and Task 8 (docs and the
+        - **Optimization** (the user's call, 2026-10-10: optimize, then re-measure; all runs at 16 minibatches):
+          - The heads take their distributions from one log_softmax (f7e81f5): v4's heat-map math went from 59 to 36
+            ms a minibatch, with the same values and gradients. PPO's entropy enters the graph only with a weight
+            (c294f13). Result: 52%, because v4 still spilled (other programs held 1.2 GB).
+          - Expandable allocator segments, now the trainers' default (988c6d8): v4's reserved peak fell from 10.5 to
+            9.9 GB, the spill stopped, and v4 reached **71%**.
+          - Emptying the cache before learning: 9,552 MiB reserved, 8,155 in use, own 9,673 MiB; 69%.
+          - Per update, v4 against v1:
+            - learning 6.6 s against 3.9;
+            - the rollouts' GPU work 1.9 s against 1.2;
+            - simulation and observations 5.0 s against 4.5 (a random network plays more than the clone).
+          - Still open:
+            - the memory rule: own 9,673 MiB against 9,400, before Part 2's ~0.8 GB;
+            - the 75% bar.
+        - Still to do: the user's call on the memory and the bar, then Task 6 (the channels) and Task 8 (docs and the
           final speed check). The ledger, `.superpowers/sdd/2026-10-09-phase3b-observations/progress.md`, holds the
           rulings.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
