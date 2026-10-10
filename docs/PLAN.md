@@ -1061,6 +1061,26 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       express, so it is not comparable with theirs): every map's near rate beats its uniform baseline, by 1.3× (port)
       to 21× (boat, warship); the maps of whole-map targets far more (atom 0.29 against ~0). Weakest against uniform:
       port 1.3×, upgrade 1.5×, city, silo and factory ~2×. `val/labels/illegal` 0.47%.
+    - **Score** (2026-10-10, from the pin, `runs/score/20261010-232613.json`, the same 288,000 rows), bc3b-v4 against
+      bc3-moe / bc3b / bc3b-moe-swiglu:
+      - `bc/nll` 0.950 against 0.8386 is not like for like: v4 is scored on the rows of all 15 actions
+        (`labels/beyond_net` 0 against 1.04%), and the new maps' cells are rare and hard (NLL 4.6–7.5).
+      - On the heads all four share, v4 is level or best: attack target 1.5998 (bc3b 1.6020), attack share 2.5518
+        (2.5532), attack size 0.6288 (0.6324), city cell 6.7884 (6.8667), outcome correlation 0.700 (0.697). It is
+        slightly behind bc3b on boats (cell 5.014 against 5.004, share 2.933 against 2.919) and on the spawn cell
+        (8.896, like the SwiGLU twin, against 8.718).
+      - Near rate against a uniform pick over the legal cells: atom 26% (~650×), hydrogen 1.8% (58×), warship 2.3%
+        (29×), boat 10% (16×), spawn 1.4% (13×), SAM 3.0% (6.5×), defense post 5.2% (4.5×), silo 2.6×, factory
+        2.5×, city 2.4×, port 8.5% (1.2×), upgrade 34% (1.15×; the exact building 40%). Retreat target 91%.
+        - No map stays at uniform. The two closest, port and upgrade, have few legal cells (coast; the seat's own
+          upgradable buildings), so a uniform pick is already near, and a spatial label could not spread onto
+          illegal neighbours: the deferred spatial label still has no case.
+      - It acts in 17.2% of rows, the humans in 16.7%.
+      - Router: one expert takes 54–77% of the weight and a second 17–33%; the other six get ≤ 8% (bc3b: two at
+        27% and 38–45%). For 3C's routing test (upcycling, a load-balancing term or router noise).
+    - **Gate 3B's run** (`runs/gate3b.cmd`, started 2026-10-10 23:33 via `explorer.exe`, main checkout, v0.34.24):
+      1,024 games against the 3A clone (the 0.545 bar, invalid actions from the eval's new `invalid_share`, and the
+      1,000 games without errors), then the PPO speed probe with this clone (`speed_check.py --v4`).
   - **Gate 3B**:
     - commands outside the action set < 0.5%: **passed**, 0.40% on all held-out records (`scripts/coverage.py`; the
       user's reading, 2026-10-09; 0.60% on the score's 228 games);
