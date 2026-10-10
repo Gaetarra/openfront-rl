@@ -901,8 +901,21 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         2026-10-09 and approved by the user the same day, with the coverage counts by side (ours, theirs) rather than
         by relation. It measures v4's PPO speed and memory first (Part 1 took the heat maps from 3 to 12), against a
         rule fixed in advance.
-        - In progress: Task 1's script and Tasks 3, 4, 5 and 7 are coded (6df6dc1..30b176e; 43 bridge and 118
-          trainer tests pass).
+        - Coded 2026-10-09..10 (6df6dc1..83a4db9; 43 bridge and 126 trainer tests pass). Its decisions:
+          1. zones by side, ours (self and friends) and theirs (enemies and bots), not by relation:
+             - the two are the same in 1v1;
+             - bots never build SAMs or posts, and never launch nukes;
+             - a friend's SAM also covers our land;
+             - it saves 3 channels;
+          2. scales: level and loaded missiles / 16 (exact up to 63). A SAM's zone counts its loaded interceptors
+             / 16, a post's or a nuke's 1;
+          3. under construction: the level channel reads 0 while the type channel reads 1;
+          4. unit costs are scalars, gold over each build's current cost, capped at 4 and divided by 4. Rule values
+             reach the network through the zones' radii;
+          5. v4 is redefined to read the new inputs (no v4 checkpoint existed);
+          6. a cell is in a zone when its centre lies within the radius:
+             - the arithmetic stays in integers (positions doubled);
+             - zones also cover padding cells, which the network marks with VALID.
         - **Task 1's speed check** (2026-10-10, `--ppo-minibatches 12`; a video playing in Chrome kept the GPU ~20%
           busy, the same for every arm):
           - PPO: Phase 2 network 164.5 decisions/s, v4 11.2: **7%** of it (bar: 75%).
@@ -942,19 +955,29 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           - Still open:
             - the memory rule: own 9,673 MiB against 9,400, before Part 2's ~0.8 GB;
             - the 75% bar.
-        - Still to do: the user's call on the memory and the bar, then Task 6 (the channels) and Task 8 (docs and the
-          final speed check). The ledger, `.superpowers/sdd/2026-10-09-phase3b-observations/progress.md`, holds the
-          rulings.
+        - **The user's calls (2026-10-10):**
+          - The rollout buffer moves to system RAM (0b8c7ff, `HostRows`): ~4.3 GB off the card.
+            - Learning is ~4% slower in a synthetic epoch: 147 ms a minibatch against 138.
+            - 96- and 128-row minibatches cost the same per row and 192 rows 49% more, so PPO stays at 12 minibatches.
+          - The 75% bar is judged at Gate 3B, with the BC-trained v4.
+        - Then Task 6 (the 8 channels, 83a4db9) and Task 8's docs.
+        - Still to do: Task 8's final speed check with every input (the user's go). The ledger,
+          `.superpowers/sdd/2026-10-09-phase3b-observations/progress.md`, holds the rulings.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
     GPU from the channels, and the upgrade map from the unit records (exact). The exact check stays in the worker,
     and failures are counted no-ops.
-  - **Observations**: nukes in flight and their targets, SAM and defense-post coverage, silo readiness, and unit costs
-    as scalars. The bridge sends nuke targets and unit levels.
+  - **Observations** (coded 2026-10-10, task list part 2): nukes in flight and their targets, SAM and defense-post
+    coverage, silo readiness, and unit costs as scalars. The bridge sends nuke targets and unit levels.
     - Buildings need their state too (found 2026-10-08): one under construction reads as a finished level 1 today,
       and levels from 4 up saturate at 3.98, the top of the inputs' 64ths byte.
-    - SAM coverage counts the ready interceptors on each cell, by relation (decision 4; the brief's idea D): over the
-      covering SAMs, level minus missiles reloading.
+    - SAM coverage counts the ready interceptors on each cell (the brief's idea D): over the covering SAMs, level minus
+      missiles reloading.
+      - It counts by side: ours (self and friends) and theirs (enemies and bots).
+      - Decision 4 first said "by relation"; part 2's decision 1 changed it, with its reasons.
     - SAMs under construction are left out, and each SAM's current range is used (it ramps after an upgrade).
+    - Coded as 8 channels and 10 scalars:
+      - channels 49–56: level, loaded missiles, and the SAM, post and nuke zones of each side;
+      - scalars 16–25: the gold against each build's cost, and the loaded silo missiles.
   - **Extractor**: every intent type is mapped. A wrapper masks the new types for 5-action checkpoints. Then a BC
     refresh.
   - **Gate 3B**:

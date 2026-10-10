@@ -51,7 +51,7 @@ npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a
 npx tsx ../../scripts/troop_shares.ts 60                    # share of their troops humans send per attack/boat, 60 replayed records (~10 min, game dir)
 .venv/Scripts/python scripts/bench_gpu.py                   # GPU encoder throughput (run from the repo root)
 .venv/Scripts/python scripts/coverage.py                    # Gate 3B's coverage: commands outside the 15 actions over all held-out records (seconds)
-.venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s and peak VRAM of the Phase 2 network and a v4 network, BC rows/s of the v4 network (~15 min, PC idle)
+.venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s, time split and peak VRAM of the Phase 2 network and a v4 network, BC rows/s of the v4 network (~15 min, PC idle)
 ```
 
 Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUDA 13.0 wheels).
@@ -104,10 +104,11 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   over `--updates` (default: one pass over the training records). BC checkpoints from before Phase 3 cannot resume;
   start from them with `--init`. Runs with the same `--seed` replay the same records in the same order.
 - Networks: new runs record theirs in the checkpoint (`args["arch"]`, `"core"`): v1 is Phase 2, v2 is Phase 3A (5 troop
-  sizes), v3 is Phase 3B (100 troop shares), v4 adds every action (15 types, 12 heat maps, a retreat pointer);
-  `--init` keeps the checkpoint's. A checkpoint without `"arch"` (Phase 2) loads as `PolicyV1`, which rebuilds its 22
-  input channels from today's 49 (`v1_spatial`), so the Phase 2 bots still play. v1–v3 see only their 5 types and 3
-  heat maps of the 15 (`ActionDist`), and BC scores each network on the rows its types can express.
+  sizes), v3 is Phase 3B (100 troop shares), v4 adds every action (15 types, 12 heat maps, a retreat pointer) and the
+  3B inputs (57 channels, 26 scalars); `--init` keeps the checkpoint's. A checkpoint without `"arch"` (Phase 2) loads
+  as `PolicyV1`, which rebuilds its 22 input channels from the first 49 of today's 57 (`v1_spatial`), so the Phase 2
+  bots still play. v1–v3 see only their 5 types and 3 heat maps of the 15 (`ActionDist`), and only the 49 channels and
+  16 scalars they were trained on; BC scores each network on the rows its types can express.
 - Troops are a whole percent of current troops (1–100) in actions and labels. v1 and v2 networks send
   10/25/50/75/100%, exactly what their five bins sent. v3 and v4 networks read the share with a player's token: the attack's
   target, or the main owner of the boat's landing cell.
@@ -117,7 +118,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     36–61, 62–86 and 87–100%), and `bc/nll_shares` is a share network's own NLL.
   - The cell heads are also scored by closeness (the user's idea, 2026-10-07), since a near miss is almost as good as
     a hit. `bc/*_cell_near` is the chance the bot's cell lands within 16 tiles of the human's, and `bc/*_cell_dist`
-    is its expected distance in tiles.
+    is its expected distance in tiles. `*_uniform` gives each one's baseline, a uniform pick over the legal cells.
   - `--twin CORE` trains a second network on the same windows, from the same weights outside the core. It saves to
     `checkpoints/<run>-<core>`, and the run resumes both together.
 - Actions (bridge/actions.ts `Act`): no-op, spawn, attack, boat, build city / defense post / silo / factory / port /
@@ -127,9 +128,26 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     an attack to cancel; the GPU masks the cells, the upgrade map exactly (own, finished, gold for its type).
   - The game's `canBuild` / `canUpgradeUnit` decide in the worker, and a failed action is a counted no-op.
   - Outside the set: diplomacy, chat, warship moves and MIRVs.
-- GPU memory: ranked PPO with a Phase 3 network needs `--minibatches 12` on the 12 GB card (peak ~10.9 GB). At the
-  default 8 it overflows by 1.2–1.9 GB, Windows pages the rest into system RAM without an error, and the run gets 2–4×
-  slower (watch "Shared GPU memory" in Task Manager).
+- Observations (3B step 3, part 2):
+  - Unit records carry the missiles loaded in silos and SAMs, and each unit's zone in tiles from the game's Config:
+    a finished SAM's current range, a finished defense post's range, a nuke's outer blast around its target.
+  - The GPU paints 8 channels after the 49 (`disk_cells`): each structure's level and loaded missiles (/ 16; level 0
+    while under construction), and the SAM, defense-post and nuke zones of each side. Ours is self and friends;
+    theirs is enemies and bots.
+  - Scalars 16–25: the gold against each build's current cost, and the seat's loaded silo missiles.
+- GPU memory (12 GB card):
+  - PPO keeps its rollout rows in pinned system RAM (`HostRows`, ~5 GB on the ranked grid), with the cell masks as
+    bits (`pack_bits`). A worker thread copies each minibatch to the GPU on its own stream while the previous one
+    trains.
+  - The trainers run with expandable allocator segments (`trainer/__init__.py`), and PPO empties the cache before
+    learning.
+  - Ranked PPO with a Phase 3 network runs at `--minibatches 12`. 96- and 128-row minibatches cost the same per row,
+    and 192 rows (the default 8) cost 49% more.
+  - When the card overflows, Windows pages the rest into system RAM without an error, and the run gets 2–4× slower
+    (watch "Shared GPU memory" in Task Manager).
+  - PPO logs `perf/gpu_reserved_gb` (the allocator's peak, which reads past the card when it spills),
+    `perf/gpu_allocated_gb` (in use), and the time split `perf/rollout_share` and `perf/env_share` (the workers'
+    simulation and observations).
 - `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and includes the learner
