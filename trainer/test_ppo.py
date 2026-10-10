@@ -134,6 +134,21 @@ class HostRowsTest(unittest.TestCase):
             for k in flat:
                 self.assertTrue(torch.equal(o[k], flat[k][idx.cuda()]), k)
 
+    def test_every_epoch_reuses_the_gpu_memory_of_the_last(self):
+        """PyTorch caches freed GPU memory per stream: with a new copy stream each epoch, every epoch's minibatches stayed
+        reserved (2.5-3.7 GB over the in-use peak in 3B's final speed check)."""
+        rows = {"x": torch.zeros(4, 2**20, dtype=torch.uint8, device="cuda")}  # 1 MiB a row
+        host = HostRows(rows, 40, 8)
+        for t in range(10):
+            host.put(t, rows)
+        reserved = []
+        for _ in range(4):
+            for o in host.batches(torch.randperm(40), "cuda"):
+                pass
+            torch.cuda.synchronize()
+            reserved.append(torch.cuda.memory_reserved())
+        self.assertEqual(reserved[-1], reserved[0])
+
 
 class GaeTest(unittest.TestCase):
     def test_hand_computed(self):

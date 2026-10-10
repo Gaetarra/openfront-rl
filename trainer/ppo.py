@@ -248,6 +248,7 @@ class HostRows:
         self.buf = {k: torch.empty((rows,) + v.shape[1:], dtype=v.dtype, pin_memory=True) for k, v in example.items()}
         self.slots = [{k: torch.empty((size,) + v.shape[1:], dtype=v.dtype, pin_memory=True)
                        for k, v in example.items()} for _ in range(2)]
+        self.side = torch.cuda.Stream()  # one for good: PyTorch caches freed GPU memory per stream
 
     def put(self, step, o):
         """One step's rows (GPU tensors), copied in without waiting."""
@@ -257,7 +258,7 @@ class HostRows:
     def batches(self, perm, device):
         """The minibatches of the row order `perm` (CPU), `size` rows each, as GPU tensors."""
         idx = perm.split(self.size)
-        main, side = torch.cuda.current_stream(), torch.cuda.Stream()
+        main, side = torch.cuda.current_stream(), self.side
         copied = [torch.cuda.Event(), torch.cuda.Event()]  # the slot's last minibatch is on the GPU
         main.synchronize()  # the rollout's copies have landed
 
