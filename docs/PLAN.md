@@ -1078,7 +1078,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - It acts in 17.2% of rows, the humans in 16.7%.
       - Router: one expert takes 54–77% of the weight and a second 17–33%; the other six get ≤ 8% (bc3b: two at
         27% and 38–45%). For 3C's routing test (upcycling, a load-balancing term or router noise).
-    - **Gate 3B's run** (`runs/gate3b.cmd`, started 2026-10-10 23:33 via `explorer.exe`, main checkout, v0.34.24):
+    - **Gate 3B's run** (`runs/gate3b.cmd`, started 2026-10-10 23:26 via `explorer.exe`, main checkout, v0.34.24):
       1,024 games against the 3A clone (the 0.545 bar, invalid actions from the eval's new `invalid_share`, and the
       1,000 games without errors), then the PPO speed probe with this clone (`speed_check.py --v4`).
   - **Gate 3B**:
