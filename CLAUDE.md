@@ -166,8 +166,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
 - `data/` holds only records of v0.34.17-v0.34.22, which replay in full only in `pins/v0.34.23` ("Game version").
-  `trainer.bc` takes every indexed record, so do not crawl until step 4's records are decided (PLAN 3B): a crawl
-  would mix v0.34.24 records in.
+  Step 4's BC night and its scoring run from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
+  indexed record, so do not crawl before that night is done: a crawl would mix v0.34.24 records in.
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and includes the learner
   adapting to the games in progress (it read 0.84 where Gate B gave 0.63). Compare snapshots with `trainer.eval` on the
   same fixed seeds.

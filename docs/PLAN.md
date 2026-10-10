@@ -1022,9 +1022,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - scalars 16–25: the gold against each build's cost, and the loaded silo missiles.
   - **Extractor**: every intent type is mapped. A wrapper masks the new types for 5-action checkpoints. Then a BC
     refresh.
-  - **Step 4's records** (after the v0.34.24 upgrade, 2026-10-10; **user decision pending**). `data/` holds 21,008
-    records of v0.34.17–v0.34.22, and at the new pin they desync within ~500 turns (decision 14's log). Options:
-    1. **Recommended:** the BC night and its scoring run from `pins/v0.34.23` on these records.
+  - **Step 4's records** (after the v0.34.24 upgrade, 2026-10-10; **user decision 2026-10-10: option 1**). `data/`
+    holds 21,008 records of v0.34.17–v0.34.22, and at the new pin they desync within ~500 turns (decision 14's log).
+    Options:
+    1. **Chosen:** the BC night and its scoring run from `pins/v0.34.23` on these records.
        - Every game replays in full on its own simulation.
        - They are the 3A night's records (less 3 purged), so the scores stay paired with the 3A clone and probe.
        - Gate 3B's matches, PPO and evals run in the main checkout on v0.34.24. No code change.
@@ -1037,8 +1038,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
        - `trainer.bc` needs a version filter: it takes every indexed record.
     3. Both, each at its own pin: the most data, but `trainer.bc` would need two worker groups split by record
        version. A candidate for the next refresh.
-    - Until it is decided, no crawl: a crawl would add records of both simulations to `data/`, and `trainer.bc` would
-      mix them into a run at either pin.
+    - No crawl until the night is done: a crawl would add v0.34.24 records to `data/`, and `trainer.bc` would mix them
+      into the run at the old pin.
   - **Gate 3B**:
     - commands outside the action set < 0.5%: **passed**, 0.40% on all held-out records (`scripts/coverage.py`; the
       user's reading, 2026-10-09; 0.60% on the score's 228 games);
