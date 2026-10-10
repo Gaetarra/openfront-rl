@@ -967,8 +967,11 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
             channels. It still reserved 9,698 MiB (own 9,861) because each epoch took a new copy stream, and PyTorch
             caches freed memory per stream, so every epoch's blocks stayed reserved. Fixed in b86fb53.
           - BC: v4 642 rows/s (611 before the optimizations), peak 9,871 MiB.
-        - Still to do: a PPO re-measure after the fix (the user's go). The ledger,
-          `.superpowers/sdd/2026-10-09-phase3b-observations/progress.md`, holds the rulings.
+        - Re-measured after the fix (`--skip-bc`, other programs held 1,104 MiB):
+          - v1 148.9 decisions/s, v4 108.1 (73%);
+          - v4: 8,474 MiB reserved, 5,978 in use, **own 8,692 MiB, under the 9,400 rule** with every input.
+        - **Part 2 is done.** Next is 3B step 4, the BC refresh: a v4 network with SwiGLU experts, one night at ~640
+          rows/s.
   - **Masks**: action types in the bridge (gold against each unit's current cost, a ready silo, a port); cells on the
     GPU from the channels, and the upgrade map from the unit records (exact). The exact check stays in the worker,
     and failures are counted no-ops.
@@ -994,6 +997,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - beats the 3A clone ≥ 0.545;
     - a 10-update PPO probe keeps ≥ 75% of Phase 2's decisions/s, compared within one run as in Gate 3A. 3B adds 9 heat
       maps, coverage channels and maybe 12.6M parameters.
+      - The user decided on 2026-10-10 to measure it with the BC-trained v4.
+      - A network with random weights reached 73%, but it acts on most decisions and costs more simulation than a
+        trained one.
+      - If the bar is missed, one exact optimization is left: compute only the heat maps of each row's legal types.
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;

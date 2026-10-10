@@ -142,7 +142,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   - The trainers run with expandable allocator segments (`trainer/__init__.py`), and PPO empties the cache before
     learning.
   - Ranked PPO with a Phase 3 network runs at `--minibatches 12`. 96- and 128-row minibatches cost the same per row,
-    and 192 rows (the default 8) cost 49% more.
+    and 192 rows (the default 8) cost 49% more. At 12, v4 with every 3B input holds ~8.7 GB of the card, 6.0 GB of it
+    in use.
   - When the card overflows, Windows pages the rest into system RAM without an error, and the run gets 2–4× slower
     (watch "Shared GPU memory" in Task Manager).
   - PPO logs `perf/gpu_reserved_gb` (the allocator's peak, which reads past the card when it spills),
