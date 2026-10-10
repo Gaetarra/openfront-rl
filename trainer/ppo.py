@@ -413,6 +413,7 @@ def main(argv=None):
             if not rollout():
                 break
             t1 = time.perf_counter()
+            torch.cuda.empty_cache()  # the rollouts' cached blocks would otherwise sit under learning's peak
             metrics = learn()
             control.throttle(time.perf_counter() - t1)
             update += 1
@@ -423,6 +424,7 @@ def main(argv=None):
             metrics["perf/env_share"] = env_time / dt  # the workers' simulation and the pipes, within the rollouts
             # past the card's size when Windows pages GPU memory into system RAM (nvidia-smi stops at the card)
             metrics["perf/gpu_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
+            metrics["perf/gpu_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30  # in use; the rest is cache
             metrics["actions/invalid_rate"] = invalid_count / (T * N)
             for i, name in enumerate(ACT_NAMES):
                 metrics[f"actions/{name}"] = float(act_counts[i] / (T * N))

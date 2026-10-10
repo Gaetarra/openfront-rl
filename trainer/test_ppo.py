@@ -104,6 +104,19 @@ class PackTest(unittest.TestCase):
         self.assertTrue(torch.equal(unpack_bits(b), m))
 
 
+class AllocatorTest(unittest.TestCase):
+    def test_freed_gpu_memory_serves_a_larger_tensor(self):
+        """The trainers run with expandable allocator segments. PyTorch's default kept a freed block reserved beside a
+        larger new one: v4's PPO peak was 10.5 GB reserved by default and 9.9 GB with them (3B step 3)."""
+        torch.cuda.empty_cache()
+        before = torch.cuda.memory_reserved()
+        x = torch.empty(256 * 2**20, dtype=torch.uint8, device="cuda")
+        del x
+        y = torch.empty(300 * 2**20, dtype=torch.uint8, device="cuda")
+        self.assertLess(torch.cuda.memory_reserved() - before, 400 * 2**20)
+        del y
+
+
 class GaeTest(unittest.TestCase):
     def test_hand_computed(self):
         r = torch.tensor([[0.0], [0.0], [1.0]])

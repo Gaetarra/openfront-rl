@@ -56,8 +56,8 @@ def run(name, module, flags):
     acc.Reload()
     tag = "perf/decisions_per_s" if module == "trainer.ppo" else "perf/samples_per_s"
     points = [e.value for e in acc.Scalars(tag)][2:]
-    last = {t: acc.Scalars(t)[-1].value for t in ("perf/rollout_share", "perf/env_share", "perf/gpu_reserved_gb")
-            if t in acc.Tags()["scalars"]}
+    tags = ("perf/rollout_share", "perf/env_share", "perf/gpu_reserved_gb", "perf/gpu_allocated_gb")
+    last = {t: acc.Scalars(t)[-1].value for t in tags if t in acc.Tags()["scalars"]}
     return sum(points) / max(len(points), 1), peak[0], last
 
 
@@ -108,7 +108,8 @@ def main(argv=None):
         if last:
             extra += (f"  (rollouts {last['perf/rollout_share']:.0%} of the time, the simulation "
                       f"{last['perf/env_share']:.0%}, "
-                      f"allocator peak {last['perf/gpu_reserved_gb'] * 1024:.0f} MiB)")
+                      f"allocator peak {last['perf/gpu_reserved_gb'] * 1024:.0f} MiB, "
+                      f"{last['perf/gpu_allocated_gb'] * 1024:.0f} in use)")
         print(f"{name:20} {rate:8.1f} {unit:12} peak {peak} MiB{extra}")
     rate, peak, last = results["speed-ppo-v4"]
     print(f"\nPPO, v4: {rate / v1:.0%} of the Phase 2 network's decisions/s in this run (Gate 3B: >= 75%); "
