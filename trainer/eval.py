@@ -189,8 +189,9 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
          a_two_bins=False):
     """Plays the first ceil(episodes / games) episodes of every game slot; returns the summary of policy 0, its meters
     (Cooldown, with `a_cooldown` no-ops after each of its actions; `a_two_bins`: a troop and a gold action per
-    decision), and the IDs of the games saved with `record` ({"dir", "gitCommit", "games"}). Sampling uses a fixed
-    torch seed, so a given set of policies always gives the same result."""
+    decision; and Gate 3B's invalid actions: of its decisions that act, the share the bridge refuses), and the IDs of
+    the games saved with `record` ({"dir", "gitCommit", "games"}). Sampling uses a fixed torch seed, so a given set of
+    policies always gives the same result."""
     torch.manual_seed(0)
     envs = VecEnv(config, workers, games_per_worker, seed=seed, device=device, record=record)
     try:
@@ -203,12 +204,15 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
         rows = [torch.tensor([e * S + seats[e][p] for e in range(E)], device=device) for p in range(S)]
         per_slot = -(-episodes // E)
         counts, results, seen, obs = np.zeros(E, int), [], [], envs.obs
+        a_rows, acted, refused = rows[0].cpu().numpy(), 0, 0
         while counts.min() < per_slot:
             act = torch.zeros(envs.N, 8 if a_two_bins else 4, dtype=torch.long, device=device)
             for p, policy in enumerate(policies):
                 out = policy({k: v[rows[p]] for k, v in obs.items()})
                 act[rows[p], :out.shape[1]] = out
-            obs, _, _, infos, _ = envs.step(act.cpu().numpy())
+            obs, _, _, infos, invalid = envs.step(act.cpu().numpy())
+            acted += int((act[rows[0], 0::4] != 0).any(1).sum())  # every 4th entry is an action's type
+            refused += int(invalid[a_rows].sum())
             seen += infos
             for info in infos:
                 e = info["env"]
@@ -224,7 +228,8 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
         names = [label(s) for s in specs]
         for game_id, slot_seats in recorded.items():
             name_players(Path(record["dir"]) / f"{game_id}.json", {s: names[p] for p, s in enumerate(slot_seats)})
-    return {**summarize(results), "meters": policies[0].meters(), "recorded": sorted(recorded)}
+    meters = {**policies[0].meters(), "actions": acted, "invalid_share": refused / acted if acted else 0.0}
+    return {**summarize(results), "meters": meters, "recorded": sorted(recorded)}
 
 
 def main(argv=None):

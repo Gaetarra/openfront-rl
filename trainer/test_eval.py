@@ -90,6 +90,13 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(r["episodes"], 2)
         self.assertIn("parallel_share", r["meters"])
 
+    def test_the_actions_the_bridge_refuses_count_as_invalid(self):
+        city_at_0 = lambda obs: torch.tensor([[4, 0, 0, 0]] * len(obs["type_mask"]), device=obs["type_mask"].device)
+        with mock.patch("trainer.eval.load_policy", return_value=city_at_0):
+            r = play(["city"], {**ONION, "timerMinutes": 1}, episodes=1, workers=1, games_per_worker=1, seed="refused")
+        self.assertGreater(r["meters"]["actions"], 0)
+        self.assertEqual(r["meters"]["invalid_share"], 1.0)  # a city on the corner cell, from the spawn phase on
+
     def test_a_cooldown_keeps_policy_a_from_acting_twice_in_a_row(self):
         r = play(["random", "random"], ONION2, episodes=2, workers=1, games_per_worker=2, seed="cool", a_cooldown=1)
         self.assertEqual(r["meters"]["follow_share"], 0.0)

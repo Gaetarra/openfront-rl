@@ -1,11 +1,13 @@
 """Speed and memory check (docs/PLAN.md, 3B). It measures:
 - PPO decisions/s and peak GPU memory for the Phase 2 network and a v4 network. The v4 network has every action and
-  the SwiGLU experts the BC refresh trains, with random weights: speed does not depend on them;
+  the SwiGLU experts the BC refresh trains, with random weights, or the checkpoint given with --v4. Gate 3B times the
+  BC clone: a random network acts on most decisions, which costs more simulation;
 - BC rows/s for the v4 network.
 Gate 3B: v4 keeps at least 75% of the Phase 2 network's decisions/s in the same run. Run it with the PC otherwise idle
 (~15 min, full GPU):
 
   .venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12
+  .venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12 --skip-bc --v4 checkpoints/bc3b-v4/latest.pt
 """
 import argparse
 import shutil
@@ -71,13 +73,16 @@ def main(argv=None):
     p.add_argument("--bc-games", type=int, default=6)
     p.add_argument("--bc-updates", type=int, default=30)
     p.add_argument("--skip-bc", action="store_true", help="only the PPO runs")
+    p.add_argument("--v4", help="a v4 checkpoint to time in PPO instead of random weights (Gate 3B: the BC clone)")
     a = p.parse_args(argv)
     speed = ROOT / "checkpoints" / "speed"
     speed.mkdir(parents=True, exist_ok=True)
-    args = {"arch": "v4", "core": "moe-swiglu", "widths": "64,128,192", "run": "speed-v4"}
-    torch.manual_seed(0)
-    v4 = str(speed / "v4.pt")
-    torch.save({"model": new_net(DIMS, args).state_dict(), "args": args, "update": 0}, v4)
+    v4 = a.v4
+    if v4 is None:
+        args = {"arch": "v4", "core": "moe-swiglu", "widths": "64,128,192", "run": "speed-v4"}
+        torch.manual_seed(0)
+        v4 = str(speed / "v4.pt")
+        torch.save({"model": new_net(DIMS, args).state_dict(), "args": args, "update": 0}, v4)
     idle = gpu_memory()
     ppo = ["--setup", "ranked1v1", "--kl-coef", "0.2", "--lr", "1e-4", "--ent-coef", "0", "--workers",
            str(a.ppo_workers), "--games-per-worker", str(a.ppo_games), "--updates", str(a.ppo_updates)]
