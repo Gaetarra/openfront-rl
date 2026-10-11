@@ -1093,6 +1093,25 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - A network with random weights reached 73%, but it acts on most decisions and costs more simulation than a
         trained one.
       - If the bar is missed, one exact optimization is left: compute only the heat maps of each row's legal types.
+    - **Results (2026-10-11, `runs/gate3b.cmd`, main checkout at v0.34.24; the 3B clone bc3b-v4 against the 3A clone
+      bc3-moe):**
+
+      | Criterion | Bar | Result | |
+      |---|---|---|---|
+      | commands outside the set | < 0.5% | 0.40% (2026-10-09) | passed |
+      | invalid actions | < 1% | 0.11%: 263 of its 249,702 actions | passed |
+      | games without errors | 1,000 | 1,024, in one attempt (exit 0) | passed |
+      | against the 3A clone | ≥ 0.545 | **0.700** (SE 0.014; seats 0.705 / 0.695) | passed |
+      | PPO speed (10 updates, 12 minibatches) | ≥ 75% | **71%**: Phase 2 network 145.2 decisions/s, v4 103.2 | **missed** |
+
+      - Match (`runs/eval/20261011-011546.json`, 1,024 games, 16 recorded): the clone acts in 17.2% of decisions, and
+        22.9% of its actions follow an action. bc3b (shares alone) scored 0.660 on 512 games at v0.34.23: +0.04, ~1.6
+        SE apart, with the game version changed in between.
+      - Speed (`runs/gate3b-speed.log`): v4's own memory 8,826 MiB, under the 9,400 rule; other programs held 1,892
+        MiB. The trained network is no faster than random weights (73% twice): the simulation now takes the same time
+        per update as the Phase 2 network's. In units of the Phase 2 network's update time, v4 spends 0.73 learning
+        (Phase 2: 0.40) and 0.18 on the rollouts' GPU work (0.12). 75% needs ~5% off v4's total time, ~10% of its
+        learning.
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
