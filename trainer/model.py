@@ -337,18 +337,21 @@ class _Maps:
 
     def __init__(self, logits, mask, used):
         self.used, self.n_cells = used, logits.shape[-1]
-        self.d = _masked(logits[used], mask[used])  # [used pairs, cells]
+        # The CPU waits for the GPU once, here, to learn how many pairs are used; integer indices from then on, since
+        # each boolean mask is one more wait, and the waits cost PPO more than the skipped maps saved (PLAN Gate 3B).
+        self.rows, self.maps = used.nonzero().unbind(1)
+        self.d = _masked(logits[self.rows, self.maps], mask[self.rows, self.maps])  # [used pairs, cells]
         self.pos = used.flatten().cumsum(0).view(used.shape) - 1  # each used pair's row in d
 
     def _dense(self, x):
-        return x.new_zeros(self.used.shape).masked_scatter(self.used, x)
+        return x.new_zeros(self.used.shape).index_put((self.rows, self.maps), x)
 
     def sample(self):
         return self._dense(self.d.sample())
 
     def log_prob(self, cell):
         """[N, maps]: the log-probability of `cell` [N] on each used map."""
-        return self._dense(self.d.log_prob(cell[:, None].expand(self.used.shape)[self.used]))
+        return self._dense(self.d.log_prob(cell[self.rows]))
 
     def entropy(self):
         return self._dense(self.d.entropy())
@@ -358,8 +361,9 @@ class _Maps:
 
     def probs(self, k):
         """[N, cells]: map k's probabilities, 0 on the rows that cannot take its type."""
-        rows = self.used[:, k]
-        return self.d.probs.new_zeros(len(rows), self.n_cells).index_put((rows,), self.d.probs[self.pos[rows, k]])
+        if not len(self.rows):
+            return self.d.probs.new_zeros(len(self.used), self.n_cells)
+        return self.d.probs[self.pos[:, k].clamp(min=0)] * self.used[:, k, None]
 
 
 class ActionDist:

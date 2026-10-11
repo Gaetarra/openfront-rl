@@ -1129,11 +1129,13 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           81% (v1 118.8, v4 96.1) and 80% (123.0, 98.9). **The pass is an artifact**: with the PC idle, both networks
           stay slower than with the old code (v1 145–153, v4 103–112). The ratio rose because the Phase 2 network
           slowed more (−17%) than v4 (−5%). v4 itself got slower.
-          - Cause: picking the used pairs out with boolean masks makes the CPU wait for the GPU, about 12 times a
-            learning minibatch and 2 times a rollout step. The old code waited once a minibatch (the `.item()` calls
-            after the step), so the CPU queued work far ahead of the GPU. The A/B above had no `.item()` and no RAM
-            buffer thread, so it missed the cost.
-          - Not counted as a pass. Next: one wait per distribution (integer indices), then the probe again.
+          - Cause unknown. First suspect: picking the used pairs with boolean masks makes the CPU wait for the GPU,
+            ~12 times a learning minibatch. But a loop shaped like PPO's (the RAM buffer and its thread, `.item()`
+            after each step, rollout steps; no simulation) shows no difference between the old code, the packing and
+            a one-wait version: Phase 2 network 87–92 ms a minibatch, v4 145–156, rollout steps equal. Nothing else
+            used the CPU or the GPU afterwards either (the replay viewer idle, 19.6 GB of RAM free).
+          - Not counted as a pass. The one-wait version stays (fewer waits, same values). Next: probes of the old and
+            the new code back to back, in the same conditions.
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
