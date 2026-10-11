@@ -3,6 +3,7 @@ import unittest
 
 import numpy as np
 import torch
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from trainer.env import ROOT
 from trainer.model import PolicyV1
@@ -194,17 +195,29 @@ class SmokeTest(unittest.TestCase):
         self.assertTrue((ROOT / "runs" / self.RUN).is_dir())
 
     def test_two_seats_against_a_frozen_opponent_with_kl(self):
+        """At learning rate 0 the learner stays the KL reference, so the KL must stay ~0: the reference's outputs, kept
+        from the rollout, belong to the same rows. Random heads make each row's policy its own (a new network's zero
+        heads are uniform on every row)."""
         init = ROOT / "checkpoints" / self.RUN / "init.pt"
         init.parent.mkdir(parents=True, exist_ok=True)
         dims = {"channels": 22, "playerFeatures": 17, "scalars": 16, "acts": 5}
-        torch.save({"model": PolicyV1(dims).state_dict(), "args": {"widths": "64,128,192"}}, init)
-        main(["--run", self.RUN, "--workers", "1", "--games-per-worker", "2", "--steps", "8", "--minibatches", "2",
-              "--epochs", "1", "--port", "0", "--timer", "1", "--nations", "0", "--seats", "2",
+        torch.manual_seed(0)
+        net = PolicyV1(dims)
+        for layer in (net.type_head, net.bin_head, net.shuffle, net.skip, net.query):
+            torch.nn.init.normal_(layer.weight, std=1.0)
+        torch.save({"model": net.state_dict(), "args": {"widths": "64,128,192"}}, init)
+        main(["--run", self.RUN, "--workers", "1", "--games-per-worker", "2", "--steps", "32", "--minibatches", "2",
+              "--epochs", "2", "--port", "0", "--timer", "1", "--nations", "0", "--seats", "2", "--lr", "0",
               "--init", str(init), "--opponent", str(init), "--kl-coef", "0.1", "--updates", "2"])
         state = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
         self.assertEqual(state["update"], 2)
-        self.assertEqual(state["global_step"], 2 * 8 * 2, "only the learner's decisions count")
+        self.assertEqual(state["global_step"], 2 * 32 * 2, "only the learner's decisions count")
         self.assertEqual(state["args"]["kl_coef"], 0.1)
+        logs = EventAccumulator(str(ROOT / "runs" / self.RUN))
+        logs.Reload()
+        kl = [e.value for e in logs.Scalars("loss/kl_ref")]
+        self.assertEqual(len(kl), 2)
+        self.assertLess(max(kl), 1e-4)  # 2e-7 here; reference rows shifted by one gave 4e-3 and 1.3e-2
 
 
 if __name__ == "__main__":

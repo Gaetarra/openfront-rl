@@ -24,6 +24,7 @@ from trainer.env import GAME_DIR, RANKED_1V1, ROOT, VecEnv
 from trainer.model import ACT_NAMES, CORES, ActionDist, arch_of, load_net, new_net
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
+REF_OUTPUTS = ("type", "maps", "ptr", "retreat", "shares", "bins")  # what ActionDist reads of the KL reference
 
 
 def parser():
@@ -358,8 +359,13 @@ def main(argv=None):
     T, N = a.steps, envs.E
     obs = envs.obs
     def stored(o):
-        """A seat's rows as the rollout keeps them: the cell masks as bits."""
-        return {**o, "cell_mask": pack_bits(o["cell_mask"])}
+        """A seat's rows as the rollout keeps them: the cell masks as bits and, with a KL penalty, the reference's
+        outputs, computed once here instead of in every epoch of learning (PLAN 4A, "Speed work")."""
+        kept = {**o, "cell_mask": pack_bits(o["cell_mask"])}
+        if ref is not None:
+            with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+                kept.update({"ref_" + k: v for k, v in ref(o).items() if k in REF_OUTPUTS})
+        return kept
 
     host = HostRows(stored(rows(obs, learner)), T * N, T * N // a.minibatches)
     actions = torch.zeros(T, N, 4, dtype=torch.long, device=device)
@@ -431,8 +437,7 @@ def main(argv=None):
             v_loss = 0.5 * (out["value"].float() - b_ret[mb]).pow(2).mean()
             loss = pg_loss + a.vf_coef * v_loss - (a.ent_coef * ent.mean() if ent is not None else 0)
             if ref is not None:
-                with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
-                    out_r = ref(o)
+                out_r = {k: o["ref_" + k] for k in REF_OUTPUTS if "ref_" + k in o}  # computed in the rollout
                 kl = dist.kl(ActionDist(out_r, o)).mean()  # exact: the one-sample estimate spiked into the hundreds
                 loss = loss + a.kl_coef * kl
             opt.zero_grad(set_to_none=True)

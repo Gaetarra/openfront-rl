@@ -1277,6 +1277,11 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
            stays in git (ce5eff7, 2164cb0) with its bit-for-bit check.
       3. the KL reference's outputs computed once per update (one forward pass per row instead of three), kept in
          the RAM buffer: −1.0 s, **+7%**. Exact, ~2 GB more pinned RAM (32 GB, ~20 GB free).
+         - Coded on lever 1's code: the rollout runs the reference on the learner's rows as it stores them, the RAM
+           buffer keeps its outputs with the observations, and learning reads them back.
+         - The check: PPO at learning rate 0 (the learner stays the reference, with random heads so each row's policy
+           is its own) must log a KL of ~0. It reads 2e-7; with the stored rows shifted by one it read 4e-3 and
+           1.3e-2, and the test failed.
       4. a CUDA graph of the rollout's inference (a fixed 32 rows): −0.8 s, **+5%**. Moderate risk: graphs allow no
          syncs, need static inputs, and the sampling's random draws move into the graph.
       - Together: ~15.1 → ~11 s an update, ~140 decisions/s (+35–40%).
