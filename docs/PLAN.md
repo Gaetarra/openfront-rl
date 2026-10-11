@@ -1263,6 +1263,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
            new 108.0, new 107.9, old 109.9. **No measurable gain (−1.2%).** Lever 1's code does no CPU torch work in
            the rollouts, so nothing spins there, and learning is GPU-bound, so its faster CPU side does not show. The
            line stays as lever 2's enabler, and lever 2 is A/B'd on top of it.
+         - **Lever 2 on one thread** (2164cb0 against 880ebcc, `runs/ab/20261011-134823-lever2b.json`): warm-up
+           114.7, old 113.8, new 115.7, new 118.2, old 114.6. Both new above both old, but +2.4%: **no measurable gain
+           by the rule.**
+           - The workers' simulation plus the observations fell from ~4.45 to ~3.25 s an update, but the rollout
+             only ~0.65 s: with no wait inside the observation build, the CPU waits once, before sending the actions,
+             for the same GPU work. The rollout's trainer side is now limited by its GPU time per step, so lever 4
+             (a graph only cuts the CPU's launches) would gain less than estimated.
+           - If it stays, BC and the eval, which share `trainer/env.py`, need the one-thread line too, or its CPU
+             torch work spins over their workers as it did in PPO (−14%).
       3. the KL reference's outputs computed once per update (one forward pass per row instead of three), kept in
          the RAM buffer: −1.0 s, **+7%**. Exact, ~2 GB more pinned RAM (32 GB, ~20 GB free).
       4. a CUDA graph of the rollout's inference (a fixed 32 rows): −0.8 s, **+5%**. Moderate risk: graphs allow no
