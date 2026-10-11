@@ -1235,6 +1235,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       2. observations without syncs (copies from pinned memory that do not wait, the zone count on the CPU), and the
          same constants in the rollout's distributions: −1.0 to −1.2 s, **+7–8%**. Exact. It changes
          `trainer/env.py`, which BC and the eval share, so they gain too.
+         - Coded (the constants came with lever 1):
+           - every numpy → GPU copy goes through pinned memory without waiting (`pinned`);
+           - `_add_units` picks its records on the CPU and copies only what it paints, and the zones' cells are
+             computed on the CPU;
+           - the mask update indexes with a GPU tensor, not a Python list;
+           - the rollout counts actions from its CPU copy.
+           - The observation build went from ~70 waits a step to none.
+         - Checked bit for bit: 600 steps of 16 clone games, replayed through both versions with the same actions,
+           give identical observations (every tensor's hash at every step).
       3. the KL reference's outputs computed once per update (one forward pass per row instead of three), kept in
          the RAM buffer: −1.0 s, **+7%**. Exact, ~2 GB more pinned RAM (32 GB, ~20 GB free).
       4. a CUDA graph of the rollout's inference (a fixed 32 rows): −0.8 s, **+5%**. Moderate risk: graphs allow no
