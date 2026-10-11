@@ -169,7 +169,16 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     (watch "Shared GPU memory" in Task Manager).
   - PPO logs `perf/gpu_reserved_gb` (the allocator's peak, which reads past the card when it spills),
     `perf/gpu_allocated_gb` (in use), and the time split `perf/rollout_share` and `perf/env_share` (the workers'
-    simulation and observations).- `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
+    simulation and observations).
+- PPO speed (PLAN 4A, "Speed work"; `scripts/profile_ppo.py` shows where the time goes):
+  - Learning is GPU-bound. `.item()` and a copy from pageable memory (`torch.from_numpy(...).to(device)`, a constant
+    CPU tensor, a Python list as an index of a GPU tensor) wait for everything queued on the GPU, so keep them out of
+    a minibatch's work (`_on` in `trainer/model.py` keeps constants on the GPU).
+  - Keep CPU torch work out of the rollouts: torch's OpenMP pool (14 threads) spins for up to ~200 ms after each
+    parallel op and takes the cores from the workers' simulation (lever 2 lost 14% that way).
+  - Absolute speeds swing ±15% with the PC's state (a PC cold after hours idle runs fast at first): credit a speed
+    change only with `scripts/ab_speed.py`.
+- `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
 - `data/` holds only records of v0.34.17-v0.34.22, which replay in full only in `pins/v0.34.23` ("Game version").
   Step 4's BC night and its scoring ran from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
