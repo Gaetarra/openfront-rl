@@ -1244,6 +1244,20 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
            - The observation build went from ~70 waits a step to none.
          - Checked bit for bit: 600 steps of 16 clone games, replayed through both versions with the same actions,
            give identical observations (every tensor's hash at every step).
+         - **A/B** (12:56, `runs/ab/20261011-125640-lever2.json`; old 04156c1 = lever 1, new ce5eff7): warm-up 125.8,
+           old 125.5, new 102.8, new 107.2, old 118.3. **−13.9%: slower.**
+         - **Why** (profiles of the same games as the morning's, `runs/profile-v4-lever2*.log`):
+           - The observation build did shrink (2.45 → 1.08 s an update), but the wait for the workers' simulation
+             grew (2.91 → 4.37 s), and the rollout's GPU kernels ran 1.4–5× longer (the same kernels, as many).
+           - Lever 2 brought CPU work into torch: the `pin_memory()` copies and the zones' cells. torch runs it on
+             its OpenMP pool (14 threads), whose threads then spin for up to ~200 ms. The actions reach the workers
+             ~70 ms later, so the spinning threads take the cores from the workers (below-normal priority) during
+             their simulation.
+           - The same profile with `OMP_NUM_THREADS=1`: **124–131 decisions/s** (morning, old code: 101–104). The
+             workers' wait went to 2.48 s, the observations to 0.65 s, the rollout's forward passes back to 0.83 s
+             of GPU time. Learning went to 6.44 s: its forward pass's CPU time halved (1.0 → 0.42 s), since the
+             RAM buffer's CPU gather spins the pool during learning too, in the old code as well.
+           - So one torch CPU thread in the trainer is a lever of its own, which helps the old code too.
       3. the KL reference's outputs computed once per update (one forward pass per row instead of three), kept in
          the RAM buffer: −1.0 s, **+7%**. Exact, ~2 GB more pinned RAM (32 GB, ~20 GB free).
       4. a CUDA graph of the rollout's inference (a fixed 32 rows): −0.8 s, **+5%**. Moderate risk: graphs allow no

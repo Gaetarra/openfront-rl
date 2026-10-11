@@ -54,11 +54,13 @@ def analyze(path):
             stack = stack + [(i, name)] if opens else [s for s in stack if s[0] != i]
         starts = [s[0] for s in segs]
         label_at = lambda t: segs[max(bisect.bisect_right(starts, t) - 1, 0)][2]
-        idle, cur = [], lo
-        for s, e in sorted((k["ts"], k["ts"] + k["dur"]) for k in kernels if lo <= k["ts"] < hi):
-            if s > cur:
-                idle.append((cur, s))
-            cur = max(cur, e)
+        idle, queued, cur = [], 0.0, lo  # queued: idle while the next kernel was already launched (the driver's queue)
+        for k in sorted((k for k in kernels if lo <= k["ts"] < hi), key=lambda k: k["ts"]):
+            if k["ts"] > cur:
+                idle.append((cur, k["ts"]))
+                r = launch.get(k.get("args", {}).get("correlation"))
+                queued += max(0.0, k["ts"] - max(cur, r["ts"] + r["dur"])) if r is not None else 0.0
+            cur = max(cur, k["ts"] + k["dur"])
         idle += [(cur, hi)] if hi > cur else []
         parts, j = defaultdict(lambda: dict.fromkeys(COLUMNS, 0.0)), 0
         for s0, e0, name in segs:
@@ -79,6 +81,7 @@ def analyze(path):
                 parts[label_at(r["ts"])]["gpu_ms"] += k["dur"] / 1e3
                 parts[label_at(r["ts"])]["kernels"] += 1
         result[phase] = {"wall_ms": p["dur"] / 1e3, "gpu_idle_ms": sum(e - s for s, e in idle) / 1e3,
+                         "gpu_idle_queued_ms": queued / 1e3,
                          "parts": dict(sorted(parts.items(), key=lambda kv: -kv[1]["cpu_ms"]))}
     return result
 
@@ -86,7 +89,8 @@ def analyze(path):
 def print_tables(result):
     for phase, r in result.items():
         print(f"\n{phase}: {r['wall_ms']:.0f} ms, GPU idle {r['gpu_idle_ms']:.0f} ms "
-              f"({r['gpu_idle_ms'] / r['wall_ms']:.0%}); per part (exclusive):")
+              f"({r['gpu_idle_ms'] / r['wall_ms']:.0%}), {r.get('gpu_idle_queued_ms', 0):.0f} of it with the next kernel "
+              f"already launched; per part (exclusive):")
         print(f"{'':36}" + "".join(f"{c:>12}" for c in COLUMNS))
         for name, v in r["parts"].items():
             print(f"{name:36}" + "".join(f"{v[c]:12.0f}" for c in COLUMNS))
