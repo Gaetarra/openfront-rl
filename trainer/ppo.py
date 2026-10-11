@@ -301,6 +301,9 @@ def main(argv=None):
     np.random.seed(a.seed)
     torch.manual_seed(a.seed)
     torch.backends.cudnn.benchmark = True
+    # torch's CPU work here is small, and its thread pool spins for up to ~200 ms after each parallel op, taking the
+    # cores from the workers' simulation and from the kernel launches (PLAN 4A, "Speed work")
+    torch.set_num_threads(1)
     device = torch.device("cuda")
     run_dir = ROOT / "runs" / a.run
 
