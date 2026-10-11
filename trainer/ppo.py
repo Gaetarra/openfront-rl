@@ -20,7 +20,7 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 from trainer.control import Control, serve
-from trainer.env import GAME_DIR, RANKED_1V1, ROOT, VecEnv, pinned
+from trainer.env import GAME_DIR, RANKED_1V1, ROOT, VecEnv
 from trainer.model import ACT_NAMES, CORES, ActionDist, arch_of, load_net, new_net
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
@@ -336,7 +336,6 @@ def main(argv=None):
     ref = net(a.init) if a.kl_coef > 0 else None
     learner, others, seat = seat_rows(envs.E, S, device)
     games, seat = np.arange(envs.E), seat.cpu().numpy()  # for the per-seat arrays the workers return
-    learner_rows = learner.cpu().numpy()
     rows = lambda o, r: {k: v[r] for k, v in o.items()}
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
     control.update(run=run_info(a))
@@ -397,10 +396,10 @@ def main(argv=None):
             te = time.perf_counter()
             obs, rew, done, infos, invalid = envs.step(acts)
             env_time += time.perf_counter() - te
-            rewards[step] = pinned(rew.reshape(envs.E, S)[games, seat], device)
-            dones[step] = pinned(done.reshape(envs.E, S)[games, seat], device)
+            rewards[step] = torch.from_numpy(rew.reshape(envs.E, S)[games, seat]).to(device)
+            dones[step] = torch.from_numpy(done.reshape(envs.E, S)[games, seat]).to(device)
             outcomes.finish([i for i in infos if i["seat"] == seat[i["env"]]])
-            np.add.at(act_counts, acts[learner_rows, 0], 1)  # from the CPU copy: act.cpu() would wait for the GPU
+            np.add.at(act_counts, act.cpu().numpy()[:, 0], 1)
             invalid_count += int(invalid.reshape(envs.E, S)[games, seat].sum())
             global_step += N
             control.throttle(time.perf_counter() - t0)
@@ -413,7 +412,7 @@ def main(argv=None):
         ret = adv + values
         b_act, b_logp, b_adv, b_ret = actions.flatten(0, 1), logps.flatten(), adv.flatten(), ret.flatten()
         stats = collections.defaultdict(list)
-        idx = [mb for _ in range(a.epochs) for mb in torch.randperm(T * N).split(host.size)]  # all epochs' minibatches
+        idx = [mb for _ in range(a.epochs) for mb in torch.randperm(T * N).split(host.size)]  # every epoch's minibatches
         on_gpu = torch.cat(idx).pin_memory().to(device, non_blocking=True).split([len(mb) for mb in idx])
         for i, (mb, o) in enumerate(zip(on_gpu, host.batches(idx, device))):
             o["cell_mask"] = unpack_bits(o["cell_mask"])
