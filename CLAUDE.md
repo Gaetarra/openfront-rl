@@ -163,6 +163,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   - PPO logs `perf/gpu_reserved_gb` (the allocator's peak, which reads past the card when it spills),
     `perf/gpu_allocated_gb` (in use), and the time split `perf/rollout_share` and `perf/env_share` (the workers'
     simulation and observations).
+  - `ActionDist` normalizes only the heat maps of the types each row can take (`_Maps`, exact): 4.65 of 12 in clone
+    games, ~13% of a learning minibatch. Sampling draws fewer random numbers since 2026-10-11, so fixed-seed matches
+    from before do not replay game by game (results stay comparable within noise).
 - `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
 - `data/` holds only records of v0.34.17-v0.34.22, which replay in full only in `pins/v0.34.23` ("Game version").

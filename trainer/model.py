@@ -330,6 +330,38 @@ def _masked(logits, mask):
     return _Normalized(torch.where(mask, logits, MASK_VALUE).log_softmax(-1))
 
 
+class _Maps:
+    """The heat maps [N, maps, cells], normalized only where `used` [N, maps]: the map of a type a row cannot take adds
+    nothing to the log-probability, the entropy or the KL (the type's probability is 0). In clone games a row can take
+    4.65 of the 12 cell types on average (PLAN, Gate 3B). Results come back as [N, maps], 0 for an unused map."""
+
+    def __init__(self, logits, mask, used):
+        self.used, self.n_cells = used, logits.shape[-1]
+        self.d = _masked(logits[used], mask[used])  # [used pairs, cells]
+        self.pos = used.flatten().cumsum(0).view(used.shape) - 1  # each used pair's row in d
+
+    def _dense(self, x):
+        return x.new_zeros(self.used.shape).masked_scatter(self.used, x)
+
+    def sample(self):
+        return self._dense(self.d.sample())
+
+    def log_prob(self, cell):
+        """[N, maps]: the log-probability of `cell` [N] on each used map."""
+        return self._dense(self.d.log_prob(cell[:, None].expand(self.used.shape)[self.used]))
+
+    def entropy(self):
+        return self._dense(self.d.entropy())
+
+    def kl(self, ref):
+        return self._dense(_kl(self.d, ref.d))
+
+    def probs(self, k):
+        """[N, cells]: map k's probabilities, 0 on the rows that cannot take its type."""
+        rows = self.used[:, k]
+        return self.d.probs.new_zeros(len(rows), self.n_cells).index_put((rows,), self.d.probs[self.pos[rows, k]])
+
+
 class ActionDist:
     """The joint action [type, cell, target, troops]: the type picks which argument heads are used.
 
@@ -345,11 +377,11 @@ class ActionDist:
 
     def __init__(self, out, obs):
         n_types, n_maps = out["type"].shape[-1], out["maps"].shape[1]
+        self.map_types = MAP_TYPES_T[:n_maps].to(out["type"].device)  # the action type of each heat map
         self.type = _masked(out["type"].float(), obs["type_mask"][:, :n_types])
-        self.cells = _masked(out["maps"].float(), obs["cell_mask"][:, :n_maps])  # batch [N, maps]
+        self.cells = _Maps(out["maps"].float(), obs["cell_mask"][:, :n_maps], obs["type_mask"][:, self.map_types])
         self.ptr = _masked(out["ptr"].float(), obs["attack_mask"])
         self.retreat = _masked(out["retreat"].float(), obs["retreat_mask"]) if "retreat" in out else None
-        self.map_types = MAP_TYPES_T[:n_maps].to(out["type"].device)  # the action type of each heat map
         self.shares = "shares" in out
         if self.shares:
             self.troops = Categorical(logits=out["shares"].float())  # batch [N, 2, P]: attack, boat x token
@@ -369,7 +401,7 @@ class ActionDist:
         """[N, 2, tokens]: how likely an attack or a boat reads each token's troop head, given its type."""
         if not self.shares:
             return torch.ones_like(self.troops.logits[..., 0])
-        boat = torch.zeros_like(self.ptr.probs).scatter_add_(1, self.owner, self.cells.probs[:, 1])
+        boat = torch.zeros_like(self.ptr.probs).scatter_add_(1, self.owner, self.cells.probs(1))
         return torch.stack([self.ptr.probs, boat], 1)
 
     def troop_sample(self, target, cell):
@@ -418,7 +450,7 @@ class ActionDist:
         """log pi(actions) [N]; `smooth` and `sizes` as in troop_log_prob. Every type must be one this network has."""
         t, cell, target, troops = actions.unbind(1)
         m = MAP_OF.to(t.device)[t]
-        lc = self.cells.log_prob(cell[:, None].expand(-1, self.cells.logits.shape[1]))  # [N, maps]
+        lc = self.cells.log_prob(cell)  # [N, maps]
         lt = self.troop_log_prob(target, cell, troops, smooth, sizes)
         zero = torch.zeros_like(lc[:, 0])
         lr = self.retreat.log_prob(target) if self.retreat is not None else zero
@@ -434,7 +466,7 @@ class ActionDist:
         weighted by the pointer or the boat map. p(k) and those weights are detached: otherwise the bonus pushes the
         type head toward the types with the most arguments (attack, boat) and away from no-op, as it did in Phase 1,
         and the pointer toward the targets with the least certain shares."""
-        hc = self.cells.entropy() / math.log(self.cells.logits.shape[-1])  # [N, maps]
+        hc = self.cells.entropy() / math.log(self.cells.n_cells)  # [N, maps]
         hp = self.ptr.entropy() / math.log(max(self.ptr.logits.shape[-1], 2))
         ht = (self._weights().detach() * self.troops.entropy()).sum(2) / math.log(self.troops.logits.shape[-1])
         pt = self.type.probs.detach()
@@ -451,7 +483,7 @@ class ActionDist:
         which a spread-out 49k-cell map makes common."""
         if self.shares != ref.shares or self.type.logits.shape != ref.type.logits.shape:
             raise ValueError("the KL needs two networks with the same troop head and actions")
-        kc = _kl(self.cells, ref.cells)  # [N, maps]
+        kc = self.cells.kl(ref.cells)  # [N, maps]
         kt = (self._weights() * _kl(self.troops, ref.troops)).sum(2)  # [N, 2]
         pt = self.type.probs
         k = (_kl(self.type, ref.type) + (pt[:, self.map_types] * kc).sum(1)
