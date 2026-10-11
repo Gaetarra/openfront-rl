@@ -1,7 +1,9 @@
 """A code A/B of PPO's speed (PLAN 4A, "Speed work"): the speed check's probe of the 3B clone on the old code (a
 worktree of the commit before the change) and on the new code (this checkout), in the order old, new, new, old, back
-to back, then the rule fixed before the runs: the change is credited with the mean gain if both new probes beat both
-old ones and the gain is >= 3%; each probe's own GPU peak must stay <= 9,400 MiB. PC idle, ~15 min:
+to back, after a warm-up probe of the old code that is not counted (lever 1's first A/B started from a PC cold after
+hours idle, and its first probe ran fast). Then the rule fixed before the runs: the change is credited with the mean
+gain if both new probes beat both old ones and the gain is >= 3%; each probe's own GPU peak must stay <= 9,400 MiB.
+PC idle, ~18 min:
 
   .venv/Scripts/python scripts/ab_speed.py --old pins/ab-base --label lever1
 
@@ -38,20 +40,22 @@ def main():
     out = ROOT / "runs" / "ab"
     out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    rates, peaks = {"old": [], "new": []}, []
-    for i, arm in enumerate(("old", "new", "new", "old"), 1):
+    rates, peaks = {"warm-up": [], "old": [], "new": []}, []
+    for i, arm in enumerate(("warm-up", "old", "new", "new", "old")):
         log = out / f"{stamp}-{a.label}-{i}-{arm}.log"
         with open(log, "w") as f:
-            subprocess.run([sys.executable, *PROBE], cwd=old if arm == "old" else ROOT, stdout=f, stderr=subprocess.STDOUT,
-                           check=True)
+            subprocess.run([sys.executable, *PROBE], cwd=ROOT if arm == "new" else old, stdout=f,
+                           stderr=subprocess.STDOUT, check=True)
         text = log.read_text()
         rate = float(re.search(r"PPO, v4: ([\d.]+) decisions/s", text).group(1))
         peak = int(re.search(r"its own peak (-?\d+) MiB", text).group(1))
         rates[arm].append(rate)
-        peaks.append(peak)
-        print(f"{i} {arm}: {rate:.1f} decisions/s, own peak {peak} MiB", flush=True)
-    result = {"label": a.label, "old_code": str(old), "old": rates["old"], "new": rates["new"], "peaks_mib": peaks,
-              **verdict(rates["old"], rates["new"], peaks)}
+        note = " (not counted)" if i == 0 else ""
+        print(f"{i} {arm}: {rate:.1f} decisions/s, own peak {peak} MiB{note}", flush=True)
+        if i > 0:
+            peaks.append(peak)
+    result = {"label": a.label, "old_code": str(old), "warm_up": rates["warm-up"], "old": rates["old"],
+              "new": rates["new"], "peaks_mib": peaks, **verdict(rates["old"], rates["new"], peaks)}
     (out / f"{stamp}-{a.label}.json").write_text(json.dumps(result, indent=1))
     print(f"{a.label}: {'CREDITED' if result['credited'] else 'no measurable gain'}, mean gain {result['gain']:+.1%} "
           f"(both new above both old: {result['new_beats_old']}; max own peak {result['max_peak_mib']} MiB)")

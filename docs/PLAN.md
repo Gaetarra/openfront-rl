@@ -1249,6 +1249,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         the PC idle;
       - old, new, new, old, back to back in one `.cmd` started via `explorer.exe`. The old code runs from a worktree
         of the commit before the change (`pins/ab-base`);
+      - from lever 1's re-run on (the user's call, 2026-10-11): a warm-up probe of the old code first, not counted,
+        so no counted probe starts from a cold PC;
       - a lever is credited if both new probes beat both old probes and the mean gain is ≥ 3%; its credit is the mean
         gain. Otherwise it reads "no measurable gain";
       - each probe's own GPU peak stays ≤ 9,400 MiB (the 3B rule).
