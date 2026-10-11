@@ -1125,6 +1125,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         - The probe after it (02:23, `runs/gate3b-speed2.log`) read **79%** (v1 121.6, v4 96.5), but both arms ran
           slower than at 01:15, the Phase 2 network by 16%: far more than the code explains, so probably another load
           on the GPU during its run. A clean re-measure with the PC idle decides.
+        - **Re-measured with the PC idle** (rule fixed before: the mean of two probes; `runs/gate3b-speed3{a,b}.log`):
+          81% (v1 118.8, v4 96.1) and 80% (123.0, 98.9). **The pass is an artifact**: with the PC idle, both networks
+          stay slower than with the old code (v1 145–153, v4 103–112). The ratio rose because the Phase 2 network
+          slowed more (−17%) than v4 (−5%). v4 itself got slower.
+          - Cause: picking the used pairs out with boolean masks makes the CPU wait for the GPU, about 12 times a
+            learning minibatch and 2 times a rollout step. The old code waited once a minibatch (the `.item()` calls
+            after the step), so the CPU queued work far ahead of the GPU. The A/B above had no `.item()` and no RAM
+            buffer thread, so it missed the cost.
+          - Not counted as a pass. Next: one wait per distribution (integer indices), then the probe again.
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
