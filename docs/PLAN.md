@@ -1112,6 +1112,19 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         per update as the Phase 2 network's. In units of the Phase 2 network's update time, v4 spends 0.73 learning
         (Phase 2: 0.40) and 0.18 on the rollouts' GPU work (0.12). 75% needs ~5% off v4's total time, ~10% of its
         learning.
+      - **The fallback** (the user's call, 2026-10-11: measure, then optimize):
+        - Measured first (1,600 steps of clone games, 102,400 rows): a row can take **4.65 of the 12 cell types** on
+          average. Boat 95%, defense post 83%, factory 60%, city 48%, port 46%, upgrade 42%, silo 31%, SAM 20%, atom
+          19%, warship 12%, hydrogen 6%, spawn 4%.
+        - Coded (234ad4c): `ActionDist` normalizes only those maps (`_Maps`). It is exact: an untakeable type has
+          probability 0, so its map adds nothing to the log-probability, the entropy or the KL. A test compares
+          values and gradients with torch's Categorical over every map.
+        - A/B against the old code (one minibatch of 96 rows, those masks): v4's learning −9% (125–132 ms against
+          136–144). Rollout steps are unchanged for v4 and 6% slower for the Phase 2 network (the packing waits for
+          the GPU once per distribution). This predicts ~75%.
+        - The probe after it (02:23, `runs/gate3b-speed2.log`) read **79%** (v1 121.6, v4 96.5), but both arms ran
+          slower than at 01:15, the Phase 2 network by 16%: far more than the code explains, so probably another load
+          on the GPU during its run. A clean re-measure with the PC idle decides.
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
