@@ -1157,7 +1157,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         234ad4c and a0d5821). Lesson: credit a speed change only from old and new code probed back to back.
       - **PPO speed is 4A's first work item** (reviewed with the user, 2026-10-11). The packing cut v4's GPU work by 9%
         in isolation and gained nothing in PPO. The CPU's launch time per minibatch roughly equals the GPU's (3B step
-        3, part 2), so the real loop is probably bound by kernel launches: cutting GPU work alone cannot help.
+        3, part 2), so the real loop is probably bound by kernel launches: cutting GPU work alone cannot help. (The
+        4A profile refuted this for learning: Phase 4, 4A, "Speed work".)
         Profile the real loop first (torch.profiler), then try, each judged by old and new code probed back to back:
         1. fewer launches: a CUDA graph of the fixed-shape learning step, or `torch.compile` through the community
            `triton-windows` build (a new dependency). Possibly 20–40% of learning, with Windows risk;
@@ -1183,10 +1184,62 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   limited by the GPU. The TrueSkill table moves to Phase 4, for the league.
 
 **Phase 4 — RL on Ranked (ongoing)**
-- **4A, ranked 1v1** (after 3B): first PPO's speed (Gate 3B, "PPO speed is 4A's first work item"). A self-play league from the 3B clone. The current policy plays a pool of past snapshots
+- **4A, ranked 1v1** (after 3B): first PPO's speed ("Speed work", below). A self-play league from the 3B clone. The current policy plays a pool of past snapshots
   and the clones, with prioritized fictitious self-play: opponents that beat the learner more often are picked more
   often. The KL to the clone starts at 0.2 and is lowered only while the frozen panel keeps improving (0.05 made the
   Phase 2 bot worse).
+  - **Speed work** (2026-10-11):
+    - **Profile** (`scripts/profile_ppo.py`, `runs/profile/20261011-053112.json`, PC idle): the real loop with the 3B
+      clone as Gate 3B ran it (16 workers × 2 games, 12 minibatches), with update 4 recorded. It ran at 101.5
+      decisions/s, against 101.0 and 104.1 for the unprofiled updates around it, so the profiler barely slowed it. An
+      update takes 15.1 s:
+      - **Learning, 7.6 s: not launch-bound.** The GPU is busy 85% of it, and the main thread waits for the GPU 49% of
+        it. GPU work 6.4 s: the backward pass 2.33, the forward pass 1.53, the KL reference's forward pass 1.50, the
+        distributions 0.87 (0.20 of it the entropy computed only for the log), Adam and clipping 0.13.
+      - Its 1.2 s of idle GPU sit behind ~11 syncs per minibatch, each of which empties the GPU's queue:
+        - ActionDist copies constant index tensors (`MAP_TYPES_T`, `MAP_OF`) from pageable memory, and such a copy
+          waits for the GPU;
+        - the troop `Categorical` checks its arguments;
+        - `kl.item()` runs before the backward pass, then the stats' `.item()`;
+        - the first minibatch of each epoch waits for its copy (0.2 s).
+      - **Rollouts, 7.55 s: the GPU is idle 69% of it, and the workers simulate only 2.9 s of it** (the trainer waits).
+        The rest is the trainer's own work, and the workers wait meanwhile:
+        - building the observations, 2.45 s: GPU work 1.1 s, and ~70 syncs a step, since every
+          `torch.from_numpy(...).to(device)` copies from pageable memory;
+        - inference and sampling for both seats, ~2.0 s: at 32 rows a network call costs 12.8 ms of CPU time and 9.5
+          ms of GPU time.
+      - So Gate 3B's launch-bound hypothesis was wrong for learning. Graphs or compilation could recover at most its
+        16% of idle GPU, and syncs cause most of that idle time.
+    - **Levers, with the gain the profile predicts** (proposed 2026-10-11, the user's call pending):
+      1. no sync within a learning minibatch: the constants kept on the GPU, no argument check, and `kl.item()` with
+         the other stats. Also the next epoch's first minibatch fetched ahead, and the entropy for the log computed
+         once per update: −1.0 to −1.4 s an update, **+7–10%**. Exact, ~20 lines.
+         - The logged entropy then comes from one minibatch, a noisier curve.
+         - Alone the entropy change is ~1%, under the A/B bar, so it goes with this lever.
+      2. observations without syncs (copies from pinned memory that do not wait, the zone count on the CPU), and the
+         same constants in the rollout's distributions: −1.0 to −1.2 s, **+7–8%**. Exact. It changes
+         `trainer/env.py`, which BC and the eval share, so they gain too.
+      3. the KL reference's outputs computed once per update (one forward pass per row instead of three), kept in
+         the RAM buffer: −1.0 s, **+7%**. Exact, ~2 GB more pinned RAM (32 GB, ~20 GB free).
+      4. a CUDA graph of the rollout's inference (a fixed 32 rows): −0.8 s, **+5%**. Moderate risk: graphs allow no
+         syncs, need static inputs, and the sampling's random draws move into the graph.
+      - Together: ~15.1 → ~11 s an update, ~140 decisions/s (+35–40%).
+      - Parked:
+        - `torch.compile` through `triton-windows`: learning is GPU-bound, so only its fusion could help, and it is an
+          unofficial dependency;
+        - overlapping the workers' simulation with the trainer's work (two worker groups): up to −2.9 s, but a larger
+          change, worth it only after levers 2 and 4;
+        - 2 epochs instead of 3 ("Speed", below): −2.5 s, but it changes what PPO learns per sample, so it is judged
+          on learning curves, not by a speed probe.
+    - **A/B rule** (proposed, fixed before any run):
+      - the probe: `scripts/speed_check.py --ppo-minibatches 12 --skip-bc --v4 checkpoints/bc3b-v4/latest.pt` without
+        its Phase 2 run (a new `--skip-v1`): 10 updates with the 3B clone, the mean decisions/s of updates 3–10, with
+        the PC idle;
+      - old, new, new, old, back to back in one `.cmd` started via `explorer.exe`. The old code runs from a worktree
+        of the commit before the change (`pins/ab-base`);
+      - a lever is credited if both new probes beat both old probes and the mean gain is ≥ 3%; its credit is the mean
+        gain. Otherwise it reads "no measurable gain";
+      - each probe's own GPU peak stays ≤ 9,400 MiB (the 3B rule).
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
 - **Gate** (re-set on 2026-10-03: Phase 2's PPO already beat its own clone 0.773, above the old ≥70% bar). A fixed panel
   of frozen opponents on fixed seeds: the Phase 3 clone, the Phase 2 clone, and the Phase 2 PPO bot
