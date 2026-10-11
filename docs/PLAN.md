@@ -1219,6 +1219,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
          - Coded (`_on` in `trainer/model.py`, `HostRows.batches` over every epoch): one wait per minibatch is left,
            the stats' `.item()` after `opt.step()`, so the run-ahead (and the GPU memory) stays as before. The same
            ActionDist fix also removes the rollout's distribution syncs, first listed under lever 2.
+         - **A/B** (2026-10-11 12:10, `runs/ab/20261011-121018-lever1.json`; old deae627, new 6b71cac): old 119.2,
+           new 122.4, new 118.6, old 108.1 decisions/s. Mean gain +6.0%, but the second new probe is under the first
+           old one: **no measurable gain by the rule.** Own GPU peaks 8,466–8,749 MiB.
+           - The old code drifted 9% in ten minutes, more than the effect. The drift sat in the rollouts (45% → 53% of
+             an update), and the first probe started from a PC idle and cool for hours (i5-13600KF, hybrid cores,
+             Balanced power plan).
+           - A straight drift fits all four probes: d = 3.7 decisions/s per probe from the old pair, 3.8 from the new
+             pair, and an effect of ~+5.7%. The ABBA mean cancels such a drift exactly; "both new above both old"
+             fails whenever a probe's drift is about half the effect.
       2. observations without syncs (copies from pinned memory that do not wait, the zone count on the CPU), and the
          same constants in the rollout's distributions: −1.0 to −1.2 s, **+7–8%**. Exact. It changes
          `trainer/env.py`, which BC and the eval share, so they gain too.
