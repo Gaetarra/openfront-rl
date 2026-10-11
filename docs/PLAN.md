@@ -760,6 +760,13 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         almost never wants a troop and a gold action at once.
       - As agreed, this says little about a bot with ten gold actions. So the probe reruns on the 3B clone before 4A,
         and the meters run in 4A (Phase 4).
+    - **Rerun on the 3B clone** (2026-10-11, `runs/bandwidth3b.cmd`, `runs/eval/20261011-170544.json`): the clone
+      with a troop and a gold action per decision against the same clone, 512 games. Its baseline is 0.5 by symmetry,
+      so the bar was 0.55.
+      - **0.482** (SE 0.022; seats 0.480 / 0.484): −0.018, ~0.8 SE. **Decision 11 stays for 4A.**
+      - It acts in 14.4% of decisions, twice in 0.19%; 21.4% of its actions follow an action.
+      - It put ≥ 25% on both a troop and a gold action in **none** of 815,407 decisions, so even with ten gold
+        actions it never wants both at once. The meters keep running in 4A, since PPO may change that.
   - **Troop shares read with the target** (first, measured alone). Found 2026-10-04: the attack and boat sizes are
     drawn independently of the target and the landing cell (against decision 3), so the bot cannot size an attack to
     the player it attacks; and its five sizes (10/25/50/75/100% of current troops) fit human play badly.
@@ -1333,7 +1340,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - the share of actions that follow an action;
   - the share of decisions with ≥ 25% on both a troop and a gold action.
   - If 3B keeps decision 11, bins come in if any of these holds:
-    - the upward probe on the 3B clone gains more than 0.05 (before 4A);
+    - the upward probe on the 3B clone gains more than 0.05 (before 4A; it did not: −0.018, 2026-10-11);
     - the bot acts in more than half of a phase's decisions;
     - the bot wants both kinds of action in more than 10% of its decisions.
 - **Intercepted-nuke rate**: if it stays high, salvo amounts come back ("Action space").
