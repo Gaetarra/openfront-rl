@@ -145,8 +145,8 @@ def main():
             self, *args, **kw))
     batches = ppo.HostRows.batches
 
-    def host_batches(self, perm, device):
-        it = batches(self, perm, device)
+    def host_batches(self, idx, device):
+        it = batches(self, idx, device)
         while True:
             with record_function("ppo.host_next"):
                 t = time.perf_counter()

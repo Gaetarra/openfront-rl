@@ -1,5 +1,6 @@
 """Policy networks (PLAN "Architecture"): Policy, the Phase 3 network (ResNet map encoder, U-Net-lite heat maps, a
 transformer over the players, a dense or Soft-MoE core), and PolicyV1, the Phase 2 network, kept for its checkpoints."""
+import functools
 import math
 
 import torch
@@ -49,6 +50,13 @@ def relevance(players):
              + f[..., 7])
     score[:, 0] += 8
     return torch.where(f[..., 0] > 0, score, -1.0)
+
+
+@functools.cache
+def _on(t, device):
+    """A constant tensor (MAP_OF, SIZE_OF...) on `device`, copied there once: a copy from pageable memory waits for
+    everything queued on the GPU, so copying it at each use stalled every minibatch."""
+    return t.to(device)
 
 
 def v1_spatial(spatial):
@@ -349,13 +357,14 @@ class ActionDist:
         self.cells = _masked(out["maps"].float(), obs["cell_mask"][:, :n_maps])  # batch [N, maps]
         self.ptr = _masked(out["ptr"].float(), obs["attack_mask"])
         self.retreat = _masked(out["retreat"].float(), obs["retreat_mask"]) if "retreat" in out else None
-        self.map_types = MAP_TYPES_T[:n_maps].to(out["type"].device)  # the action type of each heat map
+        self.map_types = _on(MAP_TYPES_T, out["type"].device)[:n_maps]  # the action type of each heat map
         self.shares = "shares" in out
         if self.shares:
-            self.troops = Categorical(logits=out["shares"].float())  # batch [N, 2, P]: attack, boat x token
+            # batch [N, 2, P]: attack, boat x token. Checking the logits would wait for the GPU.
+            self.troops = Categorical(logits=out["shares"].float(), validate_args=False)
             self.owner = obs["owners"][:, 0].long()  # [N, cells]: each cell's main owner
         else:
-            self.troops = Categorical(logits=out["bins"].float()[:, :, None])  # batch [N, 2, 1]
+            self.troops = Categorical(logits=out["bins"].float()[:, :, None], validate_args=False)  # batch [N, 2, 1]
 
     def _at(self, target, cell):
         """The troop logits [N, 2, choices] of an attack on `target` and a boat to `cell`."""
@@ -374,14 +383,14 @@ class ActionDist:
 
     def troop_sample(self, target, cell):
         """Percents [N, 2] sampled for an attack on `target` and a boat to `cell`."""
-        k = Categorical(logits=self._at(target, cell)).sample()
-        return k + 1 if self.shares else SIZE_PERCENT.to(k.device)[k]
+        k = Categorical(logits=self._at(target, cell), validate_args=False).sample()
+        return k + 1 if self.shares else _on(SIZE_PERCENT, k.device)[k]
 
     def size_log_probs(self, target, cell):
         """Log-probabilities [N, 2, 5] of the five SIZES for an attack on `target` and a boat to `cell`. A 100-share
         network's shares are summed over the percents each size stands for (SIZE_OF), for like-for-like scores."""
         lp = self._at(target, cell).log_softmax(-1)
-        return (lp[..., None, :] + SIZE_RANGES.to(lp.device)).logsumexp(-1) if self.shares else lp
+        return (lp[..., None, :] + _on(SIZE_RANGES, lp.device)).logsumexp(-1) if self.shares else lp
 
     def troop_log_prob(self, target, cell, percent, smooth=0.0, sizes=False):
         """[N, 2]: the log-probability that an attack on `target` or a boat to `cell` sends `percent`.
@@ -389,7 +398,7 @@ class ActionDist:
         - smooth (100-share networks): the label keeps 1 - smooth of its weight and puts smooth / 2 on each neighbouring
           percent (back on itself at 1% and 100%); the result is the expected log-probability."""
         if sizes or not self.shares:
-            size = SIZE_OF.to(percent.device)[percent.clamp(0, SHARES)]
+            size = _on(SIZE_OF, percent.device)[percent.clamp(0, SHARES)]
             return self.size_log_probs(target, cell).gather(2, size[:, None, None].expand(-1, 2, 1))[:, :, 0]
         lp = self._at(target, cell).log_softmax(-1)
         k = (percent - 1).clamp(0, SHARES - 1)[:, None, None].expand(-1, 2, 1)
@@ -403,7 +412,7 @@ class ActionDist:
         """Actions [N, 4] of types t, their arguments sampled from this policy."""
         c, p = self.cells.sample(), self.ptr.sample()
         r = self.retreat.sample() if self.retreat is not None else torch.zeros_like(p)
-        m = MAP_OF.to(t.device)[t]
+        m = _on(MAP_OF, t.device)[t]
         zero = torch.zeros_like(t)
         cell = torch.where(m >= 0, c.gather(1, m.clamp(min=0)[:, None])[:, 0], zero)
         target = torch.where(t == ATTACK, p, torch.where(t == RETREAT, r, zero))
@@ -417,7 +426,7 @@ class ActionDist:
     def log_prob(self, actions, smooth=0.0, sizes=False):
         """log pi(actions) [N]; `smooth` and `sizes` as in troop_log_prob. Every type must be one this network has."""
         t, cell, target, troops = actions.unbind(1)
-        m = MAP_OF.to(t.device)[t]
+        m = _on(MAP_OF, t.device)[t]
         lc = self.cells.log_prob(cell[:, None].expand(-1, self.cells.logits.shape[1]))  # [N, maps]
         lt = self.troop_log_prob(target, cell, troops, smooth, sizes)
         zero = torch.zeros_like(lc[:, 0])

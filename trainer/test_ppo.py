@@ -127,9 +127,9 @@ class HostRowsTest(unittest.TestCase):
         for t, o in enumerate(steps):
             host.put(t, o)
         flat = {k: torch.cat([o[k] for o in steps]) for k in steps[0]}
-        perm = torch.randperm(T * N)
-        batches = list(zip(perm.split(3), host.batches(perm, "cuda")))
-        self.assertEqual(len(batches), 7)  # 6 minibatches of 3 and one of 2: each staging slot is reused
+        idx = [mb for _ in range(2) for mb in torch.randperm(T * N).split(3)]  # two epochs, as PPO passes them
+        batches = list(zip(idx, host.batches(idx, "cuda")))
+        self.assertEqual(len(batches), 14)  # per epoch 6 minibatches of 3 and one of 2: each staging slot is reused
         for idx, o in batches:
             for k in flat:
                 self.assertTrue(torch.equal(o[k], flat[k][idx.cuda()]), k)
@@ -143,7 +143,7 @@ class HostRowsTest(unittest.TestCase):
             host.put(t, rows)
         reserved = []
         for _ in range(4):
-            for o in host.batches(torch.randperm(40), "cuda"):
+            for o in host.batches(torch.randperm(40).split(8), "cuda"):
                 pass
             torch.cuda.synchronize()
             reserved.append(torch.cuda.memory_reserved())

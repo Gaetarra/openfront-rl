@@ -25,7 +25,7 @@ from trainer import crawl
 from trainer.control import Control, serve
 from trainer.env import MAP_TYPES, RANKED_1V1, ROOT, VecEnv
 from trainer.eval import tag
-from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, MAP_NAMES, MAP_OF, RETREAT, SHARES, SIZE_OF, ActionDist,
+from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, MAP_NAMES, MAP_OF, RETREAT, SHARES, SIZE_OF, ActionDist, _on,
                            describe, load_net, new_net)
 from trainer.ppo import game_commit, network_args, resume_args, save_checkpoint
 
@@ -97,7 +97,7 @@ def label_legal(obs, labels):
     t, cell, target = labels[:, 0], labels[:, 1], labels[:, 2]
     rows = torch.arange(len(t), device=t.device)
     ok = (t >= 0) & obs["type_mask"][rows, t.clamp(min=0)]
-    m = MAP_OF.to(t.device)[t.clamp(min=0)]
+    m = _on(MAP_OF, t.device)[t.clamp(min=0)]
     cell_ok = obs["cell_mask"][rows, m.clamp(min=0), cell.clamp(0, obs["cell_mask"].shape[-1] - 1)]
     ok &= torch.where(m >= 0, cell_ok, True)
     target = target.clamp(0, obs["attack_mask"].shape[-1] - 1)
@@ -181,7 +181,7 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     rows = legal & (t == ATTACK)
     m.add("bc/attack_target_acc", ((dist.ptr.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
     m.add("bc/nll_attack_target", -(dist.ptr.log_prob(tgt) * rows).sum(), rows.sum())
-    size = SIZE_OF.to(b.device)[b.clamp(0, SHARES)]  # the label's percent as one of the five sizes
+    size = _on(SIZE_OF, b.device)[b.clamp(0, SHARES)]  # the label's percent as one of the five sizes
     ls = dist.size_log_probs(tgt, cell)  # [N, attack/boat, 5]
     lt = dist.troop_log_prob(tgt, cell, b) if dist.shares else None  # [N, attack/boat]
     for k, (typ, name) in enumerate(((ATTACK, "attack"), (BOAT, "boat"))):

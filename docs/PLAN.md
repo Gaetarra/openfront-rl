@@ -1216,6 +1216,9 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
          once per update: −1.0 to −1.4 s an update, **+7–10%**. Exact, ~20 lines.
          - The logged entropy then comes from one minibatch, a noisier curve.
          - Alone the entropy change is ~1%, under the A/B bar, so it goes with this lever.
+         - Coded (`_on` in `trainer/model.py`, `HostRows.batches` over every epoch): one wait per minibatch is left,
+           the stats' `.item()` after `opt.step()`, so the run-ahead (and the GPU memory) stays as before. The same
+           ActionDist fix also removes the rollout's distribution syncs, first listed under lever 2.
       2. observations without syncs (copies from pinned memory that do not wait, the zone count on the CPU), and the
          same constants in the rollout's distributions: −1.0 to −1.2 s, **+7–8%**. Exact. It changes
          `trainer/env.py`, which BC and the eval share, so they gain too.

@@ -255,9 +255,9 @@ class HostRows:
         for k, v in o.items():
             self.buf[k][step * self.n:(step + 1) * self.n].copy_(v, non_blocking=True)
 
-    def batches(self, perm, device):
-        """The minibatches of the row order `perm` (CPU), `size` rows each, as GPU tensors."""
-        idx = perm.split(self.size)
+    def batches(self, idx, device):
+        """The minibatches with the rows idx[i] (CPU index tensors of at most `size` rows), as GPU tensors. One call
+        takes every epoch's minibatches, so each epoch's first one is fetched ahead too."""
         main, side = torch.cuda.current_stream(), self.side
         copied = [torch.cuda.Event(), torch.cuda.Event()]  # the slot's last minibatch is on the GPU
         main.synchronize()  # the rollout's copies have landed
@@ -412,40 +412,44 @@ def main(argv=None):
         ret = adv + values
         b_act, b_logp, b_adv, b_ret = actions.flatten(0, 1), logps.flatten(), adv.flatten(), ret.flatten()
         stats = collections.defaultdict(list)
-        for _ in range(a.epochs):
-            perm = torch.randperm(T * N)
-            for mb, o in zip(perm.to(device).split(host.size), host.batches(perm, device)):
-                o["cell_mask"] = unpack_bits(o["cell_mask"])
-                with torch.autocast("cuda", torch.bfloat16):
-                    out = model(o)
-                dist = ActionDist(out, o)
-                logp = dist.log_prob(b_act[mb])
-                # The entropy enters the graph only with a weight: 12 heat maps of it. At 0 it is logged after the
-                # backward pass, since torch's Categorical caches each head's probabilities, and caching them without
-                # a graph before the KL would cut the KL's gradients.
-                ent = dist.entropy() if a.ent_coef else None
-                log_ratio = logp - b_logp[mb]
-                ratio = log_ratio.exp()
-                mb_adv = (b_adv[mb] - b_adv[mb].mean()) / (b_adv[mb].std() + 1e-8)
-                pg_loss = torch.max(-mb_adv * ratio, -mb_adv * ratio.clamp(1 - a.clip, 1 + a.clip)).mean()
-                v_loss = 0.5 * (out["value"].float() - b_ret[mb]).pow(2).mean()
-                loss = pg_loss + a.vf_coef * v_loss - (a.ent_coef * ent.mean() if ent is not None else 0)
+        idx = [mb for _ in range(a.epochs) for mb in torch.randperm(T * N).split(host.size)]  # every epoch's minibatches
+        on_gpu = torch.cat(idx).pin_memory().to(device, non_blocking=True).split([len(mb) for mb in idx])
+        for i, (mb, o) in enumerate(zip(on_gpu, host.batches(idx, device))):
+            o["cell_mask"] = unpack_bits(o["cell_mask"])
+            with torch.autocast("cuda", torch.bfloat16):
+                out = model(o)
+            dist = ActionDist(out, o)
+            logp = dist.log_prob(b_act[mb])
+            # The entropy enters the graph only with a weight: 12 heat maps of it. At 0 it is logged after the
+            # backward pass, since torch's Categorical caches each head's probabilities, and caching them without a
+            # graph before the KL would cut the KL's gradients.
+            ent = dist.entropy() if a.ent_coef else None
+            log_ratio = logp - b_logp[mb]
+            ratio = log_ratio.exp()
+            mb_adv = (b_adv[mb] - b_adv[mb].mean()) / (b_adv[mb].std() + 1e-8)
+            pg_loss = torch.max(-mb_adv * ratio, -mb_adv * ratio.clamp(1 - a.clip, 1 + a.clip)).mean()
+            v_loss = 0.5 * (out["value"].float() - b_ret[mb]).pow(2).mean()
+            loss = pg_loss + a.vf_coef * v_loss - (a.ent_coef * ent.mean() if ent is not None else 0)
+            if ref is not None:
+                with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+                    out_r = ref(o)
+                kl = dist.kl(ActionDist(out_r, o)).mean()  # exact: the one-sample estimate spiked into the hundreds
+                loss = loss + a.kl_coef * kl
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), a.max_grad_norm)
+            opt.step()
+            # The minibatch's only wait for the GPU, after all its work is queued: a wait mid-minibatch (an .item(), a
+            # copy from pageable memory) left the GPU idle while the CPU queued the rest (PLAN 4A, "Speed work").
+            with torch.no_grad():
                 if ref is not None:
-                    with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
-                        out_r = ref(o)
-                    kl = dist.kl(ActionDist(out_r, o)).mean()  # exact: the one-sample estimate spiked into the hundreds
-                    loss = loss + a.kl_coef * kl
                     stats["loss/kl_ref"].append(kl.item())
-                opt.zero_grad(set_to_none=True)
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), a.max_grad_norm)
-                opt.step()
-                with torch.no_grad():
-                    stats["loss/policy"].append(pg_loss.item())
-                    stats["loss/value"].append(v_loss.item())
+                stats["loss/policy"].append(pg_loss.item())
+                stats["loss/value"].append(v_loss.item())
+                if ent is not None or i == 0:  # only for the log at ent_coef 0: once per update
                     stats["loss/entropy"].append((dist.entropy() if ent is None else ent).mean().item())
-                    stats["loss/approx_kl"].append(((ratio - 1) - log_ratio).mean().item())
-                    stats["loss/clip_frac"].append(((ratio - 1).abs() > a.clip).float().mean().item())
+                stats["loss/approx_kl"].append(((ratio - 1) - log_ratio).mean().item())
+                stats["loss/clip_frac"].append(((ratio - 1).abs() > a.clip).float().mean().item())
         metrics = {k: float(np.mean(v)) for k, v in stats.items()}
         var = ret.var().item()
         metrics["value/explained_variance"] = float("nan") if var == 0 else 1 - (ret - values).var().item() / var
