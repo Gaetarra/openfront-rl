@@ -47,12 +47,6 @@ UPGRADABLE = 5  # BUILDING_TYPES[:5] (city, port, factory, silo, SAM) can be upg
 BUILD_OF = (4, 8, 7, 6, 9)  # their build actions: an upgrade needs the gold to build another one (canUpgradeUnit)
 
 
-def pinned(a, device):
-    """A numpy array copied to `device` without waiting: a copy from pageable memory waits for everything queued on
-    the GPU, and the observations made ~70 such copies a step (PLAN 4A, "Speed work")."""
-    return torch.from_numpy(a).pin_memory().to(device, non_blocking=True)
-
-
 def quantize_(x):
     """x in 64ths as uint8 (x itself is overwritten on the way). Values above 255/64 (a structure above level 3,
     several warships in one cell) saturate."""
@@ -181,14 +175,12 @@ class VecEnv:
         self.dims = {**d, "channels": N_CHANNELS, "playerFeatures": self.F + len(BUILDING_TYPES), "H": self.H,
                      "W": self.W}
         dev, hw = self.device, self.H * self.W
-        self.building = np.array([BUILDING_TYPES.index(t) if t in BUILDING_TYPES else -1 for t in d["unitTypes"]],
-                                 np.int64)
+        self.building = torch.tensor([BUILDING_TYPES.index(t) if t in BUILDING_TYPES else -1 for t in d["unitTypes"]],
+                                     device=dev)
         self.transport = d["unitTypes"].index("Transport")
-        self.zone_kind = np.array([ZONE_KINDS.get(t, -1) for t in d["unitTypes"]], np.int64)
-        self.map_types = torch.tensor(MAP_TYPES, device=dev)  # a Python list as an index is copied to the GPU each time
+        self.zone_kind = torch.tensor([ZONE_KINDS.get(t, -1) for t in d["unitTypes"]], device=dev)
         self.terrain = torch.zeros(self.E, 5, hw, device=dev)  # land, shore, ocean, height, inside the map
         self.area = torch.full((self.E,), 64.0, device=dev)  # tiles per cell of each game
-        self.side = np.full(self.E, 8, np.int64)  # and tiles per cell side
         self.o1 = torch.zeros(self.E * hw, dtype=torch.long, device=dev)
         self.o2 = torch.zeros_like(self.o1)
         self.n1 = torch.zeros(self.E * hw, device=dev)
@@ -264,9 +256,8 @@ class VecEnv:
                     resets.append(e)
                     terr = np.frombuffer(b["terrain"], np.uint8).reshape(5, -1)
                     self.terrain[e].zero_()
-                    self.terrain[e][:, :terr.shape[1]] = pinned(terr.astype(np.float32), self.device)
+                    self.terrain[e][:, :terr.shape[1]] = torch.from_numpy(terr.astype(np.float32)).to(self.device)
                     self.area[e] = float(g["cellSize"]) ** 2
-                    self.side[e] = g["cellSize"]
                 invalid[e] = g["invalid"]
                 cells.append((e, np.frombuffer(b["cells"], CELL)))
                 units.append((e, np.frombuffer(b["units"], UNIT)))
@@ -278,7 +269,7 @@ class VecEnv:
                 retreat[e] = np.frombuffer(b["retreat"], np.uint8).reshape(S, P)
                 e += 1
         if self.replay:
-            self.labels = pinned(labels.reshape(-1, 4), self.device)
+            self.labels = torch.from_numpy(labels.reshape(-1, 4)).to(self.device)
         self._apply_cells(resets, cells)
         obs = self._observe(players, rel, scalars, types, attack, retreat, units)
         return obs, rewards.reshape(-1), dones.reshape(-1), infos, invalid.reshape(-1)
@@ -292,9 +283,9 @@ class VecEnv:
         if len(rec) == 0:
             return
         env = np.concatenate([np.full(len(c), e, np.int64) for e, c in cells])
-        idx = pinned(env * hw + rec["idx"].astype(np.int64), dev)
+        idx = torch.from_numpy(env * hw + rec["idx"].astype(np.int64)).to(dev)
         for name, t in (("o1", self.o1), ("o2", self.o2), ("n1", self.n1), ("n2", self.n2), ("fo", self.fo)):
-            t[idx] = pinned(rec[name].astype(np.int64 if name[0] == "o" else np.float32), dev)
+            t[idx] = torch.from_numpy(rec[name].astype(np.int64 if name[0] == "o" else np.float32)).to(dev)
 
     def _observe(self, players, rel, scalars, types, attack, retreat, units):
         """The model's inputs, one row per seat:
@@ -307,9 +298,8 @@ class VecEnv:
         N, S, P, hw, dev = self.N, self.S, self.P, self.H * self.W, self.device
         row_env = torch.arange(N, device=dev) // S
         area = self.area[row_env][:, None]  # [N, 1]
-        rel = rel.reshape(N, P).astype(np.int64)
-        rel_t = pinned(rel, dev)
-        pl = pinned(players.reshape(N, P, self.F), dev)
+        rel_t = torch.from_numpy(rel.reshape(N, P).astype(np.int64)).to(dev)
+        pl = torch.from_numpy(players.reshape(N, P, self.F)).to(dev)
         x = torch.zeros(N, N_CHANNELS, hw, device=dev)
         terr = self.terrain[row_env]
         valid = terr[:, 4] > 0
@@ -333,9 +323,8 @@ class VecEnv:
         x[:, OWN:OWN + 4] = own
         x[:, UNOWNED] = (x[:, LAND] - own.sum(1)).clamp(min=0)
         x[:, FALLOUT] = self.fo[flat] / area
-        types = types.reshape(N, self.T)
-        type_mask = pinned(types, dev)
-        buildings, upgradable = self._add_units(x, units, rel, types[:, list(BUILD_OF)])
+        type_mask = torch.from_numpy(types.reshape(N, self.T)).to(dev)
+        buildings, upgradable = self._add_units(x, units, rel_t, type_mask[:, list(BUILD_OF)] > 0)
         mine, shore = x[:, OWN] > 0, x[:, SHORE] > 0
         nukable = x[:, OWN + 1] < 0.5  # not mostly a friend's land; self-nukes stay legal (the user, 2026-10-08)
         cell_mask = torch.stack([
@@ -343,20 +332,20 @@ class VecEnv:
             mine, mine, mine, mine, mine & shore, mine,  # city, defense post, silo, factory, port, SAM
             x[:, OCEAN] > 0, nukable, nukable, upgradable,  # warship, atom and hydrogen bombs, upgrade
         ], 1) & valid[:, None]
-        type_mask[:, self.map_types] &= cell_mask.any(-1)  # a cell action needs a legal cell on its heat map
+        type_mask[:, list(MAP_TYPES)] &= cell_mask.any(-1)  # a cell action needs a legal cell on its heat map
         return {
             "spatial": quantize_(x).view(N, N_CHANNELS, self.H, self.W),
-            "scalars": pinned(scalars.reshape(N, self.K), dev),
+            "scalars": torch.from_numpy(scalars.reshape(N, self.K)).to(dev),
             "players": torch.cat([pl, torch.log1p(buildings[row_env]) / 3], 2),
             "owners": torch.stack(owners, 1).to(torch.int16),
             "owner_land": quantize_(torch.stack(shares, 1)),
             "type_mask": type_mask,
-            "attack_mask": pinned(attack.reshape(N, P), dev),
-            "retreat_mask": pinned(retreat.reshape(N, P), dev),
+            "attack_mask": torch.from_numpy(attack.reshape(N, P)).to(dev),
+            "retreat_mask": torch.from_numpy(retreat.reshape(N, P)).to(dev),
             "cell_mask": cell_mask,
         }
 
-    def _add_units(self, x, units, rel, afford):
+    def _add_units(self, x, units, rel_t, afford):
         """Paints each seat's units into x, and returns every player's buildings by type [E, P, len(BUILDING_TYPES)].
         - By type and relation, a structure counts its level (under construction: 1), a transport its log troops / 10,
           a warship 1.
@@ -364,44 +353,45 @@ class VecEnv:
         - ZONES hold each zone (bridge/frame.ts) by kind and by its owner's side. A SAM's zone counts its loaded
           interceptors / 16, a post's or a nuke's 1.
         Also returns the upgrade map [N, H·W]: each seat's finished buildings of the types it can afford (afford
-        [N, UPGRADABLE]), the game's canUpgradeUnit.
-        rel [N, P] and afford are numpy arrays. The records are picked on the CPU, and only what is painted goes to the
-        GPU: picking them there (a boolean index, the zones' cells) waited for it (PLAN 4A, "Speed work")."""
+        [N, UPGRADABLE]), the game's canUpgradeUnit."""
         buildings = torch.zeros(self.E, self.P, len(BUILDING_TYPES), device=self.device)
         upgradable = torch.zeros(self.N, self.H * self.W, dtype=torch.bool, device=self.device)
         rec = np.concatenate([u for _, u in units])
         if len(rec) == 0:
             return buildings, upgradable
-        gpu = lambda a: pinned(np.ascontiguousarray(a), self.device)
-        env = np.concatenate([np.full(len(u), e, np.int64) for e, u in units])
-        typ, owner, cell = (rec[f].astype(np.int64) for f in ("type", "owner", "cell"))
-        level, ready = rec["level"].astype(np.float32), rec["ready"].astype(np.float32)
-        kind, zk = self.building[typ], self.zone_kind[typ]
-        # computed on the GPU as before, so the values stay the same to the bit
-        value = torch.where(gpu(typ == self.transport), torch.log1p(gpu(rec["troops"].astype(np.float32))) / 10,
-                            gpu(level).clamp(min=1))
-        keep = np.flatnonzero(kind >= 0)
-        buildings.index_put_((gpu(env[keep]), gpu(owner[keep]), gpu(kind[keep])), value[gpu(keep)], accumulate=True)
-        zone = np.flatnonzero((zk >= 0) & (rec["zr"] > 0))  # the records with a zone
-        z = lambda f: torch.from_numpy(rec[f][zone].astype(np.int64))
-        disk, zcell = (t.numpy() for t in disk_cells(z("zx"), z("zy"), z("zr"), torch.from_numpy(self.side[env[zone]]),
-                                                     self.H, self.W))
+        dev = self.device
+        env = torch.from_numpy(np.concatenate([np.full(len(u), e, np.int64) for e, u in units])).to(dev)
+        typ = torch.from_numpy(rec["type"].astype(np.int64)).to(dev)
+        owner = torch.from_numpy(rec["owner"].astype(np.int64)).to(dev)
+        cell = torch.from_numpy(rec["cell"].astype(np.int64)).to(dev)
+        level = torch.from_numpy(rec["level"].astype(np.float32)).to(dev)
+        troops = torch.from_numpy(rec["troops"].astype(np.float32)).to(dev)
+        ready = torch.from_numpy(rec["ready"].astype(np.float32)).to(dev)
+        zr = torch.from_numpy(rec["zr"].astype(np.int64)).to(dev)
+        zk = self.zone_kind[typ]
+        zone = ((zk >= 0) & (zr > 0)).nonzero().squeeze(1)  # the records with a zone
+        zx, zy = (torch.from_numpy(rec[f].astype(np.int64)).to(dev)[zone] for f in ("zx", "zy"))
+        side = self.area[env[zone]].sqrt().round().long()  # tiles per cell side of each zone's game
+        disk, zcell = disk_cells(zx, zy, zr[zone], side, self.H, self.W)
         zi = zone[disk]  # the record behind each covered cell
-        zvalue = np.where(zk[zi] == 0, ready[zi] / 16, np.float32(1)).astype(np.float32)
+        zvalue = torch.where(zk[zi] == 0, ready[zi] / 16, 1.0)
+        kind = self.building[typ]
+        value = torch.where(typ == self.transport, torch.log1p(troops) / 10, level.clamp(min=1))
+        keep = kind >= 0
+        buildings.index_put_((env[keep], owner[keep], kind[keep]), value[keep], accumulate=True)
         for s in range(self.S):
             row = env * self.S + s
-            r = rel[row, owner]
-            k = keep[r[keep] > 0]
-            x.index_put_((gpu(row[k]), gpu(BUILDINGS + 4 * kind[k] + r[k] - 1), gpu(cell[k])), value[gpu(k)],
+            r = rel_t[row, owner]
+            k = keep & (r > 0)
+            x.index_put_((row[k], BUILDINGS + 4 * kind[k] + r[k] - 1, cell[k]), value[k], accumulate=True)
+            st = k & (kind < STRUCTURES)
+            x[:, LEVEL].index_put_((row[st], cell[st]), level[st] / 16, accumulate=True)
+            x[:, READY].index_put_((row[st], cell[st]), ready[st] / 16, accumulate=True)
+            rz = r[zi]
+            on = rz > 0
+            x.index_put_((row[zi][on], ZONES + 2 * zk[zi][on] + (rz[on] >= 3).long(), zcell[on]), zvalue[on],
                          accumulate=True)
-            st = k[kind[k] < STRUCTURES]
-            at = gpu(row[st]), gpu(cell[st])
-            x[:, LEVEL].index_put_(at, gpu(level[st] / 16), accumulate=True)
-            x[:, READY].index_put_(at, gpu(ready[st] / 16), accumulate=True)
-            on = np.flatnonzero(r[zi] > 0)
-            x.index_put_((gpu(row[zi[on]]), gpu(ZONES + 2 * zk[zi[on]] + (r[zi[on]] >= 3)), gpu(zcell[on])),
-                         gpu(zvalue[on]), accumulate=True)
-            up = k[(r[k] == 1) & (kind[k] < UPGRADABLE) & (level[k] > 0)]  # own, finished, upgradable
-            up = up[afford[row[up], kind[up]]]  # and the gold to build another of its type
-            upgradable[gpu(row[up]), gpu(cell[up])] = True
+            up = keep & (r == 1) & (kind < UPGRADABLE) & (level > 0)  # own, finished, upgradable
+            up &= afford[row, kind.clamp(0, UPGRADABLE - 1)]  # and the gold to build another of its type
+            upgradable[row[up], cell[up]] = True
         return buildings, upgradable

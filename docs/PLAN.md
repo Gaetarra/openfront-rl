@@ -1272,6 +1272,9 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
              (a graph only cuts the CPU's launches) would gain less than estimated.
            - If it stays, BC and the eval, which share `trainer/env.py`, need the one-thread line too, or its CPU
              torch work spins over their workers as it did in PPO (−14%).
+         - **The user's call (2026-10-11): both reverted**, the observation rewrite and the one-thread line, as the
+           heat-map packing was (under the bar, and a risk for BC and the eval). The code is lever 1's again; lever 2
+           stays in git (ce5eff7, 2164cb0) with its bit-for-bit check.
       3. the KL reference's outputs computed once per update (one forward pass per row instead of three), kept in
          the RAM buffer: −1.0 s, **+7%**. Exact, ~2 GB more pinned RAM (32 GB, ~20 GB free).
       4. a CUDA graph of the rollout's inference (a fixed 32 rows): −0.8 s, **+5%**. Moderate risk: graphs allow no
