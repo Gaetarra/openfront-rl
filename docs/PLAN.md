@@ -1301,6 +1301,29 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
            passes (learner, reference, opponent; 12.8 ms of CPU against 9.5 of GPU each), ~0.5 s an update, ~3–4%.
       - **Speed work closed (the user's call, 2026-10-11):** levers 1 and 3 credited, +5.7% and +4.8% (~+10.8%
         together); lever 2 and the one-thread line reverted; lever 4 parked (near the bar, moderate risk).
+  - **League design** (the user's calls, 2026-10-11, after the speed work and the bandwidth probe):
+    - **Stage 0 first:** plain PPO from the 3B clone against its frozen self, with Phase 2's settings (exact KL 0.2 to
+      the clone, lr 1e-4, no entropy bonus, 16 × 2 games, 12 minibatches), 3,000 updates (~10–11 h at ~120
+      decisions/s).
+      - Why: no v4 network (15 actions, 12 heat maps, 100 shares) has been trained by PPO yet, so this checks the
+        signal before the league machinery is built.
+      - Checked like Gate B: its snapshots against the frozen clone on the 512 fixed games, bar 0.545. Its snapshots
+        seed the league's pool.
+    - **Opponents one at a time, rotated:** every 25 updates PFSP picks the opponent for new games; games in progress
+      finish with theirs, so at most 2 are active. Each active opponent costs one more forward pass per rollout step
+      (~0.6 s an update), and nobody takes over a game halfway.
+      - The pool: the 3B clone, the 3A clone, the Phase 2 PPO bot, the Phase 2 clone, and the learner's snapshots
+        every 250 updates.
+      - PFSP: an opponent's weight grows with how often it beats the learner in the training games against it.
+      - The KL reference stays the 3B clone.
+    - **Frozen evaluations inside the trainer:** every 250 updates training pauses, a second set of workers plays ~128
+      fixed games against the panel (the 3B clone, the Phase 2 clone, the Phase 2 PPO bot), then training resumes:
+      ~15% of the time, no contention, results on the control page.
+    - **Ratings: a Bradley-Terry fit** over all frozen-evaluation results, anchored on the panel, with bootstrap
+      uncertainty. It replaces the planned TrueSkill table: a few lines of numpy, no new dependency, and every game
+      is a snapshot against a fixed panel member, which one fit handles directly. Gate 4A reads it.
+    - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
+      KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
         - Also for the league's design: when the opponent is the KL reference itself, one forward pass over both
           seats' rows would give the opponent's actions and the reference's outputs, saving a 32-row pass a step.
       - Together: ~15.1 → ~11 s an update, ~140 decisions/s (+35–40%).
@@ -1328,7 +1351,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   (`checkpoints/ppo-bc2/update005000.pt`). Gate 4A:
   - ≥ 0.80 against the Phase 3 clone;
   - ≥ 0.70 against the Phase 2 PPO bot;
-  - a league rating (a TrueSkill table) that still rises over the last 5 snapshots.
+  - a league rating (a Bradley-Terry fit, "League design" above) that still rises over the last 5 snapshots.
 - **Frozen evaluations during training**: every 250 updates, 64–128 frozen games against the panel (~12% of the time).
   The training curve includes the learner adapting to the games in progress, and it missed the KL-0.05 decline.
 - **Speed**: Phase 2's PPO ran at ~190 decisions/s with the GPU at ~97%. Most of it was learning (3 epochs of forward
