@@ -1257,7 +1257,12 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
              workers' wait went to 2.48 s, the observations to 0.65 s, the rollout's forward passes back to 0.83 s
              of GPU time. Learning went to 6.44 s: its forward pass's CPU time halved (1.0 → 0.42 s), since the
              RAM buffer's CPU gather spins the pool during learning too, in the old code as well.
-           - So one torch CPU thread in the trainer is a lever of its own, which helps the old code too.
+           - So one torch CPU thread in the trainer looked like a lever of its own, maybe for the old code too.
+         - **One CPU thread, alone on lever 1's code** (the user's call: two A/Bs; lever 2 set aside in d192cbd,
+           `torch.set_num_threads(1)` in 880ebcc; `runs/ab/20261011-133232-threads.json`): warm-up 105.8, old 108.6,
+           new 108.0, new 107.9, old 109.9. **No measurable gain (−1.2%).** Lever 1's code does no CPU torch work in
+           the rollouts, so nothing spins there, and learning is GPU-bound, so its faster CPU side does not show. The
+           line stays as lever 2's enabler, and lever 2 is A/B'd on top of it.
       3. the KL reference's outputs computed once per update (one forward pass per row instead of three), kept in
          the RAM buffer: −1.0 s, **+7%**. Exact, ~2 GB more pinned RAM (32 GB, ~20 GB free).
       4. a CUDA graph of the rollout's inference (a fixed 32 rows): −0.8 s, **+5%**. Moderate risk: graphs allow no
