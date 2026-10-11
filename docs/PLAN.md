@@ -1228,6 +1228,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
            - A straight drift fits all four probes: d = 3.7 decisions/s per probe from the old pair, 3.8 from the new
              pair, and an effect of ~+5.7%. The ABBA mean cancels such a drift exactly; "both new above both old"
              fails whenever a probe's drift is about half the effect.
+         - **Re-run with a warm-up probe** (the user's call; 12:23, `runs/ab/20261011-122339-lever1b.json`): warm-up
+           99.6 (not counted), then old 102.3, new 107.0, new 107.9, old 101.0. **Credited: +5.7%** (the prediction
+           was +7–10%). The warm PC drifted 1%. Warm, the old code runs ~101 decisions/s, as at Gate 3B and in the
+           profile: the cold PC's 119 was a start-up artifact.
       2. observations without syncs (copies from pinned memory that do not wait, the zone count on the CPU), and the
          same constants in the rollout's distributions: −1.0 to −1.2 s, **+7–8%**. Exact. It changes
          `trainer/env.py`, which BC and the eval share, so they gain too.
