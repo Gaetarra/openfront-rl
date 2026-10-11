@@ -1136,6 +1136,18 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
             used the CPU or the GPU afterwards either (the replay viewer idle, 19.6 GB of RAM free).
           - Not counted as a pass. The one-wait version stays (fewer waits, same values). Next: probes of the old and
             the new code back to back, in the same conditions.
+        - **Old against new code, back to back** (PC idle; `runs/gate3b-speed4-{new,old}.log`):
+          - 03:01, the new code (one wait): Phase 2 network 122.7, v4 96.2: 78%;
+          - 03:06, the code before the packing (2b83c02, swapped in, then restored from git): 118.9 and 95.3: **80%**.
+          - **The code is not the cause.** Since ~02:20 the PC runs the Phase 2 network ~18% slower and v4 ~7%
+            slower than at 01:15, with either code, for no visible reason.
+          - The packing changes nothing measurable in PPO (v4 96.2 against 95.3). Its 9% showed only in isolated
+            benchmarks.
+          - The ratio depends on those conditions. The Phase 2 network spends 60% of its time in rollouts, which
+            are mostly CPU, so a slowdown there hits it harder. When it runs at its usual 145–153 (01:15 and every
+            check on 2026-10-10), the ratio is 71–73%.
+          - **Reading: the bar is missed by ~3 points in normal conditions.** The 78–81% of tonight's probes come
+            from the slow conditions. The user decides how the gate reads this (asked 2026-10-11 ~03:10).
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
