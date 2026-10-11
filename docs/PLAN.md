@@ -1155,6 +1155,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         speed against the small Phase 2 network; the one exact lever left gained nothing; the clone beat the 3A clone
         0.700 and passed every other bar. **The packing is reverted** (no measurable gain, less code; in git as
         234ad4c and a0d5821). Lesson: credit a speed change only from old and new code probed back to back.
+      - **PPO speed is 4A's first work item** (reviewed with the user, 2026-10-11). The packing cut v4's GPU work by 9%
+        in isolation and gained nothing in PPO. The CPU's launch time per minibatch roughly equals the GPU's (3B step
+        3, part 2), so the real loop is probably bound by kernel launches: cutting GPU work alone cannot help.
+        Profile the real loop first (torch.profiler), then try, each judged by old and new code probed back to back:
+        1. fewer launches: a CUDA graph of the fixed-shape learning step, or `torch.compile` through the community
+           `triton-windows` build (a new dependency). Possibly 20–40% of learning, with Windows risk;
+        2. the 12-map entropy recomputed after every minibatch only for the log: log it once per update;
+        3. the frozen clone's outputs for the KL computed once per update instead of once per epoch (a third of
+           those passes at 3 epochs, ~2 GB more pinned RAM).
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
@@ -1174,7 +1183,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   limited by the GPU. The TrueSkill table moves to Phase 4, for the league.
 
 **Phase 4 — RL on Ranked (ongoing)**
-- **4A, ranked 1v1** (after 3B): a self-play league from the 3B clone. The current policy plays a pool of past snapshots
+- **4A, ranked 1v1** (after 3B): first PPO's speed (Gate 3B, "PPO speed is 4A's first work item"). A self-play league from the 3B clone. The current policy plays a pool of past snapshots
   and the clones, with prioritized fictitious self-play: opponents that beat the learner more often are picked more
   often. The KL to the clone starts at 0.2 and is lowered only while the frozen panel keeps improving (0.05 made the
   Phase 2 bot worse).
