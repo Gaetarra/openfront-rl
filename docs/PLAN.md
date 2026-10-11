@@ -1292,8 +1292,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
          syncs, need static inputs, and the sampling's random draws move into the graph.
          - Re-estimated after lever 3: a graph would cut the CPU launches of the rollout's three 32-row forward
            passes (learner, reference, opponent; 12.8 ms of CPU against 9.5 of GPU each), ~0.5 s an update, ~3–4%.
-      - **Where it stands (2026-10-11):** levers 1 and 3 credited, +5.7% and +4.8% (~+10.8% together); lever 2 and the
-        one-thread line reverted. Proposed: park lever 4 (near the bar, moderate risk).
+      - **Speed work closed (the user's call, 2026-10-11):** levers 1 and 3 credited, +5.7% and +4.8% (~+10.8%
+        together); lever 2 and the one-thread line reverted; lever 4 parked (near the bar, moderate risk).
         - Also for the league's design: when the opponent is the KL reference itself, one forward pass over both
           seats' rows would give the opponent's actions and the reference's outputs, saving a 32-row pass a step.
       - Together: ~15.1 → ~11 s an update, ~140 decisions/s (+35–40%).
