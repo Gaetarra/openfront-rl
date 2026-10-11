@@ -10,7 +10,7 @@ from torch.distributions import Categorical
 from trainer.env import BUILDINGS, N_CHANNELS
 from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, MASK_VALUE, OLD_CHANNELS, OLD_SCALARS, RETREAT,
                            SHARES, SIZE_OF, SIZES, SPAWN, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE,
-                           _Maps, load_net, new_net, relevance, v1_spatial)
+                           load_net, new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 26, "acts": 5}
 N, P, H, W = 6, 5, 32, 32
@@ -405,7 +405,7 @@ class ShareDistTest(unittest.TestCase):
         boat = torch.zeros(3, 4)
         for i in range(3):
             for c in range(16):
-                boat[i, int(obs["owners"][i, 0, c])] += d.cells.probs(1)[i, c]
+                boat[i, int(obs["owners"][i, 0, c])] += d.cells.probs[i, 1, c]
         pt = d.type.probs
         want = pt[:, ATTACK] * ((d.ptr.probs * h[:, 0]).sum(1) - 1) + pt[:, BOAT] * ((boat * h[:, 1]).sum(1) - 1)
         self.assertTrue(torch.allclose(d.entropy() - flat.entropy(), want, atol=1e-5))
@@ -452,13 +452,7 @@ class ShareDistTest(unittest.TestCase):
         self.assertLessEqual(len(kept), 3)
 
     def test_the_heat_maps_score_and_learn_as_torchs_categoricals_did(self):
-        """Only the maps of the types a row can use are normalized (PLAN Gate 3B): values and gradients match torch's
-        Categorical over every map."""
         obs, out, ref = full_obs(), full_out(1), full_out(2)
-        obs["type_mask"][0, 4:11] = False  # no gold for any build; their maps keep legal cells
-        obs["type_mask"][2, [1, 3, 11, 12, 13]] = False  # no spawn, boat, nuke or upgrade
-        used = 36 - 7 - 5
-        self.assertEqual(len(ActionDist(out, obs).cells.d.logits), used)
         with torch.no_grad():
             act = ActionDist(out, obs).sample()
         out["maps"].requires_grad_()
@@ -466,9 +460,7 @@ class ShareDistTest(unittest.TestCase):
         def as_torch(d, maps):
             mask = obs["cell_mask"].clone()
             mask[..., 0] |= ~mask.any(-1)
-            every = torch.ones_like(mask[..., 0])
-            d.cells = _Maps(maps.float(), obs["cell_mask"], every)
-            d.cells.d = Categorical(logits=torch.where(mask, maps.float(), MASK_VALUE)[every])
+            d.cells = Categorical(logits=torch.where(mask, maps.float(), MASK_VALUE))
             return d
 
         results = []
@@ -504,7 +496,7 @@ class ShareDistTest(unittest.TestCase):
     def test_old_networks_see_only_their_own_actions(self):
         obs, old = full_obs(), share_out()  # a 5-type, 3-map network in a game with 15 types
         dist = ActionDist(old, obs)
-        self.assertEqual((dist.type.logits.shape[-1], dist.cells.used.shape[1], dist.retreat), (5, 3, None))
+        self.assertEqual((dist.type.logits.shape[-1], dist.cells.logits.shape[1], dist.retreat), (5, 3, None))
         for _ in range(20):
             self.assertTrue((dist.sample()[:, 0] < 5).all())
 

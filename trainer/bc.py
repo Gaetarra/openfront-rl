@@ -177,7 +177,7 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     m.add("bc/type_acc", ((dist.type.logits.argmax(1) == t) & legal).sum(), nl)
     m.add("bc/act_rate_human", ((t > 0) & legal).sum(), nl)
     m.add("bc/act_rate_policy", ((1 - dist.type.probs[:, 0]) * legal).sum(), nl)
-    lc = dist.cells.log_prob(cell)  # [N, maps]
+    lc = dist.cells.log_prob(cell[:, None].expand(-1, dist.cells.logits.shape[1]))  # [N, maps]
     rows = legal & (t == ATTACK)
     m.add("bc/attack_target_acc", ((dist.ptr.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
     m.add("bc/nll_attack_target", -(dist.ptr.log_prob(tgt) * rows).sum(), rows.sum())
@@ -190,16 +190,16 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
         m.add(f"bc/nll_{name}_bin", -(ls[:, k].gather(1, size[:, None])[:, 0] * rows).sum(), rows.sum())
         if lt is not None:
             m.add(f"bc/nll_{name}_share", -(lt[:, k] * rows).sum(), rows.sum())
-    every = torch.arange(dist.cells.n_cells, device=cell.device)  # every cell, as grid index y * W + x
+    every = torch.arange(dist.cells.logits.shape[-1], device=cell.device)  # every cell, as grid index y * W + x
     w = obs["spatial"].shape[-1]
     side = 8 * obs["scalars"][:, 14:15].clamp(min=0).sqrt()  # tiles per cell side: 8 on Normal maps, 4 on Compact
     tiles = torch.hypot((every // w - cell[:, None] // w).float(), (every % w - cell[:, None] % w).float()) * side
-    for k in range(dist.cells.used.shape[1]):  # the network's heat maps; the first three keep their old names
-        name, rows = MAP_NAMES[k], legal & (t == MAP_TYPES[k])  # a label's type is one its row can take
-        p = dist.cells.probs(k)  # [N, cells]
-        hit = p.argmax(1) == cell
+    for k in range(dist.cells.logits.shape[1]):  # the network's heat maps; the first three keep their old names
+        name, rows = MAP_NAMES[k], legal & (t == MAP_TYPES[k])
+        hit = dist.cells.logits[:, k].argmax(1) == cell
         m.add(f"bc/{name}_cell_acc", (hit & rows).sum(), rows.sum())
         m.add(f"bc/nll_{name}_cell", -(lc[:, k] * rows).sum(), rows.sum())
+        p = dist.cells.probs[:, k]  # [N, cells]
         m.add(f"bc/{name}_cell_near", ((p * (tiles <= NEAR_TILES)).sum(1) * rows).sum(), rows.sum())
         m.add(f"bc/{name}_cell_dist", ((p * tiles).sum(1) * rows).sum(), rows.sum())
         u = obs["cell_mask"][:, k].float()

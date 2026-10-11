@@ -708,6 +708,9 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       2026-10-05 02:09 UTC: 3 records removed (21,008 left), none from the scoring set (still 766); the next is due by
       ~2026-10-12.
 - **3B — Every human action** (ranked 1v1; bridge and trainer):
+  - **3B done (2026-10-11): Gate 3B passed**, with the speed bar accepted at ~72% by the user (Gate 3B, below). The 3B
+    clone is `checkpoints/bc3b-v4/latest.pt` (arch v4, SwiGLU experts): 0.700 against the 3A clone. Next, the user's
+    choice: 4A (needs only 3A and 3B; first the bandwidth probe on the 3B clone) or 3C (ranked 2v2, needed before 4B).
   - **Reviewed 2026-10-06** against the StockShip brief (`docs/superpowers/specs/2026-10-05-stockship-3b-brief.md`).
     The brief's game facts were checked in the code: corrections are in "Findings", and the ideas are decided below
     and in decisions 4, 11 and 12. Order:
@@ -1102,7 +1105,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       | invalid actions | < 1% | 0.11%: 263 of its 249,702 actions | passed |
       | games without errors | 1,000 | 1,024, in one attempt (exit 0) | passed |
       | against the 3A clone | ≥ 0.545 | **0.700** (SE 0.014; seats 0.705 / 0.695) | passed |
-      | PPO speed (10 updates, 12 minibatches) | ≥ 75% | **71%**: Phase 2 network 145.2 decisions/s, v4 103.2 | **missed** |
+      | PPO speed (10 updates, 12 minibatches) | ≥ 75% | **71%**: Phase 2 network 145.2 decisions/s, v4 103.2 | missed; **accepted** (below) |
 
       - Match (`runs/eval/20261011-011546.json`, 1,024 games, 16 recorded): the clone acts in 17.2% of decisions, and
         22.9% of its actions follow an action. bc3b (shares alone) scored 0.660 on 512 games at v0.34.23: +0.04, ~1.6
@@ -1148,6 +1151,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
             check on 2026-10-10), the ratio is 71–73%.
           - **Reading: the bar is missed by ~3 points in normal conditions.** The 78–81% of tonight's probes come
             from the slow conditions. The user decides how the gate reads this (asked 2026-10-11 ~03:10).
+      - **User decision (2026-10-11): accept ~72% and close Gate 3B.** 3B's 15 actions and inputs cost ~28% of PPO's
+        speed against the small Phase 2 network; the one exact lever left gained nothing; the clone beat the 3A clone
+        0.700 and passed every other bar. **The packing is reverted** (no measurable gain, less code; in git as
+        234ad4c and a0d5821). Lesson: credit a speed change only from old and new code probed back to back.
 - **3C — Ranked 2v2 and a nations check** (before Phase 4B):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;

@@ -65,7 +65,7 @@ npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a
 npx tsx ../../scripts/troop_shares.ts 60                    # share of their troops humans send per attack/boat, 60 replayed records (~10 min, game dir)
 .venv/Scripts/python scripts/bench_gpu.py                   # GPU encoder throughput (run from the repo root)
 .venv/Scripts/python scripts/coverage.py                    # Gate 3B's coverage: commands outside the 15 actions over all held-out records (seconds)
-.venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s, time split and peak VRAM of the Phase 2 network and a v4 network, BC rows/s of the v4 network (~15 min, PC idle)
+.venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s, time split and peak VRAM of the Phase 2 network and a v4 network, BC rows/s of the v4 network (~15 min, PC idle); --v4 <checkpoint> times a trained one (Gate 3B)
 ```
 
 Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUDA 13.0 wheels).
@@ -162,15 +162,12 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     (watch "Shared GPU memory" in Task Manager).
   - PPO logs `perf/gpu_reserved_gb` (the allocator's peak, which reads past the card when it spills),
     `perf/gpu_allocated_gb` (in use), and the time split `perf/rollout_share` and `perf/env_share` (the workers'
-    simulation and observations).
-  - `ActionDist` normalizes only the heat maps of the types each row can take (`_Maps`, exact): 4.65 of 12 in clone
-    games, ~13% of a learning minibatch. Sampling draws fewer random numbers since 2026-10-11, so fixed-seed matches
-    from before do not replay game by game (results stay comparable within noise).
-- `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
+    simulation and observations).- `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
 - `data/` holds only records of v0.34.17-v0.34.22, which replay in full only in `pins/v0.34.23` ("Game version").
-  Step 4's BC night and its scoring run from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
-  indexed record, so do not crawl before that night is done: a crawl would mix v0.34.24 records in.
+  Step 4's BC night and its scoring ran from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
+  indexed record, so after a crawl `data/` mixes in v0.34.24 records: a BC run on both needs them split by version
+  (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and includes the learner
   adapting to the games in progress (it read 0.84 where Gate B gave 0.63). Compare snapshots with `trainer.eval` on the
   same fixed seeds.
