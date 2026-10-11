@@ -1282,6 +1282,12 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
          - The check: PPO at learning rate 0 (the learner stays the reference, with random heads so each row's policy
            is its own) must log a KL of ~0. It reads 2e-7; with the stored rows shifted by one it read 4e-3 and
            1.3e-2, and the test failed.
+         - **A/B** (79f6779 against 5fcb152 = lever 1's code, `runs/ab/20261011-144809-lever3.json`): warm-up 113.7,
+           old 115.1, new 119.4, new 120.4, old 113.8. **Credited: +4.8%** (predicted +7%). Own GPU peak 8,115–8,285
+           MiB against 8,465: the reference's activations left learning.
+           - From the time split: learning ~1.5 s an update faster, the rollouts ~0.8 s slower. The reference's
+             forward pass at 32 rows is bound by its CPU launches (12.8 ms against 9.5 of GPU), so it costs the
+             rollout more than its GPU time.
       4. a CUDA graph of the rollout's inference (a fixed 32 rows): −0.8 s, **+5%**. Moderate risk: graphs allow no
          syncs, need static inputs, and the sampling's random draws move into the graph.
       - Together: ~15.1 → ~11 s an update, ~140 decisions/s (+35–40%).
