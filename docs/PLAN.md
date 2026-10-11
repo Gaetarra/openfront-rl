@@ -1210,7 +1210,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           ms of GPU time.
       - So Gate 3B's launch-bound hypothesis was wrong for learning. Graphs or compilation could recover at most its
         16% of idle GPU, and syncs cause most of that idle time.
-    - **Levers, with the gain the profile predicts** (proposed 2026-10-11, the user's call pending):
+    - **Levers, with the gain the profile predicts**, in the order the user chose (2026-10-11), each with its own A/B:
       1. no sync within a learning minibatch: the constants kept on the GPU, no argument check, and `kl.item()` with
          the other stats. Also the next epoch's first minibatch fetched ahead, and the entropy for the log computed
          once per update: −1.0 to −1.4 s an update, **+7–10%**. Exact, ~20 lines.
@@ -1231,7 +1231,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           change, worth it only after levers 2 and 4;
         - 2 epochs instead of 3 ("Speed", below): −2.5 s, but it changes what PPO learns per sample, so it is judged
           on learning curves, not by a speed probe.
-    - **A/B rule** (proposed, fixed before any run):
+    - **A/B rule** (the user's call, 2026-10-11; fixed before any run):
       - the probe: `scripts/speed_check.py --ppo-minibatches 12 --skip-bc --v4 checkpoints/bc3b-v4/latest.pt` without
         its Phase 2 run (a new `--skip-v1`): 10 updates with the 3B clone, the mean decisions/s of updates 3–10, with
         the PC idle;

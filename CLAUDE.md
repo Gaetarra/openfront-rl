@@ -67,7 +67,13 @@ npx tsx ../../scripts/troop_shares.ts 60                    # share of their tro
 .venv/Scripts/python scripts/coverage.py                    # Gate 3B's coverage: commands outside the 15 actions over all held-out records (seconds)
 .venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s, time split and peak VRAM of the Phase 2 network and a v4 network, BC rows/s of the v4 network (~15 min, PC idle); --v4 <checkpoint> times a trained one (Gate 3B)
 .venv/Scripts/python scripts/profile_ppo.py                     # where PPO's time goes: one update of the real loop with the 3B clone under torch.profiler, per part: CPU, idle GPU, syncs, GPU time (~2 min, PC idle; runs/profile/*.json)
+.venv/Scripts/python scripts/ab_speed.py --old pins/ab-base --label <change>   # code A/B of PPO speed: old, new, new, old probes and the rule's verdict (~15 min, PC idle; runs/ab/)
 ```
+
+The A/B's old code lives in the worktree `pins/ab-base` (git-ignored), a detached HEAD at the commit before the change:
+`git worktree add --detach pins/ab-base <commit>` (later `git -C pins/ab-base checkout --detach <commit>`), then
+replace its empty `OpenFront_Source_Code/openfrontio` and add `checkpoints` and `runs` as PowerShell junctions
+(`New-Item -ItemType Junction`) to this checkout's.
 
 Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUDA 13.0 wheels).
 

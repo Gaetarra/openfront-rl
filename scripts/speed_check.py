@@ -8,6 +8,7 @@ Gate 3B: v4 keeps at least 75% of the Phase 2 network's decisions/s in the same 
 
   .venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12
   .venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12 --skip-bc --v4 checkpoints/bc3b-v4/latest.pt
+A code A/B (PLAN 4A, "Speed work") times only the clone: add --skip-v1.
 """
 import argparse
 import shutil
@@ -73,6 +74,7 @@ def main(argv=None):
     p.add_argument("--bc-games", type=int, default=6)
     p.add_argument("--bc-updates", type=int, default=30)
     p.add_argument("--skip-bc", action="store_true", help="only the PPO runs")
+    p.add_argument("--skip-v1", action="store_true", help="no Phase 2 network run (the code A/B probes)")
     p.add_argument("--v4", help="a v4 checkpoint to time in PPO instead of random weights (Gate 3B: the BC clone)")
     a = p.parse_args(argv)
     speed = ROOT / "checkpoints" / "speed"
@@ -95,6 +97,8 @@ def main(argv=None):
             "speed-bc-v4": ("trainer.bc", bc + ["--core", "moe-swiglu"])}
     if a.skip_bc:
         runs = {name: spec for name, spec in runs.items() if spec[0] == "trainer.ppo"}
+    if a.skip_v1:
+        del runs["speed-ppo-v1"]
     results = {}
     try:
         for name, (module, flags) in runs.items():
@@ -104,12 +108,12 @@ def main(argv=None):
             shutil.rmtree(ROOT / "checkpoints" / name, ignore_errors=True)
             shutil.rmtree(ROOT / "runs" / name, ignore_errors=True)
         shutil.rmtree(speed, ignore_errors=True)
-    v1 = results["speed-ppo-v1"][0]
+    v1 = results["speed-ppo-v1"][0] if "speed-ppo-v1" in results else None
     print(f"\nGPU memory before the runs: {idle} MiB (other programs)")
     for name, (rate, peak, last) in results.items():
         unit = "decisions/s" if "ppo" in name else "rows/s"
         extra = f"  {rate / v1:.0%} of v1, {rate / PHASE2_PPO_SPEED:.0%} of Phase 2's {PHASE2_PPO_SPEED}" \
-            if "ppo" in name and name != "speed-ppo-v1" else ""
+            if "ppo" in name and name != "speed-ppo-v1" and v1 else ""
         if last:
             extra += (f"  (rollouts {last['perf/rollout_share']:.0%} of the time, the simulation "
                       f"{last['perf/env_share']:.0%}, "
@@ -117,8 +121,9 @@ def main(argv=None):
                       f"{last['perf/gpu_allocated_gb'] * 1024:.0f} in use)")
         print(f"{name:20} {rate:8.1f} {unit:12} peak {peak} MiB{extra}")
     rate, peak, last = results["speed-ppo-v4"]
-    print(f"\nPPO, v4: {rate / v1:.0%} of the Phase 2 network's decisions/s in this run (Gate 3B: >= 75%); "
-          f"its own peak {peak - (idle or 0)} MiB")
+    share = f"{rate / v1:.0%} of the Phase 2 network's decisions/s in this run (Gate 3B: >= 75%)" if v1 else \
+        f"{rate:.1f} decisions/s"
+    print(f"\nPPO, v4: {share}; its own peak {peak - (idle or 0)} MiB")
 
 
 if __name__ == "__main__":
