@@ -1347,11 +1347,17 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           - The 12 snapshots' windows (disjoint, 2,400 games) by game length: the learner won 0.74 of the games that
             ended before 3,000 ticks (377 games), 0.61 at 3,000–6,000 (535), **0.36 at 6,000–9,000 (647)** and 0.66
             after (841).
-          - Two explanations remain: the loop makes the learner play worse than its snapshots (a bug the league would
-            inherit), or learning during a game hurts it (a game spans ~30 updates).
-          - Proposed test (awaiting the user's call): the loop with lr 0 from update 1,000, 250 updates (~55 min). On
-            its last 200 games, ≥ 0.66 means the loop is sound, ≤ 0.62 a handicap to find before the league; in
-            between, 250 more updates.
+          - Two explanations remained: the loop makes the learner play worse than its snapshots (a bug the league
+            would inherit), or learning during a game hurts it (a game spans ~30 updates).
+          - **Frozen probe** (the user's call; run `probe-s0-1000`, 2026-10-13 00:51–01:38): the loop with lr 0 from
+            update 1,000 for 250 updates. Rule fixed before, on its last 200 games: ≥ 0.66 means the loop is sound,
+            ≤ 0.62 a handicap to find before the league. It read **0.735 ± 0.031** (the eval: 0.736): **the loop is
+            sound**, and learning during the games cost them 0.12–0.17.
+            - By game length: 0.88, 0.85, **0.52** and 0.79 (26, 39, 58 and 77 games). The 6,000–9,000-tick games are
+              this policy's weak spot even frozen; learning lowered every length.
+          - In Phase 2 the training games read 0.05–0.16 above the frozen checks instead, at the same step sizes (KL per
+            update ~0.010, ~7% of samples clipped, KL to its clone 0.05–0.06). Why the sign flipped is open. It matters
+            only if it slows the league, whose frozen evaluations measure strength anyway.
     - **Opponents one at a time, rotated:** every 25 updates PFSP picks the opponent for new games; games in progress
       finish with theirs, so at most 2 are active. Each active opponent costs one more forward pass per rollout step
       (~0.6 s an update), and nobody takes over a game halfway.

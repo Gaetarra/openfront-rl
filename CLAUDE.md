@@ -187,8 +187,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and can be off either way.
   It read 0.84 where Gate B gave 0.63 (Phase 2: the learner adapting to the games in progress), and 0.57 where the
-  frozen check gave 0.74 (4A Stage 0, cause open: PLAN 4A). Compare snapshots with `trainer.eval` on the same fixed
-  seeds.
+  frozen check gave 0.74 (4A Stage 0: learning during the games cost them; the same snapshot at lr 0 in the loop read
+  0.735). Compare snapshots with `trainer.eval` on the same fixed seeds.
 - Training runs and `trainer.watch` all serve on port 8787: stop `trainer.watch` before starting a run. A running
   trainer serves only the games saved directly in `replays/`, so `trainer.watch --dir` needs the port free. With the
   client running but nothing on 8787, the client cannot fetch the game and silently falls back to its lobby page.
