@@ -159,9 +159,12 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     theirs is enemies and bots.
   - Scalars 16–25: the gold against each build's current cost, and the seat's loaded silo missiles.
 - GPU memory (12 GB card):
-  - PPO keeps its rollout rows in pinned system RAM (`HostRows`, ~5 GB on the ranked grid), with the cell masks as
-    bits (`pack_bits`). A worker thread copies each minibatch to the GPU on its own stream while the previous one
-    trains.
+  - PPO keeps its rollout rows in pinned system RAM (`HostRows`), with the cell masks as bits (`pack_bits`). A worker
+    thread copies each minibatch to the GPU on its own stream while the previous one trains.
+    - On the ranked grid with the KL reference's outputs, it holds 7.6 GiB of data in 12.9 GiB of pinned RAM. PyTorch's
+      caching host allocator rounds each pinned buffer up to a power of two, and pinned pages cannot be paged out.
+    - On Windows, a process's private memory also counts its GPU memory, so the trainer's figure in Task Manager is not
+      all RAM (PLAN 4A, "First league run").
   - The trainers run with expandable allocator segments (`trainer/__init__.py`), and PPO empties the cache before
     learning.
   - Ranked PPO with a Phase 3 network runs at `--minibatches 12`. 96- and 128-row minibatches cost the same per row,
