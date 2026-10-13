@@ -1470,6 +1470,24 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         - Pinned buffers above 1 MB keep their exact size (`pinned_max_round_threshold_mb:1` in the allocator config,
           PyTorch 2.14), so the rollout buffer locks 7.6 GiB instead of 12.9.
         - PPO logs its private memory every update (`perf/private_gb`, the page's "Trainer memory" chart).
+    - **Learning test** (the user's go, 2026-10-14; `runs/learn4a.cmd`, ~7 h). The rules were fixed before any result:
+      1. **Weight average.** The uniform average of Stage 0's 9 snapshots of updates 1,000–3,000
+         (`checkpoints/swa-s0/update1000-3000.pt`) plays 256 games against the 3B clone. Its KL to the clone is 0.029,
+         against 0.037 and 0.059 for updates 1,000 and 3,000. Compared with update 1,000's 0.736:
+         - ≥ 0.78: the league plays and evaluates averaged weights, and the average is the strongest bot so far;
+         - ≤ 0.70: dropped;
+         - in between: decided with test 3.
+      2. **Are the swings real?** Stage 0's updates 250, 500, 750, 1,250, 1,500, 1,750 and 2,000 play 128 games each
+         against the 3B clone. The swings are confirmed if the snapshots differ beyond noise (χ² p < 0.01; noise alone
+         moves a 128-game result by ±0.04).
+      3. **A smaller step.** Run `lr4a` uses Stage 0's setup from its update 1,000 (KL 0.2 to the 3B clone, which is
+         also the opponent) at lr 2.5e-5 instead of 1e-4. It runs 1,000 updates, with a frozen evaluation against the
+         clone every 250 (128 games). Its 4 snapshots are compared with Stage 0's at the same distance (updates
+         1,250–2,000):
+         - adopted for the next league if their mean is ≥ 0.04 higher, or if test 2 confirmed the swings and its
+           snapshots are steady (χ² p ≥ 0.05) with a mean at most 0.02 lower;
+         - otherwise the step size is not the cause. Next come more games per update (RAM permitting) or a KL that
+           weighs rare actions more.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
