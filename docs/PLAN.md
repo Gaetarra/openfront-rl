@@ -1409,6 +1409,35 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         - `trainer/test_league.py` covers PFSP and the ratings;
         - a league run in `test_ppo.py`: a snapshot every 2 updates, a pick every update, and a resume;
         - `test_eval.py` covers `play()`'s per-slot opponents and its early stop.
+    - **First league run** (`league4a`, 2026-10-13 03:44–21:57, 4,028 updates, stopped by the user's call):
+      - The setup: from Stage 0's update 1,000, KL 0.2 to the 3B clone, 64 games per frozen evaluation. The pool had 16
+        members at the start and 32 at the end, and 4,312 training games were played.
+      - **No progress.** The snapshots of updates 250–4,000, pooled, beat the 3B clone 0.599 ± 0.026 (352 games) and
+        the Phase 2 PPO bot 0.588 ± 0.028. The start scored 0.736 ± 0.019 against the 3B clone (512 games).
+      - **The snapshots' strength swings.**
+        - Their win rates vary more than the evaluation's noise allows (χ² p = 0.009, < 0.001 and 0.04 against the three
+          panel members).
+        - They rise and fall together across the members (r ≈ 0.7), whose games differ.
+        - Against the 3B clone they ran from 0.32 (update 2,000) to 0.82 (update 3,250).
+        - The 5-snapshot trend at the end: −36 Elo per 250 updates.
+      - In training games, the learner beat its own start 0.34 of the time, flat over the run (0.26–0.46 for each ~50
+        games). That is about Stage 0's cost of learning during a game, against an equal opponent.
+        - PFSP spent 514 games on Stage 0's update 250, which still won 79% of them.
+      - Training statistics stayed level: the KL to the clone 0.061–0.068, the KL per update ~0.01, ~6% of samples
+        clipped, the entropy 0.27 → 0.25.
+      - **Speed:** ~13 s an update up to update 3,500 (~19:15), Stage 0's pace. Simulation was slower only as games grew
+        longer. Then every part slowed at once, to 16.2 s at the end (learning 5.1 → 5.85 s): RAM had run out.
+      - **Memory:** at the end the trainer held 46 GB of private memory, and the PC's RAM was full (0.4 GB free; the
+        stop freed 64 GB of commit). Measured afterwards:
+        - Windows counts a process's GPU memory in its private memory: 2 GiB on the card added 1.98 GB. That is ~8 GB
+          of the trainer's.
+        - PyTorch's caching host allocator rounds pinned buffers up to a power of two, and pinned pages cannot be paged
+          out. The rollout buffer holds 7.6 GiB of data in 12.9 GiB of pinned RAM: the observations' 4.0 GiB take
+          8 GiB.
+        - Loading checkpoints does not leak: 8 loads of a v4 checkpoint, flat.
+        - ~20 GB stays unexplained, probably growth over the run. It is not measured: the trainer does not log its
+          memory.
+        - Each frozen evaluation adds 16 game workers, ~0.6 GB each.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
