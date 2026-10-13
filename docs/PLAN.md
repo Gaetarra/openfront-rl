@@ -1371,6 +1371,44 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - **Ratings: a Bradley-Terry fit** over all frozen-evaluation results, anchored on the panel, with bootstrap
       uncertainty. It replaces the planned TrueSkill table: a few lines of numpy, no new dependency, and every game
       is a snapshot against a fixed panel member, which one fit handles directly. Gate 4A reads it.
+    - **Coded (2026-10-13)**: `trainer/league.py`, and `trainer.ppo` takes `--league`, `--panel`, `--eval-games` and
+      `--kl-ref` (the command is in CLAUDE.md).
+      - Opponents: each game slot keeps its opponent until its game ends, and every 25 updates PFSP picks the opponent
+        of the games that start next.
+        - The weight is (1 − x)² (AlphaStar's f_hard), where x is the learner's win rate in its last 50 training games
+          against that member, with one win and one loss added, so a new member starts at 1/2.
+        - The pool is the checkpoints given (globs expand: Stage 0's 12 snapshots and the 4 fixed ones), plus the
+          learner's snapshots every 250 updates.
+        - A network that no game uses leaves the GPU.
+        - Correction: games last up to ~38 updates (the timer ends them near 9,200 ticks, at 48 decisions an update).
+          So after a rotation, a long game can keep a third opponent active for a few updates.
+      - `--kl-ref` sets the KL reference (the 3B clone) apart from `--init` (a Stage 0 snapshot).
+      - Frozen evaluations:
+        - Which: `--init`'s at update 0, then every snapshot's. A resume redoes one a stop or crash cut short.
+        - The games: `--eval-games` (default 128) on Gate B's seeds and layout ("eval", 16 × 2). Game slot e plays
+          panel member e % 3 (44, 44 and 40 games), its first 4 episodes.
+        - Training waits meanwhile, and pause and stop still work.
+        - Results are appended to `runs/<run>/panel.jsonl`. The page shows the pool, the evaluations and two charts.
+      - Ratings: Newton's method with a Gaussian prior (sd 10 logits), so a perfect score stays finite. 200 parametric
+        bootstrap refits give the uncertainty. The trend is the slope of the last 5 snapshots' ratings, with the share
+        of refits in which it rises.
+      - **The time, re-estimated:** the 512-game check of update 3,000 took 60.4 min, 0.149 s a step with 32 games at
+        once.
+        - Each slot plays its games back to back, and the evaluation waits for the slowest. So 128 games take ~18 min:
+          ~24% of the time, against Stage 0's ~56 min per 250 updates, not ~15%.
+        - 64 games take ~9 min, ~13%.
+        - `--eval-games` can change on a resume.
+      - **The trend's resolution** (simulated with the fit itself, 60 draws for each case):
+        - At 128 games, the slope over 5 snapshots has an sd of ~12 Elo per 250 updates. At 64 games it is ~18.
+        - A true rise of 25 per 250 updates reads as rising in ≥ 90% of the refits in 72% of draws (47% at 64
+          games). A rise of 2.5 per 250 updates, Phase 2's pace after its update 1,000 (0.730 → 0.773 against its
+          clone, 40 Elo over 4,000 updates), reads that way in 10% of draws, about the false-alarm rate.
+        - So Gate 4A's "still rises over the last 5 snapshots" detects only a fast league. Its rule must be fixed
+          before it is read, e.g. over a longer window.
+      - Tests:
+        - `trainer/test_league.py` covers PFSP and the ratings;
+        - a league run in `test_ppo.py`: a snapshot every 2 updates, a pick every update, and a resume;
+        - `test_eval.py` covers `play()`'s per-slot opponents and its early stop.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
@@ -1380,7 +1418,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - ≥ 0.80 against the Phase 3 clone;
   - ≥ 0.70 against the Phase 2 PPO bot;
   - a league rating (a Bradley-Terry fit, "League design" above) that still rises over the last 5 snapshots.
-- **Frozen evaluations during training**: every 250 updates, 64–128 frozen games against the panel (~12% of the time).
+- **Frozen evaluations during training**: every 250 updates, 64–128 frozen games against the panel (~13% of the time at
+  64 and ~24% at 128, "League design" above).
   The training curve is off either way: in Phase 2 it included the learner adapting to the games in progress and
   missed the KL-0.05 decline; in 4A Stage 0 it read 0.12–0.17 below the frozen checks.
 - **Speed**: Phase 2's PPO ran at ~190 decisions/s with the GPU at ~97%. Most of it was learning (3 epochs of forward

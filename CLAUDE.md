@@ -94,6 +94,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.eval --setup onion --a random   # Phase 1 setup: one seat vs 3 Easy nations
 .venv/Scripts/python -m trainer.ppo --run ppo-bc2 --setup ranked1v1 --init checkpoints/bc/update0060000.pt --opponent checkpoints/bc/update0060000.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --updates 5000   # PPO from the Gate A clone (settings: docs/PLAN.md, Phase 2 results)
 .venv/Scripts/python -m trainer.ppo --run ppo4a-s0 --setup ranked1v1 --init checkpoints/bc3b-v4/latest.pt --opponent checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --minibatches 12 --updates 3000   # 4A Stage 0 (PLAN "League design"): PPO from the 3B clone against its frozen self
+.venv/Scripts/python -m trainer.ppo --run league4a --setup ranked1v1 --init checkpoints/ppo4a-s0/update001000.pt --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --minibatches 12 --updates 10000 --league checkpoints/bc3b-v4/latest.pt checkpoints/bc3-moe/latest.pt checkpoints/ppo-bc2/update005000.pt checkpoints/bc/update0060000.pt "checkpoints/ppo4a-s0/update*.pt" --panel checkpoints/bc3b-v4/latest.pt checkpoints/bc/update0060000.pt checkpoints/ppo-bc2/update005000.pt --eval-games 128   # the 4A league (PLAN "League design"): PFSP over a pool, frozen evaluations against the panel every 250 updates
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # Gate B: PPO vs the frozen clone (bar ~0.545), also per seat
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --a-cooldown 1 --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # bandwidth test (PLAN 3B): A's decision after each action is a no-op; every match prints A's meters
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --a-two-bins --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # its upward probe: A takes a troop and a gold action per decision
@@ -185,6 +186,14 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   Step 4's BC night and its scoring ran from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
   indexed record, so after a crawl `data/` mixes in v0.34.24 records: a BC run on both needs them split by version
   (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
+- The league (PLAN 4A, "League design"):
+  - `--league` takes checkpoints and globs. Quote the globs: Python expands them. The learner's snapshots join the
+    pool every 250 updates.
+  - The first `--panel` checkpoint anchors the Bradley-Terry rating at 0 Elo.
+  - Each frozen evaluation is appended to `runs/<run>/panel.jsonl`, and a new run refuses a `runs/<run>` that already
+    holds one.
+  - Training waits during an evaluation: ~18 min at the default 128 games, ~9 min at 64. `--eval-games` can change on a
+    resume.
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and can be off either way.
   It read 0.84 where Gate B gave 0.63 (Phase 2: the learner adapting to the games in progress), and 0.57 where the
   frozen check gave 0.74 (4A Stage 0: learning during the games cost them; the same snapshot at lr 0 in the loop read
