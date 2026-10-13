@@ -1423,6 +1423,30 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - In training games, the learner beat its own start 0.34 of the time, flat over the run (0.26–0.46 for each ~50
         games). That is about Stage 0's cost of learning during a game, against an equal opponent.
         - PFSP spent 514 games on Stage 0's update 250, which still won 79% of them.
+      - **The swings start in Stage 0** (read from the league's PFSP results after the stop).
+        - The learner's win rate in training games against Stage 0's snapshots jumps between neighbours 250 updates
+          apart. By update: 250: 0.21 (514 games), 500: 0.88 (66), 750: 0.44 (364), 1,000: 0.34 (300), 1,250: 0.78
+          (74), 1,500: 0.64, 1,750: 0.67, 2,000: 0.75, 2,250: 0.70, 2,500: 0.34 (235), 2,750: 0.73, 3,000: 0.40 (317).
+        - The league's own snapshots do the same: update 750 0.97 (34 games), 1,000 0.37 (220).
+        - The learner itself is about even with the 3B clone (0.53 over 368 games). So some snapshots are far weaker
+          than the clone and others far stronger.
+        - Meanwhile Stage 0's KL to the clone sat at 0.061–0.070 from update 250 on, and its KL per update fell from
+          0.017 to 0.010.
+        - So PPO at this step size never settles: the problem is instability from the start, not a plateau after
+          update 1,000. Stage 0's two frozen checks (updates 1,000 and 3,000) landed on strong snapshots.
+        - Caveat: each member's games are spread over the run, against a learner that kept changing, and PFSP gives
+          the strong members more games.
+      - **Where strong and weak snapshots differ.** In a diagnostic, the clone played both seats of 32 games for 2,400
+        steps, and 10 snapshots, strong and weak by the PFSP results, were scored on the same observations.
+        - Not the spawn. In the spawn phase every snapshot's KL to the clone is 0.008–0.021, strong and weak alike.
+        - The KL to the clone does not separate them in any phase (0.07–0.18 a decision). For all of them it sits
+          mostly in the action type and the attack's target and troop share.
+        - Their action mixes differ 2–5x on the rare actions (cities, boats, retreats). No single action sorts strong
+          from weak once ~40 comparisons are counted.
+        - The best lead is early-game cities: 0.27–0.49% of the weak snapshots' decisions, against 0.52–1.12% of the
+          strong ones' (the clone: 0.50%).
+        - Reading: PPO's noise moves the probabilities of rare, decisive actions by large factors, and a KL averaged
+          over all decisions barely sees it.
       - Training statistics stayed level: the KL to the clone 0.061–0.068, the KL per update ~0.01, ~6% of samples
         clipped, the entropy 0.27 → 0.25.
       - **Speed:** ~13 s an update up to update 3,500 (~19:15), Stage 0's pace. Simulation was slower only as games grew
