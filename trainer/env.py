@@ -23,6 +23,11 @@ UNIT = np.dtype([("type", "u1"), ("level", "u1"), ("owner", "<u2"), ("cell", "<u
                  ("ready", "u1"), ("pad", "u1"), ("zx", "<u2"), ("zy", "<u2"), ("zr", "<u2")])  # bridge/frame.ts
 assert CELL.itemsize == 11 and UNIT.itemsize == 20
 
+
+def game_commit():
+    return subprocess.run(["git", "-C", str(GAME_DIR), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+
 # Spatial channels. They reach the model as uint8 in 64ths of a unit (quantize_; trainer/model.py divides by 64): tile
 # shares stay exact, other values move by at most 1/128, and PPO stores its rollouts as 8 bits. Tile counts are divided
 # by the tiles per cell.

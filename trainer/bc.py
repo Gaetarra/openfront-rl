@@ -23,11 +23,11 @@ from torch.utils.tensorboard import SummaryWriter
 
 from trainer import crawl
 from trainer.control import Control, serve
-from trainer.env import MAP_TYPES, RANKED_1V1, ROOT, VecEnv
+from trainer.env import MAP_TYPES, RANKED_1V1, ROOT, VecEnv, game_commit
 from trainer.eval import tag
 from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, MAP_NAMES, MAP_OF, RETREAT, SHARES, SIZE_OF, ActionDist, _on,
                            describe, load_net, new_net)
-from trainer.ppo import game_commit, network_args, resume_args, save_checkpoint
+from trainer.ppo import network_args, resume_args, save_checkpoint
 
 PHASES = ("spawn", "early", "mid", "late")
 SCORE_CUTOFF = 1790812800000  # 2026-10-01 00:00 UTC, in ms: the scoring set comes from the Phase 2 crawl's games

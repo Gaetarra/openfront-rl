@@ -67,11 +67,11 @@ class Control:
     def wait(self):
         """Called between environment steps: blocks while paused; returns False once a stop was requested."""
         if self.paused and not self.stop_requested:
-            self.state = "paused"
+            state, self.state = self.state, "paused"  # running, or evaluating (trainer.ppo's panel)
             torch.cuda.empty_cache()
             while self.paused and not self.stop_requested:
                 time.sleep(0.2)
-            self.state = "running"
+            self.state = state
         return not self.stop_requested
 
     def throttle(self, busy_s):
@@ -286,6 +286,8 @@ p.hint { color: var(--muted); font-size: 13px; }
   <section><h2>Run</h2><table id="run"></table></section>
   <section><h2>Training</h2><table id="training"></table></section>
   <section><h2>Computer</h2><table id="system"></table></section>
+  <section hidden><h2>League</h2><table id="league"></table></section>
+  <section hidden><h2>Frozen evaluations</h2><table id="panel"></table></section>
 </div>
 <section style="margin-top:12px">
   <div class="chart-bar"><h2>Curves</h2>
@@ -305,8 +307,10 @@ and open <a href="http://localhost:6006">localhost:6006</a>.</p>
 <script>
 const fmt = (v, d = 2) => v === null || v === undefined ? "–" : typeof v === "number" ? v.toFixed(d) : v;
 function rows(id, items) {
-  document.getElementById(id).innerHTML = items.map(([k, v, hot]) =>
+  const table = document.getElementById(id);
+  table.innerHTML = items.map(([k, v, hot]) =>
     `<tr><td>${k}</td><td class="${hot ? "hot" : ""}">${v}</td></tr>`).join("");
+  table.closest("section").hidden = !items.length;
 }
 async function send(cmd) {
   await fetch("/" + cmd, { method: "POST", headers: { "X-Control": "1" } });
@@ -317,6 +321,8 @@ async function refresh() {
     const s = await (await fetch("/status")).json();
     if (s.update) perUpdate = s.global_step / s.update;
     rows("run", Object.entries(s.run || {}));
+    rows("league", s.league || []);
+    rows("panel", s.panel || []);
     const m = s.metrics || {}, sys = s.system || {}, g = sys.gpu || {};
     document.getElementById("state").textContent = s.state + (s.auto_paused ? " (GPU too hot)" : "") +
       (s.duty < 1 ? ` · throttled to ${Math.round(s.duty * 100)}%` : "");
@@ -339,8 +345,15 @@ async function refresh() {
     document.getElementById("state").textContent = "not responding (training stopped?)";
   }
 }
-// A chart shows when the run logs its tags. goal: which way is good; ref: [height of a dashed line, its name].
+// A chart shows when the run logs its tags (prefix: every tag that starts with it, named by the rest). goal: which
+// way is good; ref: [height of a dashed line, its name].
 const CHARTS = [
+  { title: "Frozen evaluations", prefix: "eval/vs_", goal: "higher is better", ref: [0.8, "Gate 4A bar, 3B clone"],
+    note: "Every 250 updates the snapshot plays fixed games against each panel policy while training waits: its win " +
+      "rate against each. Dashed: Gate 4A's bar against the 3B clone (0.70 against the Phase 2 PPO bot)." },
+  { title: "Rating", lines: [["eval/rating", "rating"]], goal: "still rising",
+    note: "Each snapshot's Bradley-Terry rating in Elo points, from every frozen evaluation so far, with the first " +
+      "panel policy (the 3B clone) at 0. Gate 4A wants it still rising over the last 5 snapshots." },
   { title: "Win rate", lines: [["episodes/win_rate", "all"], ["episodes/win_rate_seat0", "seat 0"],
     ["episodes/win_rate_seat1", "seat 1"]], goal: "higher is better", ref: [0.545, "Gate B bar"],
     note: "Share of the last 200 games the learner won, overall and from each seat it plays. Against a copy of " +
@@ -401,7 +414,9 @@ function drawCharts() {
   const colors = ["--accent", "--second", "--third", "--fourth"].map(color), muted = color("--muted");
   const grid = color("--line"), w = Number(smoothing.value);
   for (const spec of CHARTS) {
-    const shown = spec.lines.filter(([tag]) => (curves[tag] || []).length), ref = spec.ref;
+    const lines = spec.prefix ? Object.keys(curves).filter(t => t.startsWith(spec.prefix)).sort()
+      .map(t => [t, t.slice(spec.prefix.length)]) : spec.lines;
+    const shown = lines.filter(([tag]) => (curves[tag] || []).length), ref = spec.ref;
     if (!shown.length) continue;
     const datasets = shown.flatMap(([tag, label], i) => [
       { label, faint: true, data: points(curves[tag], 0), borderColor: colors[i] + "40", borderWidth: 1 },

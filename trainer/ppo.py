@@ -9,10 +9,12 @@
 """
 import argparse
 import collections
+import glob
+import json
 import random
-import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -20,11 +22,14 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 from trainer.control import Control, serve
-from trainer.env import GAME_DIR, RANKED_1V1, ROOT, VecEnv
+from trainer.env import RANKED_1V1, ROOT, VecEnv, game_commit
+from trainer.eval import play
+from trainer.league import ROTATE, League, name, panel_table, ratings
 from trainer.model import ACT_NAMES, CORES, ActionDist, arch_of, load_net, new_net
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
 REF_OUTPUTS = ("type", "maps", "ptr", "retreat", "shares", "bins")  # what ActionDist reads of the KL reference
+SNAPSHOT = 250  # updates between kept checkpoints: they join the league's pool and play the panel
 
 
 def parser():
@@ -59,8 +64,18 @@ def parser():
     p.add_argument("--core", choices=CORES, default="moe", help="the core of a new network (not with --init)")
     p.add_argument("--init", help="start from this checkpoint's weights, e.g. checkpoints/bc/latest.pt")
     p.add_argument("--opponent", help="frozen checkpoint that plays every seat but the learner's (2-seat setups)")
+    p.add_argument("--league", nargs="+",
+                   help="instead of --opponent, a pool of frozen checkpoints (globs expand): PFSP picks the opponent of "
+                        "new games every 25 updates, and the learner's snapshots join it every 250 (PLAN 4A)")
+    p.add_argument("--panel", nargs="+",
+                   help="frozen checkpoints that every 250th update's snapshot (and --init's) plays on fixed games while "
+                        "training waits; the first anchors the Bradley-Terry rating (PLAN 4A)")
+    p.add_argument("--eval-games", type=int, default=128,
+                   help="games per panel evaluation, split over the panel by game slot (given with --resume, it replaces "
+                        "the run's)")
     p.add_argument("--kl-coef", type=float, default=None,
                    help="KL penalty toward the --init policy (default 0; given with --resume, it replaces the run's)")
+    p.add_argument("--kl-ref", help="the KL penalty's reference instead of --init")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--save-every", type=int, default=25, help="updates between checkpoints")
     p.add_argument("--port", type=int, default=8787, help="control page port (0 = any free port)")
@@ -125,6 +140,8 @@ def run_info(a):
     """What the control page says about the run."""
     if a.setup == "ranked1v1":
         game, rivals = "ranked 1v1 (the official playlist)", f"frozen {a.opponent}"
+        if a.league:
+            rivals = f"a league of frozen policies: PFSP picks every {ROTATE} updates, snapshots join every {SNAPSHOT}"
     else:
         game = f"{a.map}, {'Normal' if a.normal_size else 'Compact'}, {a.timer} min"
         rivals = f"{a.nations} {a.difficulty} nations" + (f" and {a.bots} bots" if a.bots else "")
@@ -133,8 +150,11 @@ def run_info(a):
     seats = 2 if a.setup == "ranked1v1" else a.seats
     plays = {"Learner seat": "both, half the games each" if seats == 2 else f"all {seats}, equally often"} \
         if seats > 1 else {}
+    ref = {"KL reference": a.kl_ref} if a.kl_ref else {}
+    panel = {"Frozen evaluations": f"{a.eval_games} games against {len(a.panel)} policies every {SNAPSHOT} updates"} \
+        if a.panel else {}
     return {"Name": a.run, "Method": "PPO (reinforcement learning)", "Game": game, "Against": rivals, **plays,
-            "Starts from": a.init or "random weights", "KL penalty to the start": a.kl_coef or "none",
+            "Starts from": a.init or "random weights", "KL penalty to the start": a.kl_coef or "none", **ref, **panel,
             "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
             "Updates": f"{a.updates:,}"}
 
@@ -166,11 +186,6 @@ def save_checkpoint(path, **state):
     tmp = path.with_suffix(".tmp")
     torch.save(state, tmp)
     tmp.replace(path)  # atomic: a crash during the save never corrupts the previous checkpoint
-
-
-def game_commit():
-    return subprocess.run(["git", "-C", str(GAME_DIR), "rev-parse", "HEAD"], capture_output=True,
-                          text=True).stdout.strip()
 
 
 class Outcomes:
@@ -291,7 +306,7 @@ def main(argv=None):
     state = None
     if a.resume:
         state = torch.load(ckpt_dir / "latest.pt", map_location="cpu", weights_only=False)
-        a = resume_args(parser(), argv, state["args"], ("updates", "kl_coef"))
+        a = resume_args(parser(), argv, state["args"], ("updates", "kl_coef", "eval_games"))
     else:
         a = network_args(parser(), argv, a)
     a.kl_coef = a.kl_coef or 0.0
@@ -304,6 +319,15 @@ def main(argv=None):
     torch.backends.cudnn.benchmark = True
     device = torch.device("cuda")
     run_dir = ROOT / "runs" / a.run
+    pool = [Path(p).as_posix() for g in a.league for p in sorted(glob.glob(g)) or [g]] if a.league else [a.opponent]
+    missing = [p for p in [*pool, *(a.panel or []), a.kl_ref] if p and not Path(p).exists()]
+    if missing:
+        raise SystemExit(f"no such checkpoint: {', '.join(missing)}")
+    if (a.league or a.panel) and SNAPSHOT % a.save_every:
+        raise SystemExit(f"--save-every must divide {SNAPSHOT}: the league plays the checkpoints kept every {SNAPSHOT}")
+    panel_log = run_dir / "panel.jsonl"  # the frozen evaluations, one per line
+    if a.panel and not state and panel_log.exists():
+        raise SystemExit(f"{panel_log} holds another run's evaluations: delete runs/{a.run} or pick another --run name")
 
     envs = VecEnv(env_config(a), a.workers, a.games_per_worker, seed=f"{a.run}-{a.seed}", device=device,
                   episodes=state["episodes"] if state else None, log_dir=run_dir / "workers")
@@ -320,10 +344,10 @@ def main(argv=None):
         torch.set_rng_state(state["rng"]["torch"])
         torch.cuda.set_rng_state_all(state["rng"]["cuda"])
     S = envs.S
-    if S > 1 and not a.opponent:
-        raise SystemExit("2-seat setups need --opponent")
-    if a.kl_coef > 0 and not a.init:
-        raise SystemExit("--kl-coef needs --init")
+    if S > 1 and not (a.opponent or a.league):
+        raise SystemExit("2-seat setups need --opponent or --league")
+    if a.kl_coef > 0 and not (a.kl_ref or a.init):
+        raise SystemExit("--kl-coef needs --init or --kl-ref")
     if a.init and not state:
         model.load_state_dict(torch.load(a.init, map_location="cpu", weights_only=False)["model"])
     frozen = {}
@@ -333,9 +357,22 @@ def main(argv=None):
             frozen[path] = load_net(path, envs.dims, device)
         return frozen[path]
 
-    opponent = net(a.opponent) if S > 1 else None
-    ref = net(a.init) if a.kl_coef > 0 else None
+    ref_path = a.kl_ref or a.init
+    ref = net(ref_path) if a.kl_coef > 0 else None
+    league = League(pool, envs.E) if S > 1 else None
+    if league and state and state.get("league"):
+        league.load(state["league"])
     learner, others, seat = seat_rows(envs.E, S, device)
+    others_cpu = [r.cpu() for r in others]
+
+    def opponents():
+        """(network, rows) of every opponent playing now. A network no game uses leaves the GPU: the pool grows."""
+        for p in [p for p in frozen if p not in league.slot and p != ref_path]:
+            del frozen[p]
+        return [(net(p), torch.cat([r[[e for e, q in enumerate(league.slot) if q == p]] for r in others_cpu]).to(device))
+                for p in dict.fromkeys(league.slot)]
+
+    teams = opponents() if league else []
     games, seat = np.arange(envs.E), seat.cpu().numpy()  # for the per-seat arrays the workers return
     rows = lambda o, r: {k: v[r] for k, v in o.items()}
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
@@ -347,14 +384,48 @@ def main(argv=None):
 
     def checkpoint():
         # Games in progress are dropped on quit; a resume starts each slot at its next episode, so no seed replays.
+        kept = update % SNAPSHOT == 0 and update > 0
+        if kept and a.league:
+            league.add((ckpt_dir / f"update{update:06d}.pt").as_posix())  # saved below
         s = dict(model=model.state_dict(), optimizer=opt.state_dict(), args=vars(a), update=update,
                  global_step=global_step, episodes=[e + 1 for e in envs.episodes], game_commit=commit,
-                 outcomes=outcomes.state(), rng={"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+                 outcomes=outcomes.state(), league=league.state() if league else None,
+                 rng={"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
                       "cuda": torch.cuda.get_rng_state_all()})
         save_checkpoint(ckpt_dir / "latest.pt", **s)
-        if update % 250 == 0 and update > 0:
+        if kept:
             save_checkpoint(ckpt_dir / f"update{update:06d}.pt", **s)
         control.note(f"saved checkpoint at update {update}")
+
+    evals = [json.loads(line) for line in panel_log.read_text(encoding="utf-8").splitlines()] \
+        if a.panel and panel_log.exists() else []
+    if evals:
+        control.update(panel=panel_table(evals, a.panel, *ratings(evals, a.panel)))
+
+    def evaluate():
+        """This update's snapshot (update 0: --init) plays the panel on fixed games while training waits (PLAN 4A).
+        False if a stop came first."""
+        control.set_state("evaluating")
+        control.note(f"frozen evaluation of update {update} against the panel")
+        spec = (ckpt_dir / f"update{update:06d}.pt").as_posix() if update else a.init
+        torch.cuda.empty_cache()
+        t0 = time.perf_counter()
+        with torch.random.fork_rng(devices=[device]):  # play() fixes its own seed; training's carries on after
+            r = play([spec, a.panel], env_config(a), a.eval_games, a.workers, a.games_per_worker, wait=control.wait)
+        if r is None:
+            return False
+        evals.append({"update": update, "global_step": global_step, "minutes": (time.perf_counter() - t0) / 60,
+                      "vs": r["by_b"]})
+        with open(panel_log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(evals[-1]) + "\n")
+        fit, trend = ratings(evals, a.panel)
+        for m, v in r["by_b"].items():
+            writer.add_scalar(f"eval/vs_{name(m)}", v["win_rate"], global_step)
+        writer.add_scalar("eval/rating", fit[update][0], global_step)
+        writer.add_scalar("eval/minutes", evals[-1]["minutes"], global_step)
+        control.update(panel=panel_table(evals, a.panel, fit, trend))
+        control.set_state("running")
+        return True
 
     T, N = a.steps, envs.E
     obs = envs.obs
@@ -377,7 +448,7 @@ def main(argv=None):
 
     def rollout():
         """Collects T steps from every game; False if a stop was requested meanwhile."""
-        nonlocal obs, global_step, invalid_count, env_time
+        nonlocal obs, global_step, invalid_count, env_time, teams
         for step in range(T):
             if not control.wait():
                 return False
@@ -392,7 +463,7 @@ def main(argv=None):
                 act = dist.sample()
                 actions[step], logps[step], values[step] = act, dist.log_prob(act), out["value"].float()
                 full[learner] = act
-                for r in others:
+                for opponent, r in teams:
                     theirs = rows(obs, r)
                     with torch.autocast("cuda", torch.bfloat16):
                         out_o = opponent(theirs)
@@ -404,7 +475,11 @@ def main(argv=None):
             env_time += time.perf_counter() - te
             rewards[step] = torch.from_numpy(rew.reshape(envs.E, S)[games, seat]).to(device)
             dones[step] = torch.from_numpy(done.reshape(envs.E, S)[games, seat]).to(device)
-            outcomes.finish([i for i in infos if i["seat"] == seat[i["env"]]])
+            ended = [i for i in infos if i["seat"] == seat[i["env"]]]
+            outcomes.finish(ended)
+            if league and ended:  # these slots' next games are against the current pick
+                league.finished(ended)
+                teams = opponents()
             np.add.at(act_counts, act.cpu().numpy()[:, 0], 1)
             invalid_count += int(invalid.reshape(envs.E, S)[games, seat].sum())
             global_step += N
@@ -462,7 +537,15 @@ def main(argv=None):
 
     control.set_state("running")
     try:
-        while update < a.updates:
+        while True:
+            if a.panel and update % SNAPSHOT == 0 and (update or a.init) and update not in {e["update"] for e in evals}:
+                if not evaluate():
+                    break
+            if update >= a.updates:
+                break
+            if a.league and update % ROTATE == 0 and update:
+                league.pick()
+                control.note(f"PFSP picked {name(league.current)} for the next games")
             t0 = time.perf_counter()
             if not rollout():
                 break
@@ -480,8 +563,11 @@ def main(argv=None):
             metrics["perf/gpu_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             metrics["perf/gpu_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30  # in use; the rest is cache
             metrics["actions/invalid_rate"] = invalid_count / (T * N)
-            for i, name in enumerate(ACT_NAMES):
-                metrics[f"actions/{name}"] = float(act_counts[i] / (T * N))
+            for i, act_name in enumerate(ACT_NAMES):
+                metrics[f"actions/{act_name}"] = float(act_counts[i] / (T * N))
+            if a.league:
+                metrics["league/pool"], metrics["league/opponents"] = len(league.pool), len(teams)
+                control.update(league=league.table())
             act_counts[:], invalid_count, env_time = 0, 0, 0.0
             for k, v in metrics.items():
                 writer.add_scalar(k, v, global_step)

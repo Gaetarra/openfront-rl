@@ -78,6 +78,15 @@ class EvalTest(unittest.TestCase):
             r = play(paths, ONION2, episodes=2, workers=1, games_per_worker=2, seed="mix")
         self.assertEqual(r["episodes"], 2)
 
+    def test_policy_b_can_change_from_one_game_slot_to_the_next(self):
+        r = play(["random", ["random", "scripted"]], ONION2, episodes=4, workers=1, games_per_worker=2, seed="slots")
+        self.assertEqual(r["episodes"], 4)
+        self.assertEqual({b: s["episodes"] for b, s in r["by_b"].items()}, {"random": 2, "scripted": 2})
+
+    def test_a_wait_that_returns_false_ends_the_match(self):
+        self.assertIsNone(play(["random", "random"], ONION2, episodes=2, workers=1, games_per_worker=2, seed="stop",
+                               wait=lambda: False))
+
     def test_one_seat_on_fixed_seeds_is_reproducible(self):
         run = lambda: play(["random"], {**ONION, "timerMinutes": 1}, episodes=2, workers=1, games_per_worker=2,
                            seed="eval-test")

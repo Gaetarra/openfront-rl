@@ -1,5 +1,8 @@
+import json
 import shutil
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -26,6 +29,11 @@ class RunInfoTest(unittest.TestCase):
         self.assertEqual(onion["Against"], "3 Easy nations")
         self.assertEqual((onion["Starts from"], onion["KL penalty to the start"]), ("random weights", "none"))
         self.assertNotIn("Learner seat", onion, "a single agent seat")
+        league = run_info(parse_args(["--setup", "ranked1v1", "--league", "a.pt", "b.pt", "--panel", "a.pt", "c.pt",
+                                      "--kl-ref", "c.pt"]))
+        self.assertTrue(league["Against"].startswith("a league of frozen policies"))
+        self.assertEqual(league["KL reference"], "c.pt")
+        self.assertEqual(league["Frozen evaluations"], "128 games against 2 policies every 250 updates")
 
 
 class ResumeArgsTest(unittest.TestCase):
@@ -218,6 +226,40 @@ class SmokeTest(unittest.TestCase):
         kl = [e.value for e in logs.Scalars("loss/kl_ref")]
         self.assertEqual(len(kl), 2)
         self.assertLess(max(kl), 1e-4)  # 2e-7 here; reference rows shifted by one gave 4e-3 and 1.3e-2
+
+    def test_a_league_with_frozen_evaluations(self):
+        """PLAN 4A: the opponents come from a pool the learner's snapshots join, and every snapshot plays the panel,
+        here with a snapshot every 2 updates and a pick every update. Games of 1 minute end within 3 updates of 48
+        steps, so slots change opponents mid-rollout."""
+        ckpt, run = ROOT / "checkpoints" / self.RUN, ROOT / "runs" / self.RUN
+        ckpt.mkdir(parents=True, exist_ok=True)
+        pool = []
+        for k in range(2):
+            torch.manual_seed(k)
+            net = PolicyV1({"channels": 22, "playerFeatures": 17, "scalars": 16, "acts": 5})
+            pool.append((ckpt / f"pool{k}.pt").as_posix())
+            torch.save({"model": net.state_dict(), "args": {"widths": "64,128,192"}, "update": 0}, pool[-1])
+        common = ["--run", self.RUN, "--workers", "1", "--games-per-worker", "2", "--steps", "48", "--minibatches",
+                  "2", "--epochs", "1", "--port", "0", "--timer", "1", "--nations", "0", "--seats", "2"]
+        with mock.patch("trainer.ppo.SNAPSHOT", 2), mock.patch("trainer.ppo.ROTATE", 1):
+            main(common + ["--init", pool[0], "--league", *pool, "--panel", *pool, "--eval-games", "2",
+                           "--save-every", "1", "--updates", "4"])
+            main(common + ["--resume", "--updates", "6", "--eval-games", "4"])
+        state = torch.load(ckpt / "latest.pt", weights_only=False)
+        league = state["league"]
+        self.assertEqual([Path(p).name for p in league["pool"]],
+                         ["pool0.pt", "pool1.pt", "update000002.pt", "update000004.pt", "update000006.pt"])
+        finished = len(state["outcomes"]["episodes"])
+        self.assertGreater(finished, 0)
+        self.assertEqual(sum(map(len, league["results"].values())), finished, "every finished game counts for PFSP")
+        evals = [json.loads(line) for line in (run / "panel.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([e["update"] for e in evals], [0, 2, 4, 6], "--init's, then every snapshot's, once")
+        self.assertEqual([sum(v["episodes"] for v in e["vs"].values()) for e in evals], [2, 2, 2, 4])
+        self.assertEqual([list(e["vs"]) for e in evals], [pool] * 4)
+        logs = EventAccumulator(str(run))
+        logs.Reload()
+        self.assertEqual(len(logs.Scalars("eval/rating")), 4)
+        self.assertEqual(len(logs.Scalars(f"eval/vs_{self.RUN}/pool1")), 4)
 
 
 if __name__ == "__main__":

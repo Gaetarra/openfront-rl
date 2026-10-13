@@ -17,9 +17,8 @@ import numpy as np
 import torch
 
 from trainer.control import REPLAYS
-from trainer.env import ONION, RANKED_1V1, VecEnv
+from trainer.env import ONION, RANKED_1V1, VecEnv, game_commit
 from trainer.model import ATTACK, BOAT, BUILD, RETREAT, SPAWN, ActionDist, RandomPolicy, load_net
-from trainer.ppo import game_commit
 
 SETUPS = {"onion": ONION, "ranked1v1": RANKED_1V1}
 RESULTS = Path(__file__).resolve().parents[1] / "runs" / "eval"  # every match's result, as runs/score/ for BC
@@ -186,33 +185,44 @@ def seats_for(E, S):
 
 
 def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed="eval", record=None, a_cooldown=0,
-         a_two_bins=False):
+         a_two_bins=False, wait=None):
     """Plays the first ceil(episodes / games) episodes of every game slot; returns the summary of policy 0, its meters
     (Cooldown, with `a_cooldown` no-ops after each of its actions; `a_two_bins`: a troop and a gold action per
     decision; and Gate 3B's invalid actions: of its decisions that act, the share the bridge refuses), and the IDs of
     the games saved with `record` ({"dir", "gitCommit", "games"}). Sampling uses a fixed torch seed, so a given set of
-    policies always gives the same result."""
+    policies always gives the same result.
+    - A later policy may be a list: game slot e plays its entry e % len, and the result adds policy 0's summary against
+      each entry ("by_b"; the trainer's panel, PLAN 4A).
+    - `wait` is called before every step (the trainer's pause and stop): once it returns False the match ends early,
+      returning None."""
     torch.manual_seed(0)
     envs = VecEnv(config, workers, games_per_worker, seed=seed, device=device, record=record)
     try:
         S, E = envs.S, envs.E
         if len(specs) != S:
             raise ValueError(f"{S} seats need {S} policies, got {len(specs)}")
-        policies = [load_policy(s, envs.dims, device, two_bins=a_two_bins and p == 0) for p, s in enumerate(specs)]
-        policies[0] = Cooldown(policies[0], a_cooldown)
         seats = seats_for(E, S)
-        rows = [torch.tensor([e * S + seats[e][p] for e in range(E)], device=device) for p in range(S)]
+        of_slot = [[s[e % len(s)] if isinstance(s, list) else s for e in range(E)] for s in specs]
+        groups = []  # (policy, its rows), one per seat policy and spec; policy 0 is one spec
+        for p in range(S):
+            for spec in dict.fromkeys(of_slot[p]):
+                policy = load_policy(spec, envs.dims, device, two_bins=a_two_bins and p == 0)
+                rows = [e * S + seats[e][p] for e in range(E) if of_slot[p][e] == spec]
+                groups.append((Cooldown(policy, a_cooldown) if p == 0 else policy, torch.tensor(rows, device=device)))
+        meter, a_rows = groups[0]
         per_slot = -(-episodes // E)
         counts, results, seen, obs = np.zeros(E, int), [], [], envs.obs
-        a_rows, acted, refused = rows[0].cpu().numpy(), 0, 0
+        a_cpu, acted, refused = a_rows.cpu().numpy(), 0, 0
         while counts.min() < per_slot:
+            if wait is not None and not wait():
+                return None
             act = torch.zeros(envs.N, 8 if a_two_bins else 4, dtype=torch.long, device=device)
-            for p, policy in enumerate(policies):
-                out = policy({k: v[rows[p]] for k, v in obs.items()})
-                act[rows[p], :out.shape[1]] = out
+            for policy, rows in groups:
+                out = policy({k: v[rows] for k, v in obs.items()})
+                act[rows, :out.shape[1]] = out
             obs, _, _, infos, invalid = envs.step(act.cpu().numpy())
-            acted += int((act[rows[0], 0::4] != 0).any(1).sum())  # every 4th entry is an action's type
-            refused += int(invalid[a_rows].sum())
+            acted += int((act[a_rows, 0::4] != 0).any(1).sum())  # every 4th entry is an action's type
+            refused += int(invalid[a_cpu].sum())
             seen += infos
             for info in infos:
                 e = info["env"]
@@ -223,13 +233,16 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
                         print(f"{len(results)}/{per_slot * E} games", file=sys.stderr, flush=True)
     finally:
         envs.close()
-    recorded = {i["recorded"]: seats[i["env"]] for i in seen if i.get("recorded")}
+    recorded = {i["recorded"]: i["env"] for i in seen if i.get("recorded")}
     if recorded:
-        names = [label(s) for s in specs]
-        for game_id, slot_seats in recorded.items():
-            name_players(Path(record["dir"]) / f"{game_id}.json", {s: names[p] for p, s in enumerate(slot_seats)})
-    meters = {**policies[0].meters(), "actions": acted, "invalid_share": refused / acted if acted else 0.0}
-    return {**summarize(results), "meters": meters, "recorded": sorted(recorded)}
+        names = {s: label(s) for row in of_slot for s in row}
+        for game_id, e in recorded.items():
+            name_players(Path(record["dir"]) / f"{game_id}.json", {seats[e][p]: names[of_slot[p][e]] for p in range(S)})
+    meters = {**meter.meters(), "actions": acted, "invalid_share": refused / acted if acted else 0.0}
+    out = {**summarize(results), "meters": meters, "recorded": sorted(recorded)}
+    if S > 1 and isinstance(specs[1], list):
+        out["by_b"] = {b: summarize([r for r in results if of_slot[1][r["env"]] == b]) for b in dict.fromkeys(specs[1])}
+    return out
 
 
 def main(argv=None):
