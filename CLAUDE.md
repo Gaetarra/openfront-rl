@@ -161,10 +161,14 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - GPU memory (12 GB card):
   - PPO keeps its rollout rows in pinned system RAM (`HostRows`), with the cell masks as bits (`pack_bits`). A worker
     thread copies each minibatch to the GPU on its own stream while the previous one trains.
-    - On the ranked grid with the KL reference's outputs, it holds 7.6 GiB of data in 12.9 GiB of pinned RAM. PyTorch's
-      caching host allocator rounds each pinned buffer up to a power of two, and pinned pages cannot be paged out.
+    - On the ranked grid with the KL reference's outputs, it locks 7.6 GiB of RAM (pinned pages cannot be paged out).
+      PyTorch's caching host allocator rounds pinned buffers up to a power of two (12.9 GiB here), so the trainers'
+      allocator config skips the rounding above 1 MB (`trainer/__init__.py`).
+    - Its worker thread lives as long as the run. A thread's first parallel CPU op starts an OpenMP team that outlives
+      the thread, and a new thread per update leaked ~21 GiB over the first league run. Run CPU torch work only on
+      threads that live as long as the process.
     - On Windows, a process's private memory also counts its GPU memory, so the trainer's figure in Task Manager is not
-      all RAM (PLAN 4A, "First league run").
+      all RAM. PPO logs it every update as `perf/private_gb` (PLAN 4A, "First league run").
   - The trainers run with expandable allocator segments (`trainer/__init__.py`), and PPO empties the cache before
     learning.
   - Ranked PPO with a Phase 3 network runs at `--minibatches 12`. 96- and 128-row minibatches cost the same per row,

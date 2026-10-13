@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import psutil
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
@@ -265,6 +266,8 @@ class HostRows:
         self.slots = [{k: torch.empty((size,) + v.shape[1:], dtype=v.dtype, pin_memory=True)
                        for k, v in example.items()} for _ in range(2)]
         self.side = torch.cuda.Stream()  # one for good: PyTorch caches freed GPU memory per stream
+        self.pool = ThreadPoolExecutor(1)  # one for good too: a thread's first parallel op starts an OpenMP team that
+        # outlives the thread, and a new thread per update leaked ~21 GiB over the first league run (PLAN 4A)
 
     def put(self, step, o):
         """One step's rows (GPU tensors), copied in without waiting."""
@@ -288,16 +291,15 @@ class HostRows:
             copied[i % 2].record(side)
             return o
 
-        with ThreadPoolExecutor(1) as pool:
-            ahead = pool.submit(fetch, 0)
-            for i in range(len(idx)):
-                o = ahead.result()
-                main.wait_stream(side)
-                for v in o.values():
-                    v.record_stream(main)  # made on the side stream: keep it until the learning stream is done
-                if i + 1 < len(idx):
-                    ahead = pool.submit(fetch, i + 1)
-                yield o
+        ahead = self.pool.submit(fetch, 0)
+        for i in range(len(idx)):
+            o = ahead.result()
+            main.wait_stream(side)
+            for v in o.values():
+                v.record_stream(main)  # made on the side stream: keep it until the learning stream is done
+            if i + 1 < len(idx):
+                ahead = self.pool.submit(fetch, i + 1)
+            yield o
 
 
 def main(argv=None):
@@ -562,6 +564,7 @@ def main(argv=None):
             # past the card's size when Windows pages GPU memory into system RAM (nvidia-smi stops at the card)
             metrics["perf/gpu_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             metrics["perf/gpu_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30  # in use; the rest is cache
+            metrics["perf/private_gb"] = psutil.Process().memory_info().private / 2**30  # Windows adds its GPU memory
             metrics["actions/invalid_rate"] = invalid_count / (T * N)
             for i, act_name in enumerate(ACT_NAMES):
                 metrics[f"actions/{act_name}"] = float(act_counts[i] / (T * N))

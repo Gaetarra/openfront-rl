@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import psutil
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
@@ -157,6 +158,20 @@ class HostRowsTest(unittest.TestCase):
             torch.cuda.synchronize()
             reserved.append(torch.cuda.memory_reserved())
         self.assertEqual(reserved[-1], reserved[0])
+
+    def test_every_learning_pass_reuses_the_thread_of_the_last(self):
+        """A thread's first parallel op starts an OpenMP team that outlives the thread: with a new thread per pass, the
+        first league run leaked 13 threads and ~5.4 MiB an update, ~21 GiB in all (PLAN 4A, "First league run")."""
+        rows = {"x": torch.zeros(4, 2**20, dtype=torch.uint8, device="cuda")}  # 1 MiB rows: gathered in parallel
+        host = HostRows(rows, 40, 8)
+        for t in range(10):
+            host.put(t, rows)
+        threads = []
+        for _ in range(4):
+            for o in host.batches(torch.randperm(40).split(8), "cuda"):
+                pass
+            threads.append(psutil.Process().num_threads())
+        self.assertEqual(threads[-1], threads[0])
 
 
 class GaeTest(unittest.TestCase):

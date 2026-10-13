@@ -374,6 +374,9 @@ const CHARTS = [
       "rest are waits." },
   { title: "Decisions / s", lines: [["perf/decisions_per_s", "decisions/s"]], goal: "higher is better",
     note: "Training speed. It drops when the PC is busy or the run is throttled." },
+  { title: "Trainer memory", lines: [["perf/private_gb", "GiB"]], goal: "level",
+    note: "The trainer's private memory in GiB; Windows counts its GPU memory in it. A steady climb is a leak: once " +
+      "the PC's RAM is full, training slows." },
   { title: "Loss", lines: [["bc/nll", "training"], ["val/bc/nll", "held-out"], ["twin/bc/nll", "twin, training"],
     ["twin/val/bc/nll", "twin, held-out"]], goal: "lower is better",
     note: "How unlikely the clone finds the command the human actually gave. Trust the held-out line: those games " +

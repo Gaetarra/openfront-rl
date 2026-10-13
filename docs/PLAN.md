@@ -1434,10 +1434,18 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         - PyTorch's caching host allocator rounds pinned buffers up to a power of two, and pinned pages cannot be paged
           out. The rollout buffer holds 7.6 GiB of data in 12.9 GiB of pinned RAM: the observations' 4.0 GiB take
           8 GiB.
-        - Loading checkpoints does not leak: 8 loads of a v4 checkpoint, flat.
-        - ~20 GB stays unexplained, probably growth over the run. It is not measured: the trainer does not log its
-          memory.
+        - The other ~21 GiB was a leak, found with probes of one operation each. Every learning pass started a new
+          thread to gather the minibatches, and that thread's first parallel CPU op started an OpenMP team of 13
+          threads that outlived it. That is 13 threads and ~5.4 MiB an update: ~21 GiB and ~52,000 threads over 4,028
+          updates. Forward passes at new batch sizes (cuDNN benchmark), loading 28 different checkpoints, and starting
+          and closing 16 workers were flat.
         - Each frozen evaluation adds 16 game workers, ~0.6 GB each.
+      - **Fixed (2026-10-13):**
+        - The gathering thread lives as long as the run. A test checks that the thread count stays flat over learning
+          passes. The probe's passes 50–200 at the real row size: +0.00 GiB, against +0.80 before.
+        - Pinned buffers above 1 MB keep their exact size (`pinned_max_round_threshold_mb:1` in the allocator config,
+          PyTorch 2.14), so the rollout buffer locks 7.6 GiB instead of 12.9.
+        - PPO logs its private memory every update (`perf/private_gb`, the page's "Trainer memory" chart).
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
