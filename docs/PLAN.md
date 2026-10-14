@@ -1523,6 +1523,13 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           - The statistics held level: KL per update ~0.002, ~2.5% of samples clipped, KL to the clone ~0.052, entropy
             ~0.27. The training curve read 0.81–0.89.
           - Memory stayed flat over all 2,000 updates and nine evaluations (19.0–20.3 GiB). Speed ~137 decisions/s.
+      - **Checks before the next league** (the user's go, 2026-10-14; `runs/check4a.cmd`, ~1 h). The rule was fixed
+        before any result. The weight average of lr4a's updates 1,000–2,000 (5 snapshots,
+        `checkpoints/swa-lr4a/update1000-2000.pt`) plays 256 games against the 3B clone and 256 against the Phase 2 PPO
+        bot.
+        - ≥ 0.83 against the clone: the next league starts from the average, and the trainer gets weight averaging.
+          Otherwise the league starts from lr4a's update 2,000.
+        - The game against the Phase 2 PPO bot reads Gate 4A's second bar (0.70).
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
