@@ -1513,6 +1513,16 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           (0.80 against 0.74), so averaging is not adopted now.
         - The memory fix held: the trainer's private memory stayed at 19.2–19.5 GiB over 808 updates and three
           evaluations (the first league run reached 46 GB by update 4,028). Speed: 113–137 decisions/s.
+        - **Extended to update 2,000** (resumed at the user's request at 10:51, finished 15:40, one attempt):
+          - Against the 3B clone (128 games each), by update: 1,000: **0.672**, 1,250: **0.812**, 1,500: **0.812**,
+            1,750: **0.750**, 2,000: **0.844**.
+          - Updates 250–1,000 averaged 0.770 (the rule's four snapshots), and updates 1,250–2,000 averaged 0.805.
+          - All eight snapshots pooled: **0.787 ± 0.013** (1,024 games), against Stage 0's ~0.49 at the same distance.
+          - The swings shrank but did not vanish: 0.67–0.88, still beyond noise (χ² 22.8 on 7 df, p = 0.002). Stage 0
+            ranged 0.20–0.77.
+          - The statistics held level: KL per update ~0.002, ~2.5% of samples clipped, KL to the clone ~0.052, entropy
+            ~0.27. The training curve read 0.81–0.89.
+          - Memory stayed flat over all 2,000 updates and nine evaluations (19.0–20.3 GiB). Speed ~137 decisions/s.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
