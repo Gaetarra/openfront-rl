@@ -1488,6 +1488,31 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
            snapshots are steady (χ² p ≥ 0.05) with a mean at most 0.02 lower;
          - otherwise the step size is not the cause. Next come more games per update (RAM permitting) or a KL that
            weighs rare actions more.
+      - **Results (2026-10-14).** Windows Update restarted the PC at 07:20 (a scheduled restart by MoUsoCoreWorker), so
+        run `lr4a` stopped at update 800, after its evaluation of update 750.
+        1. The weight average scored **0.742 ± 0.027** (256 games), between the bars, so it was decided with test 3
+           (below).
+        2. **The swings are real** (χ² 84.9 on 6 df, p < 0.001). Stage 0's snapshots against the 3B clone, 128 games
+           each, by update: 250: 0.766, 500: **0.195**, 750: 0.531, 1,250: 0.500, 1,500: 0.469, 1,750: 0.516, 2,000:
+           0.477.
+           - So a typical Stage 0 snapshot was about even with the clone. The checks of updates 1,000 (0.736) and
+             3,000 (0.695) landed on lucky ones, and Stage 0 passed its check on them.
+           - Correction: the 0.12–0.17 "cost of learning during the games" was measured against the lucky update
+             1,000. Stage 0's training curve (0.54–0.59) sat about where its typical snapshot did.
+        3. **A smaller step works.** Run `lr4a` started from Stage 0's update 1,000, which read 0.680 on these 128
+           games. Its snapshots scored **0.773** (update 250), **0.750** (500) and **0.883** (750).
+           - Their mean, 0.802, is 0.31 above Stage 0's 0.490 at the same distance (updates 1,250–2,000).
+           - Update 1,000 cannot change the verdict: the rule needs a mean ≥ 0.530, and even a 0 there leaves 0.60.
+           - **Adopted: lr 2.5e-5 for the next league.**
+           - The KL per update fell from ~0.010 to ~0.002, the clipped share from ~6% to ~2.5%, and the KL to the clone
+             from ~0.065 to ~0.05.
+           - The training curve rose with the frozen evaluations: 0.60 (update 50), 0.80 (250), 0.85 (500), 0.89
+             (700–750).
+        - Test 1 against test 3: the weight average beat Stage 0's typical snapshot by ~0.25. That is the same reading
+          as test 3: at lr 1e-4 the snapshots were noise around a decent policy. The smaller step alone does better
+          (0.80 against 0.74), so averaging is not adopted now.
+        - The memory fix held: the trainer's private memory stayed at 19.2–19.5 GiB over 808 updates and three
+          evaluations (the first league run reached 46 GB by update 4,028). Speed: 113–137 decisions/s.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
