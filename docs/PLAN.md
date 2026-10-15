@@ -1547,6 +1547,19 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           `avg<update>.pt`, the uniform average of the last 5 kept checkpoints (1,000 updates, `--init` counting as
           update 0), the recipe that scored 0.945. The averages join the league's pool and play the frozen evaluations;
           the learner keeps training its own weights.
+      - **League v2** (`league4a2`, the user's go, 2026-10-15; `runs/league4a2.cmd`, ~16 h). Fixed before it runs:
+        - From the lr4a average at lr 2.5e-5, KL 0.2 to the 3B clone, 16 × 2 games, 12 minibatches, 4,000 updates,
+          weight averaging on.
+        - Pool: the lr4a average, the 3B clone, the 3A clone, the Phase 2 PPO bot and the Phase 2 clone; the run's
+          averages join every 250 updates. Stage 0's and the first league's snapshots are left out: their strength
+          swung.
+        - Panel: the lr4a average (the rating's anchor), the 3B clone and the Phase 2 PPO bot, 128 games every 250
+          updates. The old panel cannot measure progress any more: the average beats each of its members ~95% of the
+          time.
+        - **Gate 4A's third bar:** the final average (updates 3,000–4,000) plays 512 fixed games against the lr4a
+          average, and ≥ 0.55 passes (2.3 SE above even). It replaces "a league rating that still rises over the last
+          5 snapshots": that trend is too noisy to read (above), and consecutive averages share 4 of their 5
+          snapshots.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
@@ -1555,7 +1568,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   (`checkpoints/ppo-bc2/update005000.pt`). Gate 4A:
   - ≥ 0.80 against the Phase 3 clone;
   - ≥ 0.70 against the Phase 2 PPO bot;
-  - a league rating (a Bradley-Terry fit, "League design" above) that still rises over the last 5 snapshots.
+  - the league's final weight average beats its start ≥ 0.55 over 512 fixed games (since 2026-10-15, "League v2"
+    above; it was a league rating that still rises over the last 5 snapshots).
 - **Frozen evaluations during training**: every 250 updates, 64–128 frozen games against the panel (~13% of the time at
   64 and ~24% at 128, "League design" above).
   The training curve is off either way: in Phase 2 it included the learner adapting to the games in progress and
