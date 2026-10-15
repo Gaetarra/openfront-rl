@@ -1530,6 +1530,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         - ≥ 0.83 against the clone: the next league starts from the average, and the trainer gets weight averaging.
           Otherwise the league starts from lr4a's update 2,000.
         - The game against the Phase 2 PPO bot reads Gate 4A's second bar (0.70).
+        - **Results (2026-10-14, 20:14–21:03):** the average beat the 3B clone **0.945 ± 0.014** (seats 0.961 / 0.930)
+          and the Phase 2 PPO bot **0.969 ± 0.011** (0.969 / 0.969), 256 games each.
+          - Its five snapshots scored 0.672–0.844 against the clone (mean 0.778, 128 games each), so averaging added
+            ~0.17, and 0.10 over the best of them. Stage 0's average added ~0.25 over its typical snapshot. At both step
+            sizes the snapshots scatter around a stronger mean policy.
+          - By the rule: the next league starts from the average, and the trainer gets weight averaging.
+          - Gate 4A: the average meets both match bars (0.80 against the 3B clone, 0.70 against the Phase 2 PPO bot).
+            The third, a league rating that still rises, waits for the league; its rule is fixed before the league
+            runs.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
