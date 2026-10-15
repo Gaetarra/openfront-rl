@@ -1702,6 +1702,15 @@ self-hosted server at the pinned release; checkpoint chosen by lobby mode (AGPL:
 server for others). Official servers: the owner allows testing in casual multiplayer games from the AI-DEV account (not
 ranked, no abuse). The connection must keep Turnstile (e.g. the official web client in the user's own browser session,
 or a path the maintainers provide); never bypass it. To decide when the bot is strong enough to be worth testing.
+- **The user's client** (the user's requirement, 2026-10-15): the user plays multiplayer games themselves, with a button
+  that hands their seat to StockShip and takes it back, and a view of the moves it makes. The user expects the owner
+  may also allow ranked tests; until the owner confirms it, only casual lobbies from the AI-DEV account.
+  - Proposed: a browser extension (or userscript) on the official client, so the user's own session keeps Turnstile.
+    It forwards the game's start and every turn to a local StockShip server, which replays the same game with the
+    bridge (as it replays records: the hashes keep it in sync), runs the network and returns the seat's next intent;
+    the extension sends it as the user's. Decision 12's limits hold (one intent per 0.5 s). An overlay lists the moves
+    it makes, and could show what it would do while switched off.
+  - When: after 4N's code, while 4N trains (it needs no training time on the GPU). To be designed with the user first.
 
 ## Reused code
 | Need | Existing code |
