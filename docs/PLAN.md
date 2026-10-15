@@ -174,6 +174,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
       one intent per 0.5 s: 120/min, and at most 3 in any second with the latency jitter.
     - So the environment needs no copy of the limiter while decision 11 holds.
 13. **Curriculum: Ranked 1v1 → Ranked 2v2 → public FFA/Team with nations + modifiers → augmented/procedural maps.**
+    **Changed 2026-10-15 (the user's call):** Ranked 1v1 → FFA and Humans vs Nations against the nations (4N) →
+    alliance and donation actions → human data of every mode (public FFA/Team, ranked 2v2) with the MoE routing test
+    → modifiers → bigger and augmented/procedural maps. Public lobbies are where the bot will play (Phase 4, "4N").
     Ranked first: 4 maps, no nations, 2–4 players (natural self-play), 10–15 min games, best human data, clean win/loss.
 14. **Game updates: the base model tracks the official servers.** The game submodule is pinned to the production release
     tag (currently v0.34.x) and moved to each new gameplay-relevant release via the playbook below. Upstream ships a minor
@@ -1172,7 +1175,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         2. the 12-map entropy recomputed after every minibatch only for the log: log it once per update;
         3. the frozen clone's outputs for the KL computed once per update instead of once per epoch (a third of
            those passes at 3 epochs, ~2 GB more pinned RAM).
-- **3C — Ranked 2v2 and a nations check** (before Phase 4B):
+- **3C — Ranked 2v2 and a nations check** (before Phase 4B; after 4N since 2026-10-15, Phase 4 "4N"):
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
   - Compact FFA against Easy and Medium nations, as an evaluation only.
@@ -1562,7 +1565,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           snapshots.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
-- **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.
+- **4B, ranked 2v2** (after 3C; both come after 4N since 2026-10-15, below): teammates are copies of the current
+  policy.
 - **Gate** (re-set on 2026-10-03: Phase 2's PPO already beat its own clone 0.773, above the old ≥70% bar). A fixed panel
   of frozen opponents on fixed seeds: the Phase 3 clone, the Phase 2 clone, and the Phase 2 PPO bot
   (`checkpoints/ppo-bc2/update005000.pt`). Gate 4A:
@@ -1597,6 +1601,72 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - the exact KL, never a one-sample estimate;
   - more games per update and smaller steps;
   - a restart loop for long runs (the PC's GPU driver occasionally fails).
+- **4N — FFA and Team against the nations** (after 4A; the user's call, 2026-10-15, designed with the user section by
+  section):
+  - **Why now:** public lobbies (FFA and Team, 50/50) are where the bot will play, the only place the owner allows.
+    Ranked 1v1 stays the training ground and the benchmark. The 1v1 bot already plays FFA: the lr4a average won 0.395
+    against 3 Easy nations on Onion without FFA training (3C's nations probe).
+  - **What moves:** ranked 2v2 (3C's setup, crawl and BC, then 4B) and the MoE routing test come after 4N, with the
+    human data (below). Their reasons stand: team mechanics, and the router's first mixed modes. 4N reaches the
+    deployment modes first and needs no new data or actions.
+  - **Facts** (`MapPlaylist.ts`, v0.34.24):
+    - Lobbies rotate FFA, Team and special (FFA or Team with 1–3 modifiers): 50/50 FFA and Team, a third with
+      modifiers.
+    - 111 FFA maps and 112 Team maps. All games of a run share one padded grid, and the CNN's cost grows with its
+      cells. 192 × 256 (today's) fits 34 maps, 32% of the rotation, with World (the most played map) and the ranked
+      maps; 256 × 256 fits 55 (48%), 256 × 320 74 (65%), 256 × 384 84 (75%).
+    - Lobbies hold up to 125 players (~70 on average at the largest size tier; every 7th lobby at most 25).
+    - FFA: all of a map's nations (~30 on average, a quarter on Compact maps), Medium; 400 tribes (100 on Compact).
+      No timer: 80% of the land wins, and after 30 minutes the bar drops 2 points a minute.
+    - Team: donations on. No nations except in Humans vs Nations (20% of Team games: as many Hard nations as humans).
+      2–7 teams in 60% of Team games, Duos, Trios or Quads in 20%.
+  - **The games** (one run, each worker playing one kind):
+    1. ranked 1v1 as in the league (the learner against the pool), so 1v1 is kept;
+    2. FFA against nations: 4 learner seats (shared weights, all learning), all of the map's nations (Medium or Hard,
+       half each) and the tribes. The 34 maps that fit today's grid, weighted like the public rotation, minus 4
+       held-out maps, drawn once with a fixed seed among the 34 without World and the 4 ranked maps; Compact in a
+       third of the games, with a quarter of the nations, as the game does;
+    3. Humans vs Nations: 4 learner seats as one team against 4 Hard nations.
+    - Training games have a 30-minute timer (the tile leader wins), about half the longest public game. The gate
+      plays the public rules.
+    - Rewards as decision 9, among the seats and the nations (tribes do not count). A team's result is shared.
+    - Learner seats stay at today's 32, since each learner decision keeps a ~2.8 MB observation in pinned RAM:
+      8 ranked games (8 seats), 4 FFA games (16), 2 Humans vs Nations games (8).
+    - A 30-minute game is ~2.4× a typical ranked game, so results, the only reward, come ~2.4× less often per
+      decision.
+  - **The code:**
+    - `bridge/setups.ts`: public FFA and Humans vs Nations configs copied from `MapPlaylist` (as `ranked1v1Config`
+      is), over the 34 maps with the public weights minus the 4 held out, with the 30-minute timer and Medium or
+      Hard nations. A test checks the drawn configs against the game's rules (nation counts, Compact every third).
+    - Mixed runs: each worker gets its own setup, and games may have different seat counts (`trainer/env.py`,
+      `bridge/worker.ts`).
+    - PPO learns from every seat of FFA and Humans vs Nations games; ranked games keep one learner seat and the
+      league's pick in the other.
+    - Frozen evaluations per setup, with each setup's win rate on the control page.
+    - `trainer.eval --setup ffa | hvn`, on the training or the held-out maps, under the public rules.
+    - Unchanged: the network (it already sees which players are nations and which are teammates) and the KL
+      reference (the 3B clone). The start is league v2's final average if it passes Gate 4A, otherwise the lr4a
+      average.
+    - A known limit: World has 72 nations, so with 4 seats a game holds 76 real players. The transformer attends to
+      the 64 most relevant (its relevance rule), and every player keeps a token.
+    - Tests: a mixed run with one worker per setup in the smoke test, and a game of each new setup played to its end.
+  - **Gate 4N** (the final weight average, under the public rules: no timer, the bar drops after 30 minutes):
+    - FFA: one bot seat against all of the map's Hard nations and the tribes, 128 games on the 4 held-out maps: it
+      wins ≥ 0.50. The same 128 games on 4 training maps show the gap between seen and unseen maps;
+    - Humans vs Nations: 4 bot seats against 4 Hard nations, 128 games on the held-out maps: the team wins ≥ 0.70;
+    - 1v1: against its start in ranked 1v1, 512 fixed games: ≥ 0.45.
+    - One bot seat in the FFA gate, not training's four, so a win is the bot's own and not shared among copies.
+    - Baselines first: the start plays the FFA and Humans vs Nations games before training (~3–4 h of GPU). A bar it
+      already meets is done without training.
+    - Gate games are Normal size, Compact in a third, as in training.
+  - **During training:** frozen evaluations every 500 updates (FFA games are long): ranked 1v1 against the panel, 64
+    games; FFA against Hard nations, 32; Humans vs Nations, 32; on training maps with the 30-minute timer, ~27 minutes
+    per ~2 hours of training. 4,000 updates (~16–20 h), then the gate; if it fails, the per-setup curves show where
+    it is stuck before anything is decided. Also logged: each setup's training win rate, action mix and game length,
+    how often the 64-player cap binds, and decisions/s.
+  - **After 4N**, in this order: alliance and donation actions; the crawl of public FFA/Team and ranked 2v2 records,
+    BC on all modes with the mode as an input, and 3C's MoE routing test; modifiers; bigger maps and the 64-player cap
+    (Phase 6).
 
 **Phase 5 — Exact nuke-interception predictor (≈1–2 weeks)**: silo choice as `PlayerImpl.nukeSpawn`,
 `UniversalPathFinding.Parabola`, targetable window, copied SAM targeting (slots, cooldowns, upgrade ramp, stacked-launch
