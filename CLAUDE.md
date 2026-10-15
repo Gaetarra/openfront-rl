@@ -194,8 +194,11 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   indexed record, so after a crawl `data/` mixes in v0.34.24 records: a BC run on both needs them split by version
   (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
 - The league (PLAN 4A, "League design"):
-  - `--league` takes checkpoints and globs. Quote the globs: Python expands them. The learner's snapshots join the
-    pool every 250 updates.
+  - `--league` takes checkpoints and globs. Quote the globs: Python expands them.
+  - Every 250 updates PPO also saves `avg<update>.pt`, the average of the weights of the last 5 kept checkpoints
+    (1,000 updates; `--init` counts as update 0). The averages, not the raw snapshots, join the pool and play the
+    frozen evaluations: PPO's snapshots scatter around a stronger mean policy (PLAN 4A, "Checks before the next
+    league").
   - The first `--panel` checkpoint anchors the Bradley-Terry rating at 0 Elo.
   - Each frozen evaluation is appended to `runs/<run>/panel.jsonl`, and a new run refuses a `runs/<run>` that already
     holds one.

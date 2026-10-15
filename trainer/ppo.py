@@ -30,7 +30,10 @@ from trainer.model import ACT_NAMES, CORES, ActionDist, arch_of, load_net, new_n
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
 REF_OUTPUTS = ("type", "maps", "ptr", "retreat", "shares", "bins")  # what ActionDist reads of the KL reference
-SNAPSHOT = 250  # updates between kept checkpoints: they join the league's pool and play the panel
+SNAPSHOT = 250  # updates between kept checkpoints
+AVERAGED = 5  # kept checkpoints in each weight average, --init counting as update 0: the last 1,000 updates. Averages
+# join the league's pool and play the panel: PPO's snapshots scatter around a stronger mean policy (lr4a's five scored
+# 0.778 against the 3B clone, their average 0.945; PLAN 4A, "Checks before the next league")
 
 
 def parser():
@@ -67,10 +70,10 @@ def parser():
     p.add_argument("--opponent", help="frozen checkpoint that plays every seat but the learner's (2-seat setups)")
     p.add_argument("--league", nargs="+",
                    help="instead of --opponent, a pool of frozen checkpoints (globs expand): PFSP picks the opponent of "
-                        "new games every 25 updates, and the learner's snapshots join it every 250 (PLAN 4A)")
+                        "new games every 25 updates, and the learner's weight averages join it every 250 (PLAN 4A)")
     p.add_argument("--panel", nargs="+",
-                   help="frozen checkpoints that every 250th update's snapshot (and --init's) plays on fixed games while "
-                        "training waits; the first anchors the Bradley-Terry rating (PLAN 4A)")
+                   help="frozen checkpoints that every 250th update's weight average (and --init) plays on fixed games "
+                        "while training waits; the first anchors the Bradley-Terry rating (PLAN 4A)")
     p.add_argument("--eval-games", type=int, default=128,
                    help="games per panel evaluation, split over the panel by game slot (given with --resume, it replaces "
                         "the run's)")
@@ -142,7 +145,7 @@ def run_info(a):
     if a.setup == "ranked1v1":
         game, rivals = "ranked 1v1 (the official playlist)", f"frozen {a.opponent}"
         if a.league:
-            rivals = f"a league of frozen policies: PFSP picks every {ROTATE} updates, snapshots join every {SNAPSHOT}"
+            rivals = f"a league of frozen policies: PFSP picks every {ROTATE} updates, averages join every {SNAPSHOT}"
     else:
         game = f"{a.map}, {'Normal' if a.normal_size else 'Compact'}, {a.timer} min"
         rivals = f"{a.nations} {a.difficulty} nations" + (f" and {a.bots} bots" if a.bots else "")
@@ -187,6 +190,15 @@ def save_checkpoint(path, **state):
     tmp = path.with_suffix(".tmp")
     torch.save(state, tmp)
     tmp.replace(path)  # atomic: a crash during the save never corrupts the previous checkpoint
+
+
+def average(paths):
+    """The uniform average of checkpoints' weights, loaded one at a time (a PPO checkpoint holds ~200 MB)."""
+    total = None
+    for p in paths:
+        model = torch.load(p, map_location="cpu", weights_only=False)["model"]
+        total = {k: v.double() + (total[k] if total else 0) for k, v in model.items()}
+    return {k: (v / len(paths)).to(model[k].dtype) for k, v in total.items()}
 
 
 class Outcomes:
@@ -387,8 +399,9 @@ def main(argv=None):
     def checkpoint():
         # Games in progress are dropped on quit; a resume starts each slot at its next episode, so no seed replays.
         kept = update % SNAPSHOT == 0 and update > 0
+        averaged = ckpt_dir / f"avg{update:06d}.pt"
         if kept and a.league:
-            league.add((ckpt_dir / f"update{update:06d}.pt").as_posix())  # saved below
+            league.add(averaged.as_posix())  # saved below
         s = dict(model=model.state_dict(), optimizer=opt.state_dict(), args=vars(a), update=update,
                  global_step=global_step, episodes=[e + 1 for e in envs.episodes], game_commit=commit,
                  outcomes=outcomes.state(), league=league.state() if league else None,
@@ -397,6 +410,10 @@ def main(argv=None):
         save_checkpoint(ckpt_dir / "latest.pt", **s)
         if kept:
             save_checkpoint(ckpt_dir / f"update{update:06d}.pt", **s)
+            members = [ckpt_dir / f"update{k:06d}.pt" if k else Path(a.init)
+                       for k in range(update, -1, -SNAPSHOT)[:AVERAGED] if k or a.init]
+            save_checkpoint(averaged, model=average(members), args=vars(a), update=update, game_commit=commit,
+                            averaged=[m.as_posix() for m in members])
         control.note(f"saved checkpoint at update {update}")
 
     evals = [json.loads(line) for line in panel_log.read_text(encoding="utf-8").splitlines()] \
@@ -405,11 +422,11 @@ def main(argv=None):
         control.update(panel=panel_table(evals, a.panel, *ratings(evals, a.panel)))
 
     def evaluate():
-        """This update's snapshot (update 0: --init) plays the panel on fixed games while training waits (PLAN 4A).
-        False if a stop came first."""
+        """This update's weight average (update 0: --init) plays the panel on fixed games while training waits (PLAN
+        4A). False if a stop came first."""
         control.set_state("evaluating")
         control.note(f"frozen evaluation of update {update} against the panel")
-        spec = (ckpt_dir / f"update{update:06d}.pt").as_posix() if update else a.init
+        spec = (ckpt_dir / f"avg{update:06d}.pt").as_posix() if update else a.init
         torch.cuda.empty_cache()
         t0 = time.perf_counter()
         with torch.random.fork_rng(devices=[device]):  # play() fixes its own seed; training's carries on after

@@ -1186,6 +1186,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - 1,000 2v2 games without errors;
     - the clone team beats scripted-expander teams ≥ 0.75;
     - against 3 Easy nations in Compact FFA it wins more often than the scripted expander (8% in Phase 1's diagnosis).
+  - **Nations probe** (the user's go, 2026-10-15; `runs/eval/20261015-155801.json`): the weight average of lr4a, one
+    seat against 3 Easy nations on Onion (Phase 1's setup: Compact, 5 minutes, no tribes), never trained on FFA, won
+    **0.395 ± 0.031** of 256 games (mean rank 1.89 of 4). It acted in 6.3% of its decisions, half its rate in ranked
+    1v1 (13%).
 - **Moved to Phase 6**: the public FFA/Team sampler with modifiers, dihedral augmentation, procedural maps, and the S/M/L
   CNN sizes. The CNN does most of the compute, and the next size up (M) measured ~1.6× slower in Phase 0; PPO is already
   limited by the GPU. The TrueSkill table moves to Phase 4, for the league.
@@ -1539,6 +1543,10 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           - Gate 4A: the average meets both match bars (0.80 against the 3B clone, 0.70 against the Phase 2 PPO bot).
             The third, a league rating that still rises, waits for the league; its rule is fixed before the league
             runs.
+        - **Weight averaging in the trainer** (the user's go, 2026-10-15): every 250 updates PPO also saves
+          `avg<update>.pt`, the uniform average of the last 5 kept checkpoints (1,000 updates, `--init` counting as
+          update 0), the recipe that scored 0.945. The averages join the league's pool and play the frozen evaluations;
+          the learner keeps training its own weights.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C): teammates are copies of the current policy.

@@ -243,9 +243,9 @@ class SmokeTest(unittest.TestCase):
         self.assertLess(max(kl), 1e-4)  # 2e-7 here; reference rows shifted by one gave 4e-3 and 1.3e-2
 
     def test_a_league_with_frozen_evaluations(self):
-        """PLAN 4A: the opponents come from a pool the learner's snapshots join, and every snapshot plays the panel,
-        here with a snapshot every 2 updates and a pick every update. Games of 1 minute end within 3 updates of 48
-        steps, so slots change opponents mid-rollout."""
+        """PLAN 4A: the opponents come from a pool the learner's weight averages join, and every average plays the
+        panel, here with a snapshot every 2 updates and a pick every update. Games of 1 minute end within 3 updates of
+        48 steps, so slots change opponents mid-rollout."""
         ckpt, run = ROOT / "checkpoints" / self.RUN, ROOT / "runs" / self.RUN
         ckpt.mkdir(parents=True, exist_ok=True)
         pool = []
@@ -263,7 +263,13 @@ class SmokeTest(unittest.TestCase):
         state = torch.load(ckpt / "latest.pt", weights_only=False)
         league = state["league"]
         self.assertEqual([Path(p).name for p in league["pool"]],
-                         ["pool0.pt", "pool1.pt", "update000002.pt", "update000004.pt", "update000006.pt"])
+                         ["pool0.pt", "pool1.pt", "avg000002.pt", "avg000004.pt", "avg000006.pt"])
+        avg = torch.load(ckpt / "avg000006.pt", weights_only=False)
+        members = [(ckpt / f"update00000{k}.pt").as_posix() for k in (6, 4, 2)] + [pool[0]]
+        self.assertEqual(avg["averaged"], members, "the last 5 kept checkpoints at most, --init as update 0")
+        models = [torch.load(m, map_location="cpu", weights_only=False)["model"] for m in members]
+        for k, v in avg["model"].items():
+            torch.testing.assert_close(v, (sum(m[k].double() for m in models) / len(models)).to(v.dtype))
         finished = len(state["outcomes"]["episodes"])
         self.assertGreater(finished, 0)
         self.assertEqual(sum(map(len, league["results"].values())), finished, "every finished game counts for PFSP")
