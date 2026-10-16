@@ -20,22 +20,35 @@ export const GAME_ROOT = path.resolve(
   "../OpenFront_Source_Code/openfrontio",
 );
 
-type MapFiles = { manifest: string; map: Uint8Array; map4x: Uint8Array; map16x: Uint8Array };
+type MapFiles = { map: Uint8Array; map4x: Uint8Array; map16x: Uint8Array };
 const files = new Map<GameMapType, MapFiles>();
+const manifests = new Map<GameMapType, string>();
+
+function mapDir(map: GameMapType): string {
+  const key = Object.keys(GameMapType).find((k) => GameMapType[k as keyof typeof GameMapType] === map);
+  if (key === undefined) throw new Error(`unknown map: ${map}`);
+  return path.join(GAME_ROOT, "resources/maps", key.toLowerCase());
+}
+
+/**
+ * A map's manifest, parsed anew on every call (loadFreshTerrain edits its copy). It reads no map data: the data of all
+ * maps together are over 600 MB, and public games look at every manifest to find the maps that fit the grid.
+ */
+function manifestOf(map: GameMapType): MapManifest {
+  let text = manifests.get(map);
+  if (text === undefined) {
+    text = fs.readFileSync(path.join(mapDir(map), "manifest.json"), "utf8");
+    manifests.set(map, text);
+  }
+  return JSON.parse(text) as MapManifest;
+}
 
 function mapFiles(map: GameMapType): MapFiles {
   let f = files.get(map);
   if (f === undefined) {
-    const key = Object.keys(GameMapType).find((k) => GameMapType[k as keyof typeof GameMapType] === map);
-    if (key === undefined) throw new Error(`unknown map: ${map}`);
-    const dir = path.join(GAME_ROOT, "resources/maps", key.toLowerCase());
+    const dir = mapDir(map);
     const read = (name: string) => new Uint8Array(fs.readFileSync(path.join(dir, name)));
-    f = {
-      manifest: fs.readFileSync(path.join(dir, "manifest.json"), "utf8"),
-      map: read("map.bin"),
-      map4x: read("map4x.bin"),
-      map16x: read("map16x.bin"),
-    };
+    f = { map: read("map.bin"), map4x: read("map4x.bin"), map16x: read("map16x.bin") };
     files.set(map, f);
   }
   return f;
@@ -50,7 +63,7 @@ const half = (c: [number, number] | undefined): [number, number] | undefined =>
  */
 export async function loadFreshTerrain(map: GameMapType, size: GameMapSize): Promise<TerrainMapData> {
   const f = mapFiles(map);
-  const manifest = JSON.parse(f.manifest) as MapManifest;
+  const manifest = manifestOf(map);
   const normal = size === GameMapSize.Normal;
   // slice(): a map writes to its terrain bytes (water nukes), so every game gets its own copy.
   const gameMap = await genTerrainFromBin(normal ? manifest.map : manifest.map4x, (normal ? f.map : f.map4x).slice());
@@ -89,11 +102,16 @@ export async function loadFreshTerrain(map: GameMapType, size: GameMapSize): Pro
  * the half-size map, so both sizes of a map share one grid.
  */
 export function mapGrid(map: GameMapType, size: GameMapSize): { h: number; w: number; cs: number } {
-  const manifest = JSON.parse(mapFiles(map).manifest) as MapManifest;
+  const manifest = manifestOf(map);
   const normal = size === GameMapSize.Normal;
   const m = normal ? manifest.map : manifest.map4x;
   const cs = normal ? 8 : 4;
   return { h: Math.ceil(m.height / cs), w: Math.ceil(m.width / cs), cs };
+}
+
+/** How many nations a map's manifest lists: a Normal public FFA game has them all, a Compact one a quarter. */
+export function nationCount(map: GameMapType): number {
+  return manifestOf(map).nations.length;
 }
 
 /**

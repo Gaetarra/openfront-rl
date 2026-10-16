@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import {
+  ColoredTeams,
+  GameMapSize,
+  GameMapType,
+  PlayerType,
+  UnitType,
+} from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
 import { Act } from "./actions";
 import { CellFrame } from "./frame";
-import { EnvGame } from "./game";
+import { EnvConfig, EnvGame, seatPlayers } from "./game";
+import { nationCount } from "./maps";
 import { rewardOf } from "./ranking";
-import { landTile, ONION, RANKED, script, spawnCell } from "./testkit";
+import { gameIdOf, publicConfig, shapeOf, slotsFor } from "./setups";
+import { FFA, HVN, landTile, ONION, RANKED, script, spawnCell } from "./testkit";
 
 const blob = (blobs: [string, Uint8Array][], name: string) => blobs.find(([n]) => n === name)![1];
 
@@ -139,4 +147,42 @@ test("ranked games draw from the playlist and share the ranked grid", async () =
   assert.equal(env.slots, 403);
   assert.equal(env.start.config.rankedType, "1v1");
   assert.match(env.start.gameID, /^[A-Za-z0-9]{8}$/);
+});
+
+/** A public game on a fixed map and size, started from its start info as EnvGame.create does. */
+function publicGame(cfg: EnvConfig, gameMap: GameMapType, gameMapSize: GameMapSize): Promise<EnvGame> {
+  const bots = gameMapSize === GameMapSize.Compact ? 100 : 400;
+  const config = { ...publicConfig(cfg, new PseudoRandom(1)), gameMap, gameMapSize, bots };
+  const start = { gameID: gameIdOf("nations"), lobbyCreatedAt: 0, config, players: seatPlayers(cfg.seats) };
+  return EnvGame.fromStart(start, shapeOf([cfg]).grid[1], slotsFor(cfg), "nations:latency");
+}
+
+const nationsOf = (env: EnvGame) => env.game.allPlayers().filter((p) => p.type() === PlayerType.Nation);
+
+test("public games get the game's own nations, and the tribes fit the player table", async () => {
+  const ffa = await publicGame(FFA, GameMapType.World, GameMapSize.Normal);
+  assert.equal(nationsOf(ffa).length, nationCount(GameMapType.World));
+  assert.equal(nationsOf(ffa).length, 72);
+  assert.equal(nationsOf(await publicGame(FFA, GameMapType.World, GameMapSize.Compact)).length, 18);
+  const hvn = await publicGame(HVN, GameMapType.World, GameMapSize.Normal);
+  assert.equal(nationsOf(hvn).length, 4);
+  assert.ok(hvn.seats.every((s) => s.team() === ColoredTeams.Humans));
+  assert.ok(nationsOf(hvn).every((n) => n.team() === ColoredTeams.Nations));
+  for (let t = 0; t < 300; t++) ffa.tickWith([]); // past the spawn phase: the tribes have spawned
+  const players = ffa.game.allPlayers();
+  assert.equal(players.filter((p) => p.type() === PlayerType.Bot).length, 400);
+  assert.equal(ffa.slots, 477);
+  assert.equal(Math.max(...players.map((p) => p.smallID())), ffa.slots - 1); // 4 seats, 72 nations, 400 tribes: a full table
+  ffa.observe(true);
+});
+
+test("a game created with a run's shape uses its grid and player table", async () => {
+  const env = await EnvGame.create(ONION, "shared", shapeOf([RANKED, FFA, HVN]));
+  assert.equal(env.frame.stride, 256);
+  assert.equal(env.slots, 477);
+  env.observe(true);
+  const ffa = await EnvGame.create(FFA, "ffa-a");
+  assert.equal(ffa.seats.length, 4);
+  assert.equal(ffa.slots, 477);
+  assert.equal(ffa.start.config.maxPlayers, 4);
 });

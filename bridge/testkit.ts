@@ -16,6 +16,19 @@ export const ONION: EnvConfig = {
 /** Ranked 1v1 training games: map, size, bots and timer come from the playlist (bridge/setups.ts). */
 export const RANKED: EnvConfig = { ...ONION, seats: 2, playlist: "ranked1v1" };
 
+/** Public FFA training games: 4 learner seats against the map's nations, Medium or Hard, with a 30-minute timer. */
+export const FFA: EnvConfig = {
+  ...ONION,
+  seats: 4,
+  playlist: "ffa",
+  maps: "training",
+  difficulty: "Medium,Hard",
+  timerMinutes: 30,
+};
+
+/** Public Humans vs Nations training games: 4 learner seats against 4 Hard nations. */
+export const HVN: EnvConfig = { ...FFA, playlist: "hvn", difficulty: "Hard" };
+
 /** A fixed land tile in the Onion map's lower right, for scripted spawns. */
 export function landTile(env: EnvGame): TileRef {
   const g = env.game;

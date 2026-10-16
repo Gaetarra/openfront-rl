@@ -27,25 +27,37 @@ import { LatencyQueue } from "./latency";
 import { loadFreshTerrain, resetGameStatics } from "./maps";
 import { encodeSeat, PLAYER_FEATURES, SCALARS } from "./obs";
 import { rewardOf, seatStanding } from "./ranking";
-import { gameConfigOf, gameIdOf, gridFor, slotsFor } from "./setups";
+import { gameConfigOf, gameIdOf, shapeOf } from "./setups";
 
 /** A training game setup, sent by the trainer as JSON. FFA only in Phase 1. */
 export interface EnvConfig {
   map: string; // a GameMapType value, e.g. "Onion"
   compact: boolean;
   nations: number; // 0 = no nations
-  difficulty: string; // a Difficulty value, e.g. "Easy"
+  /** A Difficulty value, e.g. "Easy". "ffa" and "hvn" take a comma-separated list and draw one value per game. */
+  difficulty: string;
   bots: number;
+  /** In minutes. "ffa" and "hvn": 0 means no timer, as in the public games. */
   timerMinutes: number;
   seats: number; // agent-controlled players
-  /** Draw each game's map, size, bots and timer from this playlist (bridge/setups.ts); then only `seats` is used. */
-  playlist?: "ranked1v1";
+  /**
+   * Draw each game's map, size and bots from this playlist (bridge/setups.ts). "ranked1v1" also sets the timer and
+   * reads only `seats`; "ffa" and "hvn" (public FFA and Humans vs Nations, against the game's own nations) read `seats`,
+   * `maps`, `difficulty` and `timerMinutes`.
+   */
+  playlist?: "ranked1v1" | "ffa" | "hvn";
+  /** "ffa" and "hvn": which maps to draw from (bridge/setups.ts publicMaps). Default "training". */
+  maps?: "training" | "heldout" | "seen";
 }
 
 /** Ticks per agent decision (PLAN decision 11). */
 export const STEP_TICKS = 5;
 
 export const seatClientID = (seat: number): string => `AGENT${seat.toString().padStart(3, "0")}`;
+
+/** The players of a training game, one per seat, named as EnvGame.create names them. */
+export const seatPlayers = (seats: number) =>
+  Array.from({ length: seats }, (_, i) => ({ clientID: seatClientID(i), username: `agent${i}`, clanTag: null }));
 
 export type Blob = [name: string, bytes: Uint8Array];
 const bytes = (a: Float32Array) => new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
@@ -92,16 +104,14 @@ export class EnvGame {
     return this.start.config.maxTimerValue ?? 60;
   }
 
-  /** A training game: its game ID and every random draw derive from the seed. */
-  static async create(cfg: EnvConfig, seed: string): Promise<EnvGame> {
+  /**
+   * A training game: its game ID and every random draw derive from the seed. `shape`: the grid and player table the
+   * game is built on, which the games of one mixed run share (default: the config's own).
+   */
+  static async create(cfg: EnvConfig, seed: string, shape = shapeOf([cfg])): Promise<EnvGame> {
     const config = gameConfigOf(cfg, new PseudoRandom(simpleHash(`${seed}:setup`)));
-    const players = Array.from({ length: cfg.seats }, (_, i) => ({
-      clientID: seatClientID(i),
-      username: `agent${i}`,
-      clanTag: null,
-    }));
-    const start: GameStartInfo = { gameID: gameIdOf(seed), lobbyCreatedAt: 0, config, players };
-    return EnvGame.fromStart(start, gridFor(cfg)[1], slotsFor(cfg), `${seed}:latency`);
+    const start: GameStartInfo = { gameID: gameIdOf(seed), lobbyCreatedAt: 0, config, players: seatPlayers(cfg.seats) };
+    return EnvGame.fromStart(start, shape.grid[1], shape.slots, `${seed}:latency`);
   }
 
   /**
