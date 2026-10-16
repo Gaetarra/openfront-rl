@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Act } from "./actions";
 import { EnvGame } from "./game";
 import { GAME_ROOT } from "./maps";
-import { ONION, spawnCell } from "./testkit";
+import { ONION, RANKED, spawnCell } from "./testkit";
 
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), "worker.ts");
 type Reply = { header: any; body: Buffer };
@@ -69,6 +69,17 @@ test("init returns dims and a full first frame per game", async () => {
   assert.equal(g.blobs[1][1], 64 * 64 * 11);
   const total = header.games.flatMap((x: any) => x.blobs).reduce((s: number, b: [string, number]) => s + b[1], 0);
   assert.equal(body.length, total);
+});
+
+test("a worker in a mixed run uses the run's grid and player table", async () => {
+  const c = new Client();
+  const { header } = await c.request({ cmd: "init", config: ONION, mix: [ONION, RANKED], games: 1, seed: "mix", worker: 0 });
+  c.close();
+  assert.deepEqual(header.dims.grid, [192, 256]);
+  assert.equal(header.dims.slots, 403);
+  assert.equal(header.dims.seats, 1);
+  const players = header.games[0].blobs.find((b: [string, number]) => b[0] === "players");
+  assert.equal(players[1], 403 * 17 * 4);
 });
 
 test("same seed and actions give the same hash in a fresh worker and after other games", async () => {

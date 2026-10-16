@@ -2,12 +2,15 @@ import collections
 import gzip
 import json
 import unittest
+import unittest.mock
 
 import numpy as np
 import torch
 
-from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, LAND, LEVEL, MAP_TYPES, N_CHANNELS, OWN, OWNER,
-                         OWNER_FEATURES, RANKED_1V1, ROOT, UPGRADABLE, VALID, ZONE_KINDS, VecEnv, disk_cells, quantize_)
+from trainer import env as env_module
+from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, FFA, HVN, LAND, LEVEL, MAP_TYPES, N_CHANNELS, OWN, OWNER,
+                         OWNER_FEATURES, RANKED_1V1, ROOT, UNIT, UPGRADABLE, VALID, ZONE_KINDS, VecEnv, disk_cells,
+                         frozen_eval_config, gate_config, quantize_)
 from scripts.coverage import label_kinds
 from trainer.eval import Scripted
 from trainer.model import v1_spatial
@@ -171,6 +174,7 @@ class VecEnvTest(unittest.TestCase):
             self.assertEqual(done[0], 1)
             self.assertEqual(rew[0], -1)
             self.assertEqual(infos[0]["rank"], 4)
+            self.assertIs(infos[0]["cut"], False)
             self.assertEqual(env.episodes, [1])
             self.assertTrue(obs["cell_mask"][0, 0].any(), "the new game starts in its spawn phase")
         finally:
@@ -231,6 +235,71 @@ class VecEnvTest(unittest.TestCase):
         self.assertEqual((commands, outside), (len(kinds), sum(k != "in" for k in kinds)))
         self.assertEqual(outside, 2, "the fixture's emoji and quick chat")
 
+    def test_a_mixed_runs_ffa_game_matches_the_same_game_played_alone(self):
+        ffa1, hvn1 = {**FFA, "timerMinutes": 1}, {**HVN, "timerMinutes": 1}
+        mixed, alone = VecEnv([RANKED_1V1, ffa1, hvn1], 3, 1, seed="mix"), VecEnv(ffa1, 2, 1, seed="mix")
+        try:
+            self.assertEqual(mixed.seats.tolist(), [2, 4, 4])
+            self.assertEqual(mixed.first.tolist(), [0, 2, 6])
+            self.assertEqual(mixed.row_env.tolist(), [0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+            self.assertEqual(mixed.N, 10)
+            self.assertIsNone(mixed.S)
+            self.assertEqual(alone.S, 4)
+            self.assertEqual(mixed.obs["spatial"].shape, (10, N_CHANNELS, 192, 256))
+            self.assertEqual(mixed.obs["players"].shape[1], 477)
+            rows = lambda obs, lo, hi: {k: v[lo:hi] for k, v in obs.items()}
+            in_mixed, in_alone = Scripted(seed=0), Scripted(seed=0)
+            for step in range(400):  # the 1-minute FFA game restarts twice; no-op seats end their game at once
+                a, b = np.zeros((10, 4), np.int64), np.zeros((8, 4), np.int64)
+                a[2:6] = in_mixed(rows(mixed.obs, 2, 6)).cpu().numpy()
+                b[4:8] = in_alone(rows(alone.obs, 4, 8)).cpu().numpy()
+                mixed.step(a)
+                alone.step(b)
+                if (step + 1) % 50 == 0:
+                    for k, v in rows(mixed.obs, 2, 6).items():
+                        self.assertTrue(torch.equal(v, alone.obs[k][4:8]), f"{k} at step {step + 1}")
+            self.assertGreaterEqual(mixed.episodes[1], 2, "the FFA game restarted")
+            self.assertEqual(mixed.episodes[1], alone.episodes[1])
+            self.assertTrue(all(e >= 1 for e in mixed.episodes), "every game restarted, at its own time")
+        finally:
+            mixed.close()
+            alone.close()
+
+    def test_units_paint_every_seat_of_their_own_game(self):
+        env = VecEnv.__new__(VecEnv)  # the attributes _add_units reads
+        env.device = torch.device("cpu")
+        env.E, env.N, env.P, env.H, env.W = 2, 6, 8, 4, 4
+        env.seats, env.first = np.array([2, 4]), np.array([0, 2])
+        env.building, env.zone_kind, env.transport = torch.tensor([0, -1]), torch.tensor([-1, -1]), 1
+        env.area = torch.full((2,), 64.0)
+        rel = torch.zeros(6, 8, dtype=torch.long)
+        rel[4, 5], rel[[2, 3, 5], 5] = 1, 3  # player 5: Self for row 4, Enemy for the rest of game 1
+        rel[2:, 7] = 3  # player 7 plays in game 0: game 1's rows must not paint its city
+        units = np.zeros(2, UNIT)
+        units["level"], units["owner"], units["cell"] = 1, (5, 7), (9, 3)
+        x = torch.zeros(6, N_CHANNELS, 16)
+        afford = torch.ones(6, UPGRADABLE, dtype=torch.bool)
+        buildings, upgradable = env._add_units(x, [(1, units[:1]), (0, units[1:])], rel, afford)
+        want = torch.zeros_like(x)
+        for row, r in ((2, 3), (3, 3), (4, 1), (5, 3)):
+            want[row, BUILDINGS + 4 * 0 + r - 1, 9] = 1  # a city (kind 0) by the row's own relation
+            want[row, LEVEL, 9] = 1 / 16
+        self.assertTrue(torch.equal(x, want))
+        self.assertEqual(upgradable.nonzero().tolist(), [[4, 9]])
+        self.assertEqual(buildings[:, 5, 0].tolist(), [0, 1])
+        self.assertEqual(buildings[:, 7, 0].tolist(), [1, 0])
+
+
+class ConfigTest(unittest.TestCase):
+    def test_frozen_evaluations_and_gates_derive_from_the_playlists(self):
+        self.assertEqual(frozen_eval_config("ranked1v1"), RANKED_1V1)
+        self.assertEqual(frozen_eval_config("hvn"), HVN)
+        ffa = frozen_eval_config("ffa")
+        self.assertEqual((ffa["seats"], ffa["difficulty"], ffa["timerMinutes"]), (1, "Hard", 30))
+        self.assertEqual(gate_config("ffa", "heldout"), {**ffa, "timerMinutes": 0, "maps": "heldout"})
+        self.assertIsNot(frozen_eval_config("hvn"), env_module.PLAYLISTS["hvn"], "a copy, not the playlist itself")
+        with unittest.mock.patch.dict(env_module.PLAYLISTS, {"hvn": {**HVN, "seats": 2}}):
+            self.assertEqual(gate_config("hvn", "seen")["seats"], 2)
 
 
 class QuantizeTest(unittest.TestCase):
@@ -274,21 +343,21 @@ class ChannelTest(unittest.TestCase):
                 want, shut = np.zeros(env.H * env.W, bool), np.zeros(env.H * env.W, bool)
                 for u in rec:
                     name = env.dims["unitTypes"][u["type"]]
-                    if name in BUILDING_TYPES[:UPGRADABLE] and rel[0][seat][u["owner"]] == 1:
-                        ok = u["level"] > 0 and types[0][seat][BUILD_OF[BUILDING_TYPES.index(name)]] > 0
+                    if name in BUILDING_TYPES[:UPGRADABLE] and rel[seat][u["owner"]] == 1:
+                        ok = u["level"] > 0 and types[seat][BUILD_OF[BUILDING_TYPES.index(name)]] > 0
                         (want if ok else shut)[u["cell"]] = True
                 got = obs["cell_mask"][seat, MAP_TYPES.index(13)].cpu().numpy()
                 cls.upgrade += [int((got != want).sum()), int(want.sum()), int((shut & ~want).sum())]
             n = int(np.isin(rec["type"], structures).sum())
             if cls.seen is None or n >= cls.seen["structures"]:  # keep the observation with the most structures
-                cls.seen = {"structures": n, "players": players[0].copy(), "rel": rel[0].copy(), "units": rec.copy(),
+                cls.seen = {"structures": n, "players": players.copy(), "rel": rel.copy(), "units": rec.copy(),
                             "spatial": obs["spatial"].cpu().numpy(),
                             "features": obs["players"][:, :, 17:].cpu().numpy(),
                             "cells": [t[:env.H * env.W].cpu().numpy() for t in (env.o1, env.n1, env.o2, env.n2)],
                             "area": float(env.area[0])}
             side = round(float(env.area[0]) ** 0.5)
             for seat in range(2):
-                want = new_channels(rec, rel[0][seat], env.dims["unitTypes"], side, env.H, env.W)
+                want = new_channels(rec, rel[seat], env.dims["unitTypes"], side, env.H, env.W)
                 got = obs["spatial"][seat, LEVEL:].reshape(N_CHANNELS - LEVEL, -1).cpu().numpy().astype(np.int64)
                 cls.new_error = max(cls.new_error, int(np.abs(got - np.clip(np.round(want * 64), 0, 255)).max()))
                 cls.zones += want[2:].reshape(3, 2, -1).any((1, 2))

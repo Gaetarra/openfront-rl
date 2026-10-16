@@ -76,11 +76,28 @@ def disk_cells(zx, zy, zr, side, H, W):
     return n, gy[n, i, 0] * W + gx[n, 0, j]
 
 
-# The Phase 1 gate setup, and ranked 1v1 games (the worker draws map, size, bots and timer from the official ranked 1v1
-# playlist, bridge/setups.ts; of the other fields only "seats" is used).
+# The Phase 1 gate setup, and the public playlists' games (the worker draws map, size, bots and timer from the official
+# playlist, bridge/setups.ts; of the other fields only "seats" is used, plus the ones the FFA and HVN configs set).
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
 RANKED_1V1 = {"map": "Australia", "compact": False, "nations": 0, "difficulty": "Medium", "bots": 400,
               "timerMinutes": 15, "seats": 2, "playlist": "ranked1v1"}
+# 4N: 4 learner seats against the map's nations (FFA: Medium or Hard, drawn per game), or against 4 Hard nations (Humans
+# vs Nations), on "training" maps, with a 30-minute timer. Mirrors bridge/testkit.ts FFA and HVN.
+FFA = {**RANKED_1V1, "playlist": "ffa", "seats": 4, "maps": "training", "difficulty": "Medium,Hard", "timerMinutes": 30}
+HVN = {**FFA, "playlist": "hvn", "difficulty": "Hard"}
+PLAYLISTS = {"ranked1v1": RANKED_1V1, "ffa": FFA, "hvn": HVN}
+
+
+def frozen_eval_config(setup):
+    """A frozen evaluation's games: one FFA seat against Hard nations; ranked 1v1 and Humans vs Nations as trained."""
+    if setup == "ffa":
+        return {**PLAYLISTS["ffa"], "seats": 1, "difficulty": "Hard"}
+    return dict(PLAYLISTS[setup])
+
+
+def gate_config(setup, maps):
+    """The gate's games: the public rules (no timer) on `maps` ("heldout" or "seen")."""
+    return {**frozen_eval_config(setup), "timerMinutes": 0, "maps": maps}
 
 
 class Worker:
@@ -146,7 +163,10 @@ class Worker:
 
 
 class VecEnv:
-    """E = workers x games_per_worker games with S seats each; N = E x S observation rows (env-major)."""
+    """E = workers x games_per_worker games; N = their seats in all, one observation row each. Rows are game-major: game
+    e owns rows first[e] .. first[e] + seats[e] - 1. `config`: one setup for every worker, or a list with one per
+    worker (the workers then share the grid and player table that fit all of them). S is the seats per game when
+    every game has the same number, else None."""
 
     def __init__(self, config, workers, games_per_worker, seed, device="cuda", episodes=None, log_dir=None,
                  full_frames=False, records=None, record=None):
@@ -157,13 +177,19 @@ class VecEnv:
         self.replay = records is not None
         if self.replay and len(records) < workers:
             raise ValueError(f"{len(records)} records cannot feed {workers} workers")
+        configs = list(config) if isinstance(config, list) else [config] * workers
+        if len(configs) != workers:
+            raise ValueError(f"{len(configs)} configs for {workers} workers")
+        if self.replay and any(c != configs[0] for c in configs):
+            raise ValueError("replay mode takes a single config")
+        mix = [c for i, c in enumerate(configs) if c not in configs[:i]]  # the distinct configs of the run
         self.episodes = list(episodes) if episodes is not None else [0] * self.E
         if log_dir is not None:
             Path(log_dir).mkdir(parents=True, exist_ok=True)
         self.workers = [Worker(w, Path(log_dir) / f"worker{w}.log" if log_dir is not None else None)
                         for w in range(workers)]
         for w, wk in enumerate(self.workers):
-            msg = {"cmd": "init", "config": config, "games": self.G, "seed": seed, "worker": w}
+            msg = {"cmd": "init", "config": configs[w], "mix": mix, "games": self.G, "seed": seed, "worker": w}
             if self.replay:
                 msg["replay"] = {"records": [str(r) for r in records[w::workers]]}
             else:
@@ -173,13 +199,19 @@ class VecEnv:
             wk.send(msg)
         replies = [wk.recv() for wk in self.workers]
         d = replies[0][0]["dims"]
+        if any(r[0]["dims"][k] != d[k] for r in replies for k in ("grid", "slots")):
+            raise ValueError("the workers' grids and player tables differ")
         self.H, self.W = d["grid"]  # padded by the worker to multiples of 16 (the CNN downsamples by 16)
-        self.P, self.S = d["slots"], d["seats"]
+        self.P = d["slots"]
         self.F, self.K, self.T = d["playerFeatures"], d["scalars"], d["acts"]
-        self.N = self.E * self.S
-        self.dims = {**d, "channels": N_CHANNELS, "playerFeatures": self.F + len(BUILDING_TYPES), "H": self.H,
-                     "W": self.W}
+        self.seats = np.repeat([r[0]["dims"]["seats"] for r in replies], self.G)  # [E]
+        self.first = np.cumsum(self.seats) - self.seats  # each game's first row
+        self.N = int(self.seats.sum())
+        self.S = int(self.seats[0]) if (self.seats == self.seats[0]).all() else None
         dev, hw = self.device, self.H * self.W
+        self.row_env = torch.from_numpy(np.repeat(np.arange(self.E), self.seats)).to(dev)  # [N]
+        self.dims = {**{k: v for k, v in d.items() if k != "seats"}, "channels": N_CHANNELS,
+                     "playerFeatures": self.F + len(BUILDING_TYPES), "H": self.H, "W": self.W}
         self.building = torch.tensor([BUILDING_TYPES.index(t) if t in BUILDING_TYPES else -1 for t in d["unitTypes"]],
                                      device=dev)
         self.transport = d["unitTypes"].index("Transport")
@@ -194,7 +226,7 @@ class VecEnv:
         # Replay mode: per game its record, players, their outcome (+1 winner, -1 otherwise) and windows left; per row
         # the label [type, cell, target, troops %] (type -1: a command outside the action set, -2: unmapped).
         self.labels = None
-        self.outcome = np.zeros((self.E, self.S), np.float32)
+        self.outcome = np.zeros((self.E, self.seats.max()), np.float32)
         self.left = np.zeros(self.E, np.int64)
         self.record_of = [""] * self.E
         self.seats_of = [[] for _ in range(self.E)]
@@ -203,14 +235,15 @@ class VecEnv:
     def send(self, actions=None):
         """Starts every worker on its next step (replay mode takes no actions); recv() collects it, so the caller can
         use the GPU meanwhile. actions: int array [N, 4] of [type, cell, target, troops %] with grid cell indexes, or [N, 8]
-        for two actions per decision (the bandwidth probe, PLAN 3B)."""
+        for two actions per decision (the bandwidth probe, PLAN 3B); each worker gets the rows of its games."""
         if self.replay:
             for wk in self.workers:
                 wk.send({"cmd": "step"})
             return
-        a = np.asarray(actions, dtype=np.int64).reshape(self.E, self.S, -1)  # 4 per action; the bandwidth probe sends 8
-        for w, wk in enumerate(self.workers):
-            wk.send({"cmd": "step", "actions": a[w * self.G:(w + 1) * self.G].tolist(), "full": self.full_frames})
+        a = np.split(np.asarray(actions, dtype=np.int64).reshape(self.N, -1), self.first[1:])  # one array per game;
+        for w, wk in enumerate(self.workers):  # 4 per action, the bandwidth probe sends 8
+            games = [g.tolist() for g in a[w * self.G:(w + 1) * self.G]]
+            wk.send({"cmd": "step", "actions": games, "full": self.full_frames})
 
     def recv(self):
         out = self._absorb([wk.recv() for wk in self.workers])
@@ -226,32 +259,34 @@ class VecEnv:
             wk.close()
 
     def _absorb(self, replies):
-        E, S, P, F, K, T = self.E, self.S, self.P, self.F, self.K, self.T
-        rewards = np.zeros((E, S), np.float32)
-        dones = np.zeros((E, S), np.float32)
-        invalid = np.zeros((E, S), bool)
-        players = np.empty((E, S, P, F), np.float32)
-        rel = np.empty((E, S, P), np.uint8)
-        scalars = np.empty((E, S, K), np.float32)
-        types = np.empty((E, S, T), bool)
-        attack = np.empty((E, S, P), bool)
-        retreat = np.empty((E, S, P), bool)
-        labels = np.zeros((E, S, 4), np.int64)
+        N, P, F, K, T = self.N, self.P, self.F, self.K, self.T
+        rewards = np.zeros(N, np.float32)
+        dones = np.zeros(N, np.float32)
+        invalid = np.zeros(N, bool)
+        players = np.empty((N, P, F), np.float32)
+        rel = np.empty((N, P), np.uint8)
+        scalars = np.empty((N, K), np.float32)
+        types = np.empty((N, T), bool)
+        attack = np.empty((N, P), bool)
+        retreat = np.empty((N, P), bool)
+        labels = np.zeros((N, 4), np.int64)
         cells, units, infos, resets = [], [], [], []
         e = 0
         for header, games in replies:
             for g, b in zip(header["games"], games):
+                n = int(self.seats[e])
+                seats = slice(self.first[e], self.first[e] + n)  # this game's rows
                 if g.get("done") and self.replay:
                     infos.append({"env": e, "record": g["finished"], "desync": g.get("desync", False),
                                   "error": g.get("error")})
                 elif g.get("done"):
-                    dones[e] = 1
-                    rewards[e] = g["rewards"]
+                    dones[seats] = 1
+                    rewards[seats] = g["rewards"]
                     infos += [{"env": e, "seat": s, "reward": g["rewards"][s], "rank": g["ranks"][s],
-                               "players": g["players"], "ticks": g["endTick"], "recorded": g.get("recorded")}
-                              for s in range(S)]
+                               "players": g["players"], "ticks": g["endTick"], "cut": g["cut"],
+                               "recorded": g.get("recorded")} for s in range(n)]
                 if self.replay:
-                    labels[e] = np.frombuffer(b["labels"], np.int32).reshape(S, 4)
+                    labels[seats] = np.frombuffer(b["labels"], np.int32).reshape(n, 4)
                     self.outcome[e] = g["outcome"]
                     self.left[e] = g["left"]
                     self.record_of[e] = g["record"]
@@ -263,21 +298,21 @@ class VecEnv:
                     self.terrain[e].zero_()
                     self.terrain[e][:, :terr.shape[1]] = torch.from_numpy(terr.astype(np.float32)).to(self.device)
                     self.area[e] = float(g["cellSize"]) ** 2
-                invalid[e] = g["invalid"]
+                invalid[seats] = g["invalid"]
                 cells.append((e, np.frombuffer(b["cells"], CELL)))
                 units.append((e, np.frombuffer(b["units"], UNIT)))
-                players[e] = np.frombuffer(b["players"], np.float32).reshape(S, P, F)
-                rel[e] = np.frombuffer(b["rel"], np.uint8).reshape(S, P)
-                scalars[e] = np.frombuffer(b["scalars"], np.float32).reshape(S, K)
-                types[e] = np.frombuffer(b["types"], np.uint8).reshape(S, T)
-                attack[e] = np.frombuffer(b["attack"], np.uint8).reshape(S, P)
-                retreat[e] = np.frombuffer(b["retreat"], np.uint8).reshape(S, P)
+                players[seats] = np.frombuffer(b["players"], np.float32).reshape(n, P, F)
+                rel[seats] = np.frombuffer(b["rel"], np.uint8).reshape(n, P)
+                scalars[seats] = np.frombuffer(b["scalars"], np.float32).reshape(n, K)
+                types[seats] = np.frombuffer(b["types"], np.uint8).reshape(n, T)
+                attack[seats] = np.frombuffer(b["attack"], np.uint8).reshape(n, P)
+                retreat[seats] = np.frombuffer(b["retreat"], np.uint8).reshape(n, P)
                 e += 1
         if self.replay:
-            self.labels = torch.from_numpy(labels.reshape(-1, 4)).to(self.device)
+            self.labels = torch.from_numpy(labels).to(self.device)
         self._apply_cells(resets, cells)
         obs = self._observe(players, rel, scalars, types, attack, retreat, units)
-        return obs, rewards.reshape(-1), dones.reshape(-1), infos, invalid.reshape(-1)
+        return obs, rewards, dones, infos, invalid
 
     def _apply_cells(self, resets, cells):
         hw, dev = self.H * self.W, self.device
@@ -300,8 +335,7 @@ class VecEnv:
         - "owners" (int16) and "owner_land" (uint8) [N, 2, H * W]: each cell's two largest owners and their shares of
           it in 64ths, for the model's per-player map features;
         - the scalars and the masks: 15 action types, 12 heat maps (MAP_TYPES), the attack and retreat pointers."""
-        N, S, P, hw, dev = self.N, self.S, self.P, self.H * self.W, self.device
-        row_env = torch.arange(N, device=dev) // S
+        N, P, hw, dev, row_env = self.N, self.P, self.H * self.W, self.device, self.row_env
         area = self.area[row_env][:, None]  # [N, 1]
         rel_t = torch.from_numpy(rel.reshape(N, P).astype(np.int64)).to(dev)
         pl = torch.from_numpy(players.reshape(N, P, self.F)).to(dev)
@@ -351,7 +385,8 @@ class VecEnv:
         }
 
     def _add_units(self, x, units, rel_t, afford):
-        """Paints each seat's units into x, and returns every player's buildings by type [E, P, len(BUILDING_TYPES)].
+        """Paints each seat's units into x (the rows of the unit's own game), and returns every player's buildings by
+        type [E, P, len(BUILDING_TYPES)].
         - By type and relation, a structure counts its level (under construction: 1), a transport its log troops / 10,
           a warship 1.
         - LEVEL and READY hold each structure's level (0 under construction) and its loaded missiles, / 16.
@@ -384,9 +419,10 @@ class VecEnv:
         value = torch.where(typ == self.transport, torch.log1p(troops) / 10, level.clamp(min=1))
         keep = kind >= 0
         buildings.index_put_((env[keep], owner[keep], kind[keep]), value[keep], accumulate=True)
-        for s in range(self.S):
-            row = env * self.S + s
-            r = rel_t[row, owner]
+        first, seats = (torch.as_tensor(a, dtype=torch.long, device=dev)[env] for a in (self.first, self.seats))
+        for s in range(int(self.seats.max())):
+            row = (first + s).clamp(max=self.N - 1)  # a game with fewer seats has no seat s: r = 0 drops its records
+            r = torch.where(seats > s, rel_t[row, owner], 0)
             k = keep & (r > 0)
             x.index_put_((row[k], BUILDINGS + 4 * kind[k] + r[k] - 1, cell[k]), value[k], accumulate=True)
             st = k & (kind < STRUCTURES)

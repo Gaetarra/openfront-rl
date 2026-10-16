@@ -1,7 +1,9 @@
 /**
  * Env worker: runs K training games for the Python trainer (trainer/env.py) over stdin/stdout.
  *
- * In:  u32 length + JSON: {cmd:"init", config, games, seed, worker, episodes?} starts K training games;
+ * In:  u32 length + JSON: {cmd:"init", config, mix?, games, seed, worker, episodes?} starts K training games of
+ *      `config`; `mix` lists every config of the run (this one included), and the grid and player table of the games
+ *      and of the reply's `dims` fit all of them (bridge/setups.ts shapeOf), while `dims.seats` stays this config's;
  *      {cmd:"init", config, replay:{records}, games, seed, worker} replays game records instead (behaviour cloning:
  *      every reply carries the seats' observations and labels, bridge/replay.ts); {cmd:"step", actions?, full?};
  *      {cmd:"close"}. "init" may be sent again to restart.
@@ -22,7 +24,7 @@ import { UNIT_TYPES } from "./frame";
 import { Blob, EnvConfig, EnvGame } from "./game";
 import { PLAYER_FEATURES, SCALARS } from "./obs";
 import { readRecord, RecordGame } from "./replay";
-import { gridFor, slotsFor } from "./setups";
+import { shapeOf } from "./setups";
 
 // stdout carries replies only; the game logs a lot through console.log/info/warn.
 console.log = console.info = console.warn = console.debug = () => {};
@@ -30,6 +32,7 @@ console.log = console.info = console.warn = console.debug = () => {};
 interface Init {
   cmd: "init";
   config: EnvConfig;
+  mix?: EnvConfig[];
   games: number;
   seed: string;
   worker: number;
@@ -48,6 +51,7 @@ interface Part {
 }
 
 let init: Init | null = null;
+let shape: ReturnType<typeof shapeOf>; // the grid and player table of this worker's games, set by "init"
 let games: EnvGame[] = [];
 let episodes: number[] = [];
 
@@ -57,7 +61,7 @@ let recordStarted = 0;
 
 /** A new training game; the first `record.games` games of this worker are recorded. */
 async function newGame(g: number): Promise<EnvGame> {
-  const env = await EnvGame.create(init!.config, seedOf(g));
+  const env = await EnvGame.create(init!.config, seedOf(g), shape);
   if (init!.record !== undefined && recordStarted < init!.record.games) {
     env.record();
     recordStarted++;
@@ -80,7 +84,7 @@ async function nextRecord(skip: boolean): Promise<RecordGame> {
     }
     const file = files[order[next++]];
     try {
-      const rg = await RecordGame.create(readRecord(file), gridFor(init!.config)[1], slotsFor(init!.config));
+      const rg = await RecordGame.create(readRecord(file), shape.grid[1], shape.slots);
       if (rg.env.seats.length !== init!.config.seats) throw new Error(`${rg.env.seats.length} players`);
       const skipped = skip ? pick.nextInt(0, Math.max(1, Math.floor(rg.left / 2))) : 0;
       for (let i = 0; i < skipped && !rg.done; i++) rg.advance();
@@ -155,8 +159,8 @@ const fresh = (g: number, extra: Record<string, unknown>): Part =>
 
 function dims(cfg: EnvConfig): Record<string, unknown> {
   return {
-    grid: gridFor(cfg),
-    slots: slotsFor(cfg),
+    grid: shape.grid,
+    slots: shape.slots,
     seats: cfg.seats,
     playerFeatures: PLAYER_FEATURES,
     scalars: SCALARS,
@@ -191,6 +195,7 @@ function encode(parts: Part[], dimsInfo: Record<string, unknown> | null): Buffer
 async function handle(msg: Init | Step): Promise<Buffer> {
   if (msg.cmd === "init") {
     init = msg;
+    shape = shapeOf(msg.mix ?? [msg.config]);
     if (msg.replay !== undefined) {
       if (msg.replay.records.length === 0) throw new Error("replay mode needs records");
       pick = new PseudoRandom(simpleHash(`${msg.seed}-w${msg.worker}`));
