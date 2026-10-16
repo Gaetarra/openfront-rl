@@ -1563,6 +1563,30 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
           average, and ≥ 0.55 passes (2.3 SE above even). It replaces "a league rating that still rises over the last
           5 snapshots": that trend is too noisy to read (above), and consecutive averages share 4 of their 5
           snapshots.
+        - **Results (2026-10-15 16:13 to 2026-10-16 11:29, one sitting, 4,697 training games):**
+          - The averages beat the lr4a average **0.656 ± 0.018** pooled over the 16 frozen evaluations (704 games,
+            ~+110 Elo), the 3B clone 0.962 ± 0.007 and the Phase 2 PPO bot 0.994 ± 0.003. `--eval-games` counts the
+            whole panel: each member got ~44 of the 128 games, so single points swing ±0.07 (0.57–0.75 after update
+            1,000).
+          - Against the lr4a average by quarter: 0.625 (updates 250–1,000), 0.682 (1,250–2,000), 0.665 (2,250–3,000),
+            0.653 (3,250–4,000), each ± 0.036. The gain came by update ~1,250; the last 2,750 updates (~13 h) added
+            nothing measurable against the start.
+          - The raw learner never beat the start in its training games: 0.478 over 728 games (0.47, 0.45, 0.57, 0.43 in
+            chronological quarters), while its averages beat the start 0.66. It won 0.391 against the run's averages
+            (79% of its games) and 0.948 against the four fixed bots (5%). The league's gain shows only through the
+            averaging, as in lr4a (snapshots 0.778 against the clone, their average 0.945).
+          - The training curve read 0.17–0.59 after update 500 (median 0.31 over the last 1,000 updates). PFSP gave the
+            start and the averages ~99% of the weight, and the curve (the last 200 games, ~170 updates) follows the
+            opponent picked every 25 updates.
+          - The lr4a average was in the pool (728 training games against it), so 0.66 is against a known opponent. The
+            held-out tests are 4N's nations and, later, humans.
+          - Gate 4A: the final average meets both match bars (0.977 against the 3B clone, 0.975 against the Phase 2 PPO
+            bot; 44 and 40 games).
+          - **Third bar (2026-10-16, 15:30–16:31, `runs/gate4a.cmd`):** the final average beat the lr4a average **0.592 ±
+            0.022** over 512 fixed games (seats 0.586 / 0.598), 1.9 SE above the 0.55 bar: **Gate 4A passes**, and 4N
+            starts from `checkpoints/league4a2/avg004000.pt`.
+          - The edge is ~+65 Elo, below the panel's pooled 0.656 (2.3 SE apart). The panel played 44 games per point on
+            another fixed set of games, so the 512 games are the number to trust.
     - Later, each measured on its own: more games per update with fewer steps each (Phase 2's open question), a lower
       KL (only while the frozen panel improves), and lever 4 if more opponents at once are wanted.
 - **4B, ranked 2v2** (after 3C; both come after 4N since 2026-10-15, below): teammates are copies of the current

@@ -203,12 +203,14 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   - Each frozen evaluation is appended to `runs/<run>/panel.jsonl`, and a new run refuses a `runs/<run>` that already
     holds one.
   - Training waits during an evaluation: ~18 min at the default 128 games, ~9 min at 64. `--eval-games` can change on a
-    resume.
+    resume. It counts the whole panel's games: 128 over three members gives each ~43, so a single point swings ±0.07;
+    pool several evaluations before reading a trend.
 - The training win-rate curve is a trend line, not a strength measure: it lags ~170 updates and can be off either way.
   It read 0.84 where Gate B gave 0.63 (Phase 2: the learner adapting to the games in progress). In 4A Stage 0 it read
   0.57 where the frozen check gave 0.74, but that snapshot was a lucky one: at lr 1e-4 Stage 0's snapshots swung from
   0.20 to 0.77 against the clone, most near 0.5 (PLAN 4A, "Learning test"). Compare snapshots with `trainer.eval` on
-  the same fixed seeds, and never judge a run by a single snapshot.
+  the same fixed seeds, and never judge a run by a single snapshot. In a league it mostly tracks PFSP's current
+  opponent: league v2's read 0.17–0.59 while its averages beat the start 0.66 (PLAN 4A, "League v2").
 - PPO with a v4 network runs at lr 2.5e-5: at 1e-4 its updates were mostly noise, so snapshot strength swung far
   beyond the evaluations' noise (PLAN 4A, "Learning test").
 - Training runs and `trainer.watch` all serve on port 8787: stop `trainer.watch` before starting a run. A running
