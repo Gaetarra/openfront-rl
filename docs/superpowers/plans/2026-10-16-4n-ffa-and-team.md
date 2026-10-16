@@ -287,7 +287,8 @@ test("a mixed run shares the ranked grid and the largest player table", () => {
     - The ranks are `[2, 2, 2, 2]` and the rewards `[-1, -1, -1, -1]`.
   - **"a game without a timer is observed with a 30-minute horizon":** FFA with `timerMinutes: 0`.
     - `env.horizonMinutes === 30`;
-    - after 300 ticks, seat 0's scalar 0 equals `ticks / (200 + 30 * 600)` within 1e-6 (read from the `scalars` blob).
+    - after 150 ticks with `tickWith([])` (inside the spawn phase: seats that never spawn end the game at tick 200),
+      seat 0's scalar 0 equals `150 / (200 + 30 * 600)` within 1e-6 (read from the `scalars` blob).
 
 - [ ] **Step 2: Run them to see them fail.**
   - Run (game dir): `node --import tsx --test ../../bridge/game.test.ts`
@@ -502,10 +503,11 @@ def test_each_setup_keeps_its_own_window_and_it_survives_a_restart(self):
 
 - [ ] **Step 1: Write the failing tests.**
   - **`test_eval`, "the gate's setups play the public rules with every seat policy A":**
-    - patch `trainer.eval.play` with a mock;
-    - `main(["--setup", "hvn", "--a", "x.pt"])` calls it with specs `["x.pt"] * 4` and config
-      `gate_config("hvn", "heldout")` (`timerMinutes` 0);
-    - `--setup ffa --maps seen` calls it with `["x.pt"]` and maps `"seen"`.
+    - patch `trainer.eval.play` with a mock returning `{"recorded": [], "win_rate": 0.5}`, and `trainer.eval.RESULTS`
+      with a temporary folder;
+    - `main(["--setup", "hvn", "--a", "random"])` calls it with specs `["random"] * 4` and config
+      `gate_config("hvn", "heldout")` (`timerMinutes` 0). A checkpoint path would be loaded by `replay_dir`;
+    - `--setup ffa --maps seen` calls it with `["random"]` and maps `"seen"`.
   - **`test_eval`, "Humans vs Nations seats share one result per game":**
     - `play(["random"] * 4, {**HVN, "timerMinutes": 1}, 2, 1, 2)`;
     - `episodes == 2` and `0 <= cut_share <= 1`.
