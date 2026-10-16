@@ -8,7 +8,8 @@ import {
   UnitType,
 } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { Act } from "./actions";
+import { GameConfig } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { Act, N_ACTS } from "./actions";
 import { CellFrame } from "./frame";
 import { EnvConfig, EnvGame, seatPlayers } from "./game";
 import { nationCount } from "./maps";
@@ -149,10 +150,15 @@ test("ranked games draw from the playlist and share the ranked grid", async () =
   assert.match(env.start.gameID, /^[A-Za-z0-9]{8}$/);
 });
 
-/** A public game on a fixed map and size, started from its start info as EnvGame.create does. */
-function publicGame(cfg: EnvConfig, gameMap: GameMapType, gameMapSize: GameMapSize): Promise<EnvGame> {
+/** A public game on a fixed map and size, started as EnvGame.create starts it; `patch` overrides config fields. */
+function publicGame(
+  cfg: EnvConfig,
+  gameMap: GameMapType,
+  gameMapSize: GameMapSize,
+  patch: Partial<GameConfig> = {},
+): Promise<EnvGame> {
   const bots = gameMapSize === GameMapSize.Compact ? 100 : 400;
-  const config = { ...publicConfig(cfg, new PseudoRandom(1)), gameMap, gameMapSize, bots };
+  const config = { ...publicConfig(cfg, new PseudoRandom(1)), gameMap, gameMapSize, bots, ...patch };
   const start = { gameID: gameIdOf("nations"), lobbyCreatedAt: 0, config, players: seatPlayers(cfg.seats) };
   return EnvGame.fromStart(start, shapeOf([cfg]).grid[1], slotsFor(cfg), "nations:latency");
 }
@@ -174,6 +180,119 @@ test("public games get the game's own nations, and the tribes fit the player tab
   assert.equal(ffa.slots, 477);
   assert.equal(Math.max(...players.map((p) => p.smallID())), ffa.slots - 1); // 4 seats, 72 nations, 400 tribes: a full table
   ffa.observe(true);
+});
+
+/** A quick public game: Onion, Compact, with a 1-minute timer unless `timerMinutes` says otherwise. */
+const quickGame = (cfg: EnvConfig, timerMinutes = 1, patch: Partial<GameConfig> = {}) =>
+  publicGame({ ...cfg, timerMinutes }, GameMapType.Onion, GameMapSize.Compact, patch);
+
+/** Random legal play for every seat until the game ends or `maxSteps` pass. */
+function playRandom(env: EnvGame, rnd: PseudoRandom, maxSteps: number): void {
+  const cells: number[] = [];
+  env.game.forEachTile((t) => {
+    if (env.game.isLand(t) && !env.game.isImpassable(t)) cells.push(env.frame.cellOf(t));
+  });
+  const pick = (mask: Uint8Array) => {
+    const legal = [...mask.keys()].filter((i) => mask[i] === 1);
+    return legal[rnd.nextInt(0, legal.length)];
+  };
+  const P = env.slots;
+  for (let steps = 0; !env.done && steps < maxSteps; steps++) {
+    const blobs = env.observe(steps === 0);
+    const types = blob(blobs, "types");
+    const attack = blob(blobs, "attack");
+    env.step(
+      env.seats.map((_, i) => {
+        const type = pick(types.subarray(i * N_ACTS, (i + 1) * N_ACTS));
+        const target = type === Act.Attack ? pick(attack.subarray(i * P, (i + 1) * P)) : 0;
+        return [type, cells[rnd.nextInt(0, cells.length)], target, rnd.nextInt(1, 101)];
+      }),
+    );
+  }
+}
+
+/** No-op decisions for every seat until the game ends: the steps it took. */
+function playNoops(env: EnvGame, maxSteps: number): number {
+  let steps = 0;
+  while (!env.done && steps < maxSteps) {
+    env.step(env.seats.map(() => [Act.Noop, 0, 0, 0]));
+    steps++;
+  }
+  return steps;
+}
+
+test("an FFA game ends with every seat ranked among the seats and nations", async () => {
+  const env = await quickGame(FFA);
+  playRandom(env, new PseudoRandom(5), 400);
+  assert.ok(env.done, "game ended");
+  const n = 4 + nationsOf(env).length;
+  assert.ok(n > 4, "the map has nations");
+  assert.equal(env.nPlayers, n);
+  env.ranks.forEach((rank, i) => {
+    assert.ok(rank >= 1 && rank <= n, `rank ${rank}`);
+    assert.equal(env.rewards[i], rewardOf(rank, n));
+  });
+});
+
+test("four FFA seats that never spawn finish last together", async () => {
+  const env = await quickGame(FFA);
+  const steps = playNoops(env, 100);
+  const n = 4 + nationsOf(env).length;
+  assert.ok(env.done && steps <= 41, `steps ${steps}`);
+  assert.deepEqual(env.ranks, [n, n, n, n]);
+  assert.deepEqual(env.rewards, [-1, -1, -1, -1]);
+});
+
+test("a Humans vs Nations team shares its result", async () => {
+  const env = await quickGame(HVN);
+  playRandom(env, new PseudoRandom(5), 400);
+  assert.ok(env.done, "game ended");
+  assert.equal(env.nPlayers, 2);
+  assert.equal(new Set(env.rewards).size, 1);
+  assert.ok([1, -1].includes(env.rewards[0]), `reward ${env.rewards[0]}`);
+});
+
+test("a Humans vs Nations team that never spawns loses together", async () => {
+  const env = await quickGame(HVN);
+  playNoops(env, 100);
+  assert.ok(env.done);
+  assert.deepEqual(env.ranks, [2, 2, 2, 2]);
+  assert.deepEqual(env.rewards, [-1, -1, -1, -1]);
+});
+
+test("a Humans vs Nations win is a win for every seat of the team", async () => {
+  const env = await quickGame(HVN);
+  env.game.setWinner(ColoredTeams.Humans, env.game.stats().stats());
+  env.step(env.seats.map(() => [Act.Noop, 0, 0, 0]));
+  assert.ok(env.done);
+  assert.deepEqual(env.ranks, [1, 1, 1, 1]);
+  assert.deepEqual(env.rewards, [1, 1, 1, 1]);
+});
+
+test("a game without a timer is observed with a 30-minute horizon", async () => {
+  const env = await quickGame(FFA, 0);
+  assert.equal(env.horizonMinutes, 30);
+  for (let t = 0; t < 150; t++) env.tickWith([]); // inside the spawn phase: the game is still on
+  const scalars = blob(env.observe(true), "scalars");
+  assert.ok(Math.abs(new Float32Array(scalars.buffer, scalars.byteOffset, 1)[0] - 150 / (200 + 30 * 600)) < 1e-6);
+});
+
+test("the backstop marks a game cut only when nobody won and a seat is still in", async () => {
+  // One seat alone on the map: nothing kills it and it never expands, so only the clock can end the game.
+  const alone = { nations: "disabled", bots: 0 } as const;
+  for (const [timerMinutes, cut, minutes] of [[0, true, 61], [1, false, 1]] as const) {
+    const env = await quickGame(FFA, timerMinutes, alone);
+    const spawn = spawnCell(env);
+    let steps = 0;
+    while (!env.done && steps < 8000) {
+      env.step([[steps === 2 ? Act.Spawn : Act.Noop, spawn, 0, 0], ...[1, 2, 3].map(() => [Act.Noop, 0, 0, 0])]);
+      steps++;
+    }
+    assert.ok(env.done, "game ended");
+    assert.equal(env.cut, cut, `timer ${timerMinutes}`);
+    assert.equal(env.game.getWinner() === null, cut);
+    assert.ok(env.game.ticks() >= env.game.config().numSpawnPhaseTurns() + minutes * 600);
+  }
 });
 
 test("a game created with a run's shape uses its grid and player table", async () => {

@@ -50,6 +50,9 @@ export interface EnvConfig {
   maps?: "training" | "heldout" | "seen";
 }
 
+/** The game length (minutes) a game without a timer is observed with: progress and time left are read against it. */
+export const NO_TIMER_HORIZON = 30;
+
 /** Ticks per agent decision (PLAN decision 11). */
 export const STEP_TICKS = 5;
 
@@ -68,6 +71,8 @@ export class EnvGame {
   ranks: number[] = [];
   /** Non-bot players in the game: the n of the reward formula. */
   nPlayers = 0;
+  /** The backstop ended the game and nobody had won (set with `done`). */
+  cut = false;
   /** Per seat: its last action could not be applied and was dropped. */
   invalid: boolean[];
   private turn = 0;
@@ -100,8 +105,9 @@ export class EnvGame {
     return this.sim.hashTick;
   }
 
-  get timerMinutes(): number {
-    return this.start.config.maxTimerValue ?? 60;
+  /** The game length the observations measure progress and time left against. */
+  get horizonMinutes(): number {
+    return this.start.config.maxTimerValue ?? NO_TIMER_HORIZON;
   }
 
   /**
@@ -253,7 +259,7 @@ export class EnvGame {
       encodeSeat(
         this.game,
         seat,
-        this.timerMinutes,
+        this.horizonMinutes,
         this.frame.cs,
         m.attack,
         players.subarray(i * P * PLAYER_FEATURES, (i + 1) * P * PLAYER_FEATURES),
@@ -285,13 +291,18 @@ export class EnvGame {
     });
   }
 
-  /** The game ends at a winner, when every seat is dead or never spawned, or 1 min after the timer as a backstop. */
+  /**
+   * The game ends at a winner, when every seat is dead or never spawned, or 1 min after the timer as a backstop (61 min
+   * without a timer), which is a cut game when nobody won and a seat was still in.
+   */
   private checkDone(): void {
     const g = this.game;
     const out = (s: Player) => !g.inSpawnPhase() && (!s.hasSpawned() || !s.isAlive());
-    const backstop = g.ticks() >= g.config().numSpawnPhaseTurns() + (this.timerMinutes + 1) * 600;
-    if (g.getWinner() === null && !this.seats.every(out) && !backstop) return;
+    const backstop = g.ticks() >= g.config().numSpawnPhaseTurns() + ((this.start.config.maxTimerValue ?? 60) + 1) * 600;
+    const over = this.seats.every(out);
+    if (g.getWinner() === null && !over && !backstop) return;
     this.done = true;
+    this.cut = backstop && g.getWinner() === null && !over;
     const standings = this.seats.map((s) => seatStanding(g, s));
     this.nPlayers = standings[0].n;
     this.ranks = standings.map((s) => s.rank);

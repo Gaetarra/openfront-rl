@@ -107,6 +107,7 @@ test("a finished game is replaced by the next episode in the same reply", async 
   assert.equal(g.episode, 1);
   assert.deepEqual(g.ranks, [4]);
   assert.deepEqual(g.rewards, [-1]);
+  assert.equal(g.cut, false);
   assert.equal(g.blobs[0][0], "terrain");
 });
 

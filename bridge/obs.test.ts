@@ -15,7 +15,7 @@ test("seat view: self, enemies, unowned land row and bounded scalars", async () 
   const rel = new Uint8Array(P);
   const scalars = new Float32Array(SCALARS);
   const attack = attackMask(env.game, seat, P);
-  encodeSeat(env.game, seat, env.timerMinutes, env.frame.cs, attack, players, rel, scalars);
+  encodeSeat(env.game, seat, env.horizonMinutes, env.frame.cs, attack, players, rel, scalars);
   const me = seat.smallID();
   assert.equal(rel[me], Rel.Self);
   assert.deepEqual([...rel].filter((r) => r === Rel.Enemy).length, 3);
@@ -37,7 +37,7 @@ test("scalars hold the gold against each build's current cost and the seat's loa
   const P = env.slots;
   const scalars = new Float32Array(SCALARS);
   const attack = attackMask(env.game, seat, P);
-  encodeSeat(env.game, seat, env.timerMinutes, env.frame.cs, attack, new Float32Array(P * PLAYER_FEATURES),
+  encodeSeat(env.game, seat, env.horizonMinutes, env.frame.cs, attack, new Float32Array(P * PLAYER_FEATURES),
     new Uint8Array(P), scalars);
   const gold = Number(seat.gold());
   [...BUILDS.values()].forEach((unit, i) => {

@@ -7,7 +7,8 @@
  *      {cmd:"close"}. "init" may be sent again to restart.
  * Out: u32 size + u32 header length + header JSON + blobs. The header lists each game's blobs as [name, byteLength]
  *      in the order they follow. A finished game is replaced at once by the next episode: its reply has done and
- *      reset set, the finished game's rewards and ranks, and the new game's terrain and full frame.
+ *      reset set, the finished game's rewards, ranks and `cut` (the backstop ended it, nobody won), and the new game's
+ *      terrain and full frame.
  * Game seeds are `${seed}-w${worker}-g${game}-e${episode}`.
  * Replay mode cycles through the worker's records in a seeded order; the first record of each slot starts at a random
  * window, so the slots sit at different game phases.
@@ -229,6 +230,7 @@ async function handle(msg: Init | Step): Promise<Buffer> {
       done: true,
       rewards: env.rewards,
       ranks: env.ranks,
+      cut: env.cut,
       players: env.nPlayers,
       endTick: env.game.ticks(),
       hash: env.hash,
