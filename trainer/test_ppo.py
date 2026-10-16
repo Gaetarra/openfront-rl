@@ -11,8 +11,8 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 from trainer.env import FFA, HVN, ONION, ROOT
 from trainer.model import PolicyV1
-from trainer.ppo import (HostRows, Outcomes, cap_binds, gae, main, mix_of, pack_bits, parse_args, parser, resume_args,
-                         run_info, seat_rows, unpack_bits)
+from trainer.ppo import (MAY_CHANGE, HostRows, Outcomes, cap_binds, gae, main, mix_of, pack_bits, parse_args, parser,
+                         resume_args, run_info, seat_rows, unpack_bits)
 
 
 class RunInfoTest(unittest.TestCase):
@@ -44,6 +44,10 @@ class RunInfoTest(unittest.TestCase):
         self.assertEqual(mixed["Learner seat"], "ranked1v1: one of 2, in turn; ffa: all 4; hvn: all 4")
         self.assertTrue(mixed["Against"].startswith("ranked1v1: a league of frozen policies"))
         self.assertTrue(mixed["Against"].endswith("ffa: the game's own nations; hvn: the game's own nations"))
+        league = run_info(parse_args(["--mix", "ranked1v1=1", "ffa=1", "hvn=1", "--league", "a.pt", "--panel", "a.pt", "b.pt",
+                                      "--eval-every", "500", "--eval-games-public", "16"]))
+        self.assertEqual(league["Frozen evaluations"], "128 games against 2 policies every 500 updates, and 16 games of "
+                                                       "each of ffa, hvn against the nations")
 
     def test_a_mix_names_playlists_and_counts_of_at_least_one_worker(self):
         self.assertEqual(mix_of(parse_args(["--mix", "ranked1v1=2", "ffa=3"])), {"ranked1v1": 2, "ffa": 3})
@@ -56,7 +60,7 @@ class ResumeArgsTest(unittest.TestCase):
     SAVED = vars(parse_args(["--run", "r", "--setup", "ranked1v1", "--lr", "1e-4", "--kl-coef", "0.2"]))
 
     def resume(self, *flags):
-        return resume_args(parser(), ["--run", "r", "--resume", *flags], self.SAVED, ("updates", "kl_coef"))
+        return resume_args(parser(), ["--run", "r", "--resume", *flags], self.SAVED, MAY_CHANGE)
 
     def test_a_resume_keeps_the_runs_settings(self):
         a = self.resume("--port", "0", "--updates", "9")
@@ -64,6 +68,11 @@ class ResumeArgsTest(unittest.TestCase):
 
     def test_a_given_kl_coef_replaces_the_runs(self):
         self.assertEqual(self.resume("--kl-coef", "0.05").kl_coef, 0.05)
+
+    def test_the_evaluation_settings_may_change(self):
+        a = self.resume("--eval-every", "500", "--eval-games-public", "8")
+        self.assertEqual((a.eval_every, a.eval_games_public), (500, 8))
+        self.assertEqual((self.resume().eval_every, self.resume().eval_games_public), (250, 32), "older runs get defaults")
 
     def test_flags_a_resume_would_ignore_are_refused(self):
         with self.assertRaisesRegex(SystemExit, r"--lr would be ignored.*--init checkpoints/r/latest\.pt"):
@@ -259,6 +268,11 @@ class SmokeTest(unittest.TestCase):
         for d in ("checkpoints", "runs"):
             shutil.rmtree(ROOT / d / self.RUN, ignore_errors=True)
 
+    def test_evaluations_come_at_a_multiple_of_the_snapshots(self):
+        for bad in ("0", "100", "300"):
+            with self.assertRaisesRegex(SystemExit, "--eval-every must be a multiple of 250"):
+                main(["--run", self.RUN, "--eval-every", bad])
+
     def test_train_save_and_resume(self):
         common = ["--run", self.RUN, "--workers", "1", "--games-per-worker", "2", "--steps", "16",
                   "--minibatches", "2", "--epochs", "1", "--port", "0", "--timer", "1"]
@@ -354,18 +368,30 @@ class SmokeTest(unittest.TestCase):
         torch.save({"model": net.state_dict(), "args": {"widths": "64,128,192"}}, init)
         playlists = {"ranked1v1": {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1},
                      "ffa": {**FFA, "timerMinutes": 1}, "hvn": {**HVN, "timerMinutes": 1}}
-        with mock.patch.dict("trainer.env.PLAYLISTS", playlists):
+        with mock.patch.dict("trainer.env.PLAYLISTS", playlists), mock.patch("trainer.ppo.SNAPSHOT", 2):
             main(["--run", self.RUN, "--mix", "ranked1v1=1", "ffa=1", "hvn=1", "--games-per-worker", "1", "--steps", "96",
                   "--minibatches", "2", "--epochs", "1", "--port", "0", "--init", str(init), "--opponent", str(init),
-                  "--updates", "4"])
-            main(["--run", self.RUN, "--resume", "--port", "0", "--updates", "5"])
+                  "--panel", str(init), "--eval-every", "4", "--eval-games", "2", "--eval-games-public", "1",
+                  "--save-every", "1", "--updates", "4"])
+            main(["--run", self.RUN, "--resume", "--port", "0", "--updates", "5", "--eval-every", "6",
+                  "--eval-games-public", "2"])
         state = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
         self.assertEqual(state["update"], 5)
         self.assertEqual(state["global_step"], 5 * 96 * 9, "1 + 4 + 4 learner rows")
         self.assertEqual((state["args"]["mix"], state["args"]["workers"]), (["ranked1v1=1", "ffa=1", "hvn=1"], 3))
+        self.assertEqual((state["args"]["eval_every"], state["args"]["eval_games_public"]), (6, 2),
+                         "a resume may change both")
+        log = (ROOT / "runs" / self.RUN / "panel.jsonl").read_text(encoding="utf-8")
+        evals = [json.loads(line) for line in log.splitlines()]
+        self.assertEqual([e["update"] for e in evals], [0, 4], "every --eval-every updates, --init's first")
+        for e in evals:
+            self.assertEqual(sorted(e["nations"]), ["ffa", "hvn"], "frozen games against the nations, per setup")
+            self.assertEqual([e["nations"][s]["episodes"] for s in ("ffa", "hvn")], [3, 3])
+            self.assertTrue(all(0 <= n["cut_share"] <= 1 for n in e["nations"].values()))
         logs = EventAccumulator(str(ROOT / "runs" / self.RUN))
         logs.Reload()
         tags = logs.Tags()["scalars"]
+        self.assertEqual([len(logs.Scalars(f"eval/nations_{s}")) for s in ("ffa", "hvn")], [2, 2])
         for tag in ("setups/win_rate/ranked1v1", "setups/win_rate/ffa", "setups/win_rate/hvn", "setups/cap_binds/ffa",
                     "setups/dead_share/hvn", "actions/hvn/attack", "actions/attack"):
             self.assertIn(tag, tags)

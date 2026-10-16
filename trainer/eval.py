@@ -3,9 +3,12 @@
   .venv/Scripts/python -m trainer.eval --a checkpoints/bc/latest.pt --b scripted      (ranked 1v1, 256 games)
   .venv/Scripts/python -m trainer.eval --a checkpoints/ppo/latest.pt --b checkpoints/bc/latest.pt
   .venv/Scripts/python -m trainer.eval --setup onion --a random                        (Phase 1: one seat vs 3 nations)
+  .venv/Scripts/python -m trainer.eval --setup ffa --a checkpoints/ppo/latest.pt --maps seen   (4N: one seat vs nations)
 
 A policy is "random", "scripted" or a checkpoint path. The results are the first policy's; in 2-seat setups the two
-policies swap seats from one game slot to the next. Every result is printed and saved to runs/eval/<date>-<time>.json.
+policies swap seats from one game slot to the next. The setups ffa and hvn (4N) play the public rules, no timer, on
+--maps: FFA with policy A in one seat against the map's Hard nations, Humans vs Nations with it in all four (--b is not
+used). Every result is printed and saved to runs/eval/<date>-<time>.json.
 """
 import argparse
 import datetime
@@ -17,10 +20,11 @@ import numpy as np
 import torch
 
 from trainer.control import REPLAYS
-from trainer.env import ONION, RANKED_1V1, VecEnv, game_commit
+from trainer.env import ONION, RANKED_1V1, VecEnv, game_commit, gate_config
 from trainer.model import ATTACK, BOAT, BUILD, RETREAT, SPAWN, ActionDist, RandomPolicy, load_net
 
 SETUPS = {"onion": ONION, "ranked1v1": RANKED_1V1}
+GATES = ("ffa", "hvn")  # Gate 4N's games, from trainer.env.gate_config
 RESULTS = Path(__file__).resolve().parents[1] / "runs" / "eval"  # every match's result, as runs/score/ for BC
 TROOP_TYPES = [ATTACK, BOAT, RETREAT]  # the two kinds of action the bins would split (PLAN decision 11)
 GOLD_TYPES = list(range(BUILD, RETREAT))  # the nine builds and upgrade
@@ -34,8 +38,10 @@ def summarize(results):
     se = lambda v: float(v.std(ddof=1) / np.sqrt(n)) if n > 1 else float("nan")
     seat = np.array([r.get("seat", 0) for r in results])
     by_seat = {f"win_rate_seat{s}": float(win[seat == s].mean()) for s in np.unique(seat)} if len(set(seat)) > 1 else {}
+    cut = np.array([r.get("cut", False) for r in results], float)  # games the env's backstop ended, decided by tiles
     return {"episodes": n, "win_rate": float(win.mean()), "win_rate_se": se(win), **by_seat,
-            "mean_reward": float(reward.mean()), "mean_reward_se": se(reward), "mean_rank": float(rank.mean())}
+            "mean_reward": float(reward.mean()), "mean_reward_se": se(reward), "mean_rank": float(rank.mean()),
+            "cut_share": float(cut.mean())}
 
 
 def label(spec):
@@ -249,7 +255,10 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--a", required=True, help="the scored policy: random, scripted or a checkpoint path")
     p.add_argument("--b", help="its opponent in 2-seat setups")
-    p.add_argument("--setup", choices=sorted(SETUPS), default="ranked1v1")
+    p.add_argument("--setup", choices=[*sorted(SETUPS), *GATES], default="ranked1v1")
+    p.add_argument("--maps", choices=("heldout", "seen", "training"),
+                   help="the maps of --setup ffa and hvn (default heldout): Gate 4N's 4 held-out maps, 4 seen ones, or "
+                        "training's whole list")
     p.add_argument("--episodes", type=int, default=256)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--games-per-worker", type=int, default=4)
@@ -260,15 +269,21 @@ def main(argv=None):
     p.add_argument("--a-two-bins", action="store_true",
                    help="policy A takes a troop and a gold action per decision (the bandwidth test's upward probe)")
     a = p.parse_args(argv)
-    config = SETUPS[a.setup]
+    if a.setup in GATES:
+        a.maps = a.maps or "heldout"
+        config = gate_config(a.setup, a.maps)
+    elif a.maps:
+        p.error("--maps applies to --setup ffa and hvn")
+    else:
+        config = SETUPS[a.setup]
     if config["seats"] == 2 and a.b is None:
         p.error("--b is required in 2-seat setups")
-    specs = [a.a, a.b][:config["seats"]]
-    folder = replay_dir(specs)
+    specs = [a.a] * config["seats"] if a.setup in GATES else [a.a, a.b][:config["seats"]]
+    folder = replay_dir(specs[:1] if a.setup in GATES else specs)  # one policy in every seat: one name, one load
     record = {"dir": str(folder), "gitCommit": game_commit(), "games": a.record} if a.record > 0 else None
     result = play(specs, config, a.episodes, a.workers, a.games_per_worker, seed=a.seed, record=record,
                   a_cooldown=a.a_cooldown, a_two_bins=a.a_two_bins)
-    text = json.dumps({"a": a.a, "b": a.b, "setup": a.setup, "seed": a.seed, "a_cooldown": a.a_cooldown,
+    text = json.dumps({"a": a.a, "b": a.b, "setup": a.setup, "maps": a.maps, "seed": a.seed, "a_cooldown": a.a_cooldown,
                        "a_two_bins": a.a_two_bins, **result}, indent=2)
     out = RESULTS / f"{datetime.datetime.now():%Y%m%d-%H%M%S}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

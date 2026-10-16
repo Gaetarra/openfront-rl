@@ -23,12 +23,13 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 from trainer.control import Control, serve
-from trainer.env import PLAYLISTS, RANKED_1V1, ROOT, VecEnv, game_commit
+from trainer.env import PLAYLISTS, RANKED_1V1, ROOT, VecEnv, frozen_eval_config, game_commit
 from trainer.eval import play
 from trainer.league import ROTATE, League, name, panel_table, ratings
 from trainer.model import ACT_NAMES, ATTENDED, CORES, ActionDist, arch_of, load_net, new_net
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
+MAY_CHANGE = ("updates", "kl_coef", "eval_games", "eval_every", "eval_games_public")  # a resume may give new values
 WHOLE = ("ffa", "hvn")  # setups where every seat is the learner's: the opponents are the game's own nations (4N)
 REF_OUTPUTS = ("type", "maps", "ptr", "retreat", "shares", "bins")  # what ActionDist reads of the KL reference
 SNAPSHOT = 250  # updates between kept checkpoints
@@ -82,6 +83,12 @@ def parser():
     p.add_argument("--eval-games", type=int, default=128,
                    help="games per panel evaluation, split over the panel by game slot (given with --resume, it replaces "
                         "the run's)")
+    p.add_argument("--eval-every", type=int, default=SNAPSHOT,
+                   help=f"updates between frozen evaluations, a multiple of {SNAPSHOT} (given with --resume, it replaces "
+                        "the run's)")
+    p.add_argument("--eval-games-public", type=int, default=32,
+                   help="games per frozen evaluation against the nations, for each of ffa and hvn in a --mix (given with "
+                        "--resume, it replaces the run's)")
     p.add_argument("--kl-coef", type=float, default=None,
                    help="KL penalty toward the --init policy (default 0; given with --resume, it replaces the run's)")
     p.add_argument("--kl-ref", help="the KL penalty's reference instead of --init")
@@ -103,6 +110,11 @@ def mix_of(a):
                              f"1 worker: {item!r}")
         mix[setup] = int(count)
     return mix
+
+
+def nations_of(a):
+    """The --mix setups whose games every frozen evaluation also plays against the game's own nations (4N)."""
+    return [s for s in (mix_of(a) if a.mix else ()) if s in WHOLE]
 
 
 def parse_args(argv=None):
@@ -186,8 +198,10 @@ def run_info(a):
         plays = {"Learner seat": "both, half the games each" if seats == 2 else f"all {seats}, equally often"} \
             if seats > 1 else {}
     ref = {"KL reference": a.kl_ref} if a.kl_ref else {}
-    panel = {"Frozen evaluations": f"{a.eval_games} games against {len(a.panel)} policies every {SNAPSHOT} updates"} \
-        if a.panel else {}
+    nations = nations_of(a)
+    panel = {"Frozen evaluations": f"{a.eval_games} games against {len(a.panel)} policies every {a.eval_every} updates"
+             + (f", and {a.eval_games_public} games of each of {', '.join(nations)} against the nations"
+                if nations else "")} if a.panel else {}
     return {"Name": a.run, "Method": "PPO (reinforcement learning)", "Game": game, "Against": rivals, **plays,
             "Starts from": a.init or "random weights", "KL penalty to the start": a.kl_coef or "none", **ref, **panel,
             "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
@@ -385,7 +399,7 @@ def main(argv=None):
     state = None
     if a.resume:
         state = torch.load(ckpt_dir / "latest.pt", map_location="cpu", weights_only=False)
-        a = resume_args(parser(), argv, state["args"], ("updates", "kl_coef", "eval_games"))
+        a = resume_args(parser(), argv, state["args"], MAY_CHANGE)
     else:
         a = network_args(parser(), argv, a)
     a.kl_coef = a.kl_coef or 0.0
@@ -404,6 +418,8 @@ def main(argv=None):
         raise SystemExit(f"no such checkpoint: {', '.join(missing)}")
     if (a.league or a.panel) and SNAPSHOT % a.save_every:
         raise SystemExit(f"--save-every must divide {SNAPSHOT}: the league plays the checkpoints kept every {SNAPSHOT}")
+    if a.eval_every < SNAPSHOT or a.eval_every % SNAPSHOT:
+        raise SystemExit(f"--eval-every must be a multiple of {SNAPSHOT}: the weight averages that play are kept then")
     panel_log = run_dir / "panel.jsonl"  # the frozen evaluations, one per line
     if a.panel and not state and panel_log.exists():
         raise SystemExit(f"{panel_log} holds another run's evaluations: delete runs/{a.run} or pick another --run name")
@@ -459,6 +475,7 @@ def main(argv=None):
     row_of = {game_seat: r for r, game_seat in enumerate(owner)}  # (game, seat) -> the learner's row
     slot_of = {e: k for k, e in enumerate(slots)}
     names = list(dict.fromkeys(setups))
+    nations = nations_of(a)
     setup_row = torch.tensor([names.index(setups[e]) for e, _ in owner], device=device)  # each learner row's setup
     rows_of = np.bincount(setup_row.cpu().numpy(), minlength=len(names))  # learner rows per setup
     rows = lambda o, r: {k: v[r] for k, v in o.items()}
@@ -496,24 +513,34 @@ def main(argv=None):
 
     def evaluate():
         """This update's weight average (update 0: --init) plays the panel on fixed games while training waits (PLAN
-        4A). False if a stop came first."""
+        4A), and in a mixed run also the FFA and Humans vs Nations games against the nations (4N). False if a stop came
+        first."""
         control.set_state("evaluating")
-        control.note(f"frozen evaluation of update {update} against the panel")
+        control.note(f"frozen evaluation of update {update} against the panel"
+                     + (f" and the nations ({', '.join(nations)})" if nations else ""))
         spec = (ckpt_dir / f"avg{update:06d}.pt").as_posix() if update else a.init
         torch.cuda.empty_cache()
         t0 = time.perf_counter()
+        # the panel is a ranked 1v1 match, mixed run or not; then each nations setup, with the policy in all its seats
+        games = [([spec, a.panel], PLAYLISTS["ranked1v1"] if a.mix else env_config(a), a.eval_games)]
+        games += [([spec] * c["seats"], c, a.eval_games_public) for c in map(frozen_eval_config, nations)]
+        played = []
         with torch.random.fork_rng(devices=[device]):  # play() fixes its own seed; training's carries on after
-            r = play([spec, a.panel], PLAYLISTS["ranked1v1"] if a.mix else env_config(a), a.eval_games, a.workers,
-                     a.games_per_worker, wait=control.wait)  # the panel is a ranked 1v1 match, mixed run or not
-        if r is None:
-            return False
+            for specs, config, n in games:
+                r = play(specs, config, n, a.workers, a.games_per_worker, wait=control.wait)
+                if r is None:
+                    return False
+                played.append(r)
+        r, *vs_nations = played
         evals.append({"update": update, "global_step": global_step, "minutes": (time.perf_counter() - t0) / 60,
-                      "vs": r["by_b"]})
+                      "vs": r["by_b"], "nations": dict(zip(nations, vs_nations))})
         with open(panel_log, "a", encoding="utf-8") as f:
             f.write(json.dumps(evals[-1]) + "\n")
         fit, trend = ratings(evals, a.panel)
         for m, v in r["by_b"].items():
             writer.add_scalar(f"eval/vs_{name(m)}", v["win_rate"], global_step)
+        for setup, v in evals[-1]["nations"].items():
+            writer.add_scalar(f"eval/nations_{setup}", v["win_rate"], global_step)
         writer.add_scalar("eval/rating", fit[update][0], global_step)
         writer.add_scalar("eval/minutes", evals[-1]["minutes"], global_step)
         control.update(panel=panel_table(evals, a.panel, fit, trend))
@@ -639,7 +666,8 @@ def main(argv=None):
     control.set_state("running")
     try:
         while True:
-            if a.panel and update % SNAPSHOT == 0 and (update or a.init) and update not in {e["update"] for e in evals}:
+            if a.panel and update % a.eval_every == 0 and (update or a.init) \
+                    and update not in {e["update"] for e in evals}:
                 if not evaluate():
                     break
             if update >= a.updates:

@@ -2,14 +2,14 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 import torch
 
 from trainer.control import REPLAYS
-from trainer.env import ONION
+from trainer.env import HVN, ONION, gate_config
 from trainer.eval import Cooldown, label, main, name_players, play, replay_dir, seats_for, summarize, tag, two_bin_sample
 from trainer.model import SPAWN, ActionDist, new_net
 from trainer.test_model import DIMS
@@ -24,6 +24,9 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(s["win_rate"], 0.5)
         self.assertEqual(s["mean_reward"], 0.0)
         self.assertEqual(s["mean_rank"], 2.5)
+        self.assertEqual(s["cut_share"], 0.0, "games from before the env's backstop carry no flag")
+        s = summarize([{"reward": 1, "rank": 1, "cut": False}, {"reward": -1, "rank": 2, "cut": True}])
+        self.assertEqual(s["cut_share"], 0.5, "the share of games the backstop ended, decided by tiles")
 
     def test_summarize_splits_the_win_rate_by_seat(self):
         s = summarize([{"reward": 1, "rank": 1, "seat": 0}, {"reward": 1, "rank": 1, "seat": 1},
@@ -120,6 +123,28 @@ class EvalTest(unittest.TestCase):
         self.assertEqual(len(r["recorded"]), 1)
         saved = json.loads((Path(tmp) / f"{r['recorded'][0]}.json").read_text())
         self.assertEqual(saved["info"]["gameID"], r["recorded"][0])
+
+    def test_the_gates_setups_play_the_public_rules_with_every_seat_policy_a(self):
+        """Gate 4N's games: Humans vs Nations puts policy A in all 4 seats, FFA in its one; no timer, on --maps."""
+        def run(*flags):
+            fake = mock.patch("trainer.eval.play", return_value={"recorded": [], "win_rate": 0.5})
+            with tempfile.TemporaryDirectory() as d, mock.patch("trainer.eval.RESULTS", Path(d)), fake as played:
+                with redirect_stdout(io.StringIO()):
+                    main([*flags, "--a", "random"])
+                return played.call_args.args[:2], json.loads(next(Path(d).glob("*.json")).read_text(encoding="utf-8"))
+        (specs, config), saved = run("--setup", "hvn")
+        self.assertEqual((specs, config), (["random"] * 4, gate_config("hvn", "heldout")))
+        self.assertEqual((config["timerMinutes"], saved["maps"]), (0, "heldout"))
+        (specs, config), saved = run("--setup", "ffa", "--maps", "seen")
+        self.assertEqual((specs, config, saved["maps"]), (["random"], gate_config("ffa", "seen"), "seen"))
+        self.assertIsNone(run("--setup", "onion")[1]["maps"], "the other setups draw no maps from the gate's lists")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            main(["--setup", "onion", "--maps", "seen", "--a", "random"])
+
+    def test_humans_vs_nations_seats_share_one_result_per_game(self):
+        r = play(["random"] * 4, {**HVN, "timerMinutes": 1}, 2, 1, 2)
+        self.assertEqual(r["episodes"], 2, "policy A's four seats make one game, not four")
+        self.assertTrue(0 <= r["cut_share"] <= 1)
 
 
 def type_mask(spawn_phase=False):

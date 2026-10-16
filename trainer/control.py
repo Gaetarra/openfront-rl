@@ -351,6 +351,11 @@ const CHARTS = [
   { title: "Frozen evaluations", prefix: "eval/vs_", goal: "higher is better", ref: [0.8, "Gate 4A bar, 3B clone"],
     note: "Every 250 updates the snapshot plays fixed games against each panel policy while training waits: its win " +
       "rate against each. Dashed: Gate 4A's bar against the 3B clone (0.70 against the Phase 2 PPO bot)." },
+  { title: "Frozen evaluations against the nations", prefix: "eval/nations_", goal: "higher is better",
+    ref: [0.5, "Gate 4N bar, FFA"],
+    note: "A mixed run's frozen evaluations also play the FFA (one seat) and Humans vs Nations (the 4-seat team) games " +
+      "against Hard nations, on training maps with the timer: the snapshot's win rate in each. Dashed: Gate 4N's FFA " +
+      "bar, 0.50 (under the public rules, on held-out maps). Humans vs Nations' bar is 0.70." },
   { title: "Rating", lines: [["eval/rating", "rating"]], goal: "still rising",
     note: "Each snapshot's Bradley-Terry rating in Elo points, from every frozen evaluation so far, with the first " +
       "panel policy (the 3B clone) at 0. Gate 4A wants it still rising over the last 5 snapshots." },
