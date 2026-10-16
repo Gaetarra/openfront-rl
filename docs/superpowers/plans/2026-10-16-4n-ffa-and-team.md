@@ -533,7 +533,7 @@ def test_each_setup_keeps_its_own_window_and_it_survives_a_restart(self):
 - [ ] **Step 5: Commit.**
   - `git commit -m "4N task 5: frozen evaluations per setup (FFA one seat against Hard nations, Humans vs Nations) every --eval-every updates; trainer.eval --setup ffa|hvn --maps heldout|seen|training plays Gate 4N's games under the public rules"`
 
-### Task 6: Speed and memory of the mixed run (GPU, ~15 min, the user's go)
+### Task 6: Speed and memory of the mixed run (GPU, ~1 h, the user's go)
 
 **Files:**
 - Modify: `docs/PLAN.md` (4N, the results)
@@ -542,15 +542,18 @@ def test_each_setup_keeps_its_own_window_and_it_survives_a_restart(self):
 - Consumes: Tasks 1–5. The start checkpoint (`checkpoints/league4a2/avg004000.pt` if Gate 4A passed, else
   `checkpoints/swa-lr4a/update1000-2000.pt`).
 
-- [ ] **Step 1: Run 30 updates with the PC otherwise idle.**
-  - Run: `.venv/Scripts/python -m trainer.ppo --run speed4n --mix ranked1v1=8 ffa=4 hvn=2 --games-per-worker 1 --init <start> --opponent <start> --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 2.5e-5 --ent-coef 0 --minibatches 12 --updates 30`
+- [ ] **Step 1: Run Task 8's command with `--run speed4n --updates 30`, the PC otherwise idle.**
+  - The final review's advice (2026-10-16): the first run of `--mix` with `--league` and `--panel` together should not
+    be the long run.
+  - Its evaluation round plays before update 1. Record its minutes from `runs/speed4n/panel.jsonl`.
   - Read from TensorBoard (`runs/speed4n`), over updates 10–30:
     - `perf/decisions_per_s`, `perf/env_share`, `perf/private_gb` and `perf/gpu_reserved_gb`;
-    - `setups/cap_binds/ffa`.
+    - `setups/cap_binds/ffa`, `setups/dead_share/*` and `setups/cut_share/*`.
+  - Also record the Node workers' total memory during the evaluation round, when 28 are alive. `perf/private_gb`
+    covers only the trainer.
   - Compare with league v2: 115–137 decisions/s, 19.4–19.9 GiB private, ~16.5 s per update.
-- [ ] **Step 2: Time one evaluation round.** Use Step 1's command with `--run speed4n-eval --updates 1 --panel <start>
-  --eval-games 64 --eval-games-public 32`. The round plays before the first update. Record its minutes from
-  `runs/speed4n-eval/panel.jsonl`.
+- [ ] **Step 2: Clean up.** `checkpoints/speed4n` and `runs/speed4n` are scratch: the user deletes them, or keeps them
+  as a record.
 - [ ] **Step 3: Record the results.** Add them, with the ETA of 4,000 updates and the evaluations' share of the time,
   to PLAN 4N.
 - [ ] **Step 4: Commit.**
@@ -567,7 +570,9 @@ def test_each_setup_keeps_its_own_window_and_it_survives_a_restart(self):
   - `--setup ffa --maps seen --episodes 128 --workers 16 --games-per-worker 2`;
   - `--setup hvn --maps heldout --episodes 128 --workers 16 --games-per-worker 2`.
 - [ ] **Step 2: Apply the rules fixed in the spec.**
-  - FFA held-out ≥ 0.50, or HvN ≥ 0.70: that bar is met without training.
+  - The bars read `decided_win_rate` (games won and not cut). FFA held-out ≥ 0.50, or HvN ≥ 0.70: that bar is met
+    without training.
+  - If more than 10% of a match's games are cut, tell the user before reading its bar.
   - Record the win rates, `cut_share` and mean ranks in PLAN 4N.
 - [ ] **Step 3: Commit.**
   - `git commit -m "PLAN 4N: the start's baselines on Gate 4N's games"`
@@ -580,7 +585,7 @@ def test_each_setup_keeps_its_own_window_and_it_survives_a_restart(self):
 
 - [ ] **Step 1: Write the launcher** with the command below.
   - The pool and panel are proposed. The user settles them before the run starts.
-  - Command: `.venv\Scripts\python.exe -m trainer.ppo --run ffa4n --mix ranked1v1=8 ffa=4 hvn=2 --games-per-worker 1 --init <start> --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 2.5e-5 --ent-coef 0 --minibatches 12 --updates 4000 --league "checkpoints/league4a2/avg*.pt" checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/ppo-bc2/update005000.pt --panel <start> checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt --eval-every 500 --eval-games 64 --eval-games-public 32`
+  - Command: `.venv\Scripts\python.exe -m trainer.ppo --run ffa4n --mix ranked1v1=8 ffa=4 hvn=2 --games-per-worker 1 --init <start> --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 2.5e-5 --ent-coef 0 --minibatches 12 --updates 4000 --league "checkpoints/league4a2/avg*.pt" checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/ppo-bc2/update005000.pt --panel <start> checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt --eval-every 500 --eval-games 56 --eval-games-public 28` (multiples of the 14 game slots: `play()` rounds up to a multiple of the slots)
 - [ ] **Step 2: Hand over.** The user starts it with `explorer.exe runs\ffa4n.cmd`. Record the start in PLAN and
   memory.
 - [ ] **Step 3: After 4,000 updates, play Gate 4N.**

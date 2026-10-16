@@ -1688,6 +1688,37 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     per ~2 hours of training. 4,000 updates (~16–20 h), then the gate; if it fails, the per-setup curves show where
     it is stuck before anything is decided. Also logged: each setup's training win rate, action mix and game length,
     how often the 64-player cap binds, and decisions/s.
+  - **The code** (2026-10-16, `docs/superpowers/plans/2026-10-16-4n-ffa-and-team.md`, commits 029a955..761fd5e).
+    - **How it was written** (the user's call): Sonnet subagents implemented each task, a Sonnet reviewer checked each
+      one, and an Opus review covered the whole branch. Its three fixes are in 761fd5e. Bridge 58 tests, trainer 155.
+    - **Decisions taken in the plan:**
+      - **Held-out maps:** Didier, Bering Strait, Yellow Sea and Labyrinth. Seed "4N held out", over the 30 candidates
+        (the 34 fitting maps without World, Australia, Iceland and Asia; EuropeClassic is not in the rotation).
+        - Bering Strait has only 2 nations, which makes it an easy FFA gate map. The draw stands.
+      - **Seen maps (the gap):** Black Sea, Venice, Mars and More Than Luck, drawn the same way with the seed "4N
+        seen".
+      - **Gate map sets** are played equally often.
+      - **No-timer horizon:** a game without a timer is observed with a 30-minute horizon, as in training.
+      - **The backstop** ends a game 1 minute after its timer, or at 61 minutes without one. A game it ends with no
+        winner is *cut* and ranked by tiles.
+      - **Dead seats** keep their rows. `setups/dead_share/<setup>` logs the cost.
+      - **Humans vs Nations** is Compact in a third of games on every map. The rotation drops Compact on 3 small maps,
+        ~2.6% of its games.
+      - **The training grid everywhere:** every 4N game (training, evaluations, gates) plays on the ranked grid,
+        192 × 256. The network averages its features over the whole grid, padding included, so a held-out game on a
+        smaller grid would read differently (the final review measured it).
+    - **Rulings during execution:**
+      - **Gate 4N's bars read `decided_win_rate`:** games won and not cut, over all games. A cut game would play on
+        under the public rules, so a lead at minute 61 is no win.
+        - `cut_share` is reported beside it.
+        - If the baselines show more than 10% of games cut, the user hears it before any bar is read.
+      - **Frozen evaluations: 56 ranked games and 28 each for FFA and Humans vs Nations**, instead of 64 and 32.
+        - Both are multiples of the run's 14 game slots: `play()` rounds up to a multiple of the slots.
+        - Layout: `--mix ranked1v1=8 ffa=4 hvn=2 --games-per-worker 1`.
+    - **Next, each on the user's go:**
+      - the speed check: 30 updates and one evaluation round, with the run's full flags;
+      - the baselines (~3–4 h);
+      - the run.
   - **After 4N**, in this order: alliance and donation actions; the crawl of public FFA/Team and ranked 2v2 records,
     BC on all modes with the mode as an input, and 3C's MoE routing test; modifiers; bigger maps and the 64-player cap
     (Phase 6).
