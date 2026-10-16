@@ -24,6 +24,48 @@ and `trainer.eval` plays Gate 4N's games under the public rules.
 
 **Spec:** `docs/PLAN.md`, Phase 4, "4N — FFA and Team against the nations" (approved by the user on 2026-10-15).
 
+**Outcome (2026-10-16): Tasks 1–5 done; Tasks 6–8 wait for the user's go.**
+- **Commits:** 029a955..761fd5e. Sonnet subagents implemented and reviewed each task; Opus reviewed the whole branch.
+  Its three fixes are in 761fd5e: the gate grid, cut games, and the run command. Bridge 58 tests, trainer 155.
+- **Decisions and rulings** are in PLAN 4N, "The code".
+- **Deferred minor findings**, none blocking, triaged by the final review:
+  - **Cheap guards:**
+    - `EnvGame.create` does not check that `shape` covers its config;
+    - `seat_rows` assumes every frozen-opponent game has the same seat count;
+    - VecEnv's grid-mismatch error leaves its workers running;
+    - the opponent and league checks run after the workers start;
+    - `--workers` and `--setup` are silently ignored with `--mix`;
+    - `--b`, `--a-cooldown` and `--a-two-bins` are accepted with the gate setups;
+    - `difficulty` values are not validated;
+    - the exported map lists can be mutated.
+  - **Tests that assert little:**
+    - the map-weights test re-implements its rule;
+    - the "another team won" branch of the team ranking;
+    - the placement of `step()` returns in a mixed env;
+    - the smoke test's ranked branch;
+    - "older runs get defaults" is trivially true;
+    - an evaluation interrupted midway;
+    - the Humans vs Nations `play()` test.
+  - **Text:**
+    - `publicConfig`'s comment omits its known differences (Humans vs Nations Compact on every map; no
+      `publicGameModifiers` or `trusted`);
+    - the `nPlayers` doc;
+    - env.py's comments on the dummy config fields;
+    - the overall win-rate chart blends setups in a mix;
+    - `eval/nations_*` logs `win_rate` while the gate reads `decided_win_rate`.
+  - **Shape:**
+    - the mix is expanded twice and parsed in four places;
+    - `main()` in ppo.py is ~300 lines;
+    - the backstop's 60 and +1 are literals;
+    - the test helpers live in game.test.ts.
+  - **To measure in Task 6:**
+    - worker map caches (≤ 74 MB per FFA or Humans vs Nations worker);
+    - `_add_units`' per-step copies;
+    - `play([spec] * 4)` loads the network four times.
+  - **Rare:**
+    - two teams tied on tiles in a cut game both rank 1;
+    - `--record` folders of gate matches collide, and Humans vs Nations records name the four seats alike.
+
 ## Global Constraints
 
 - Never edit `OpenFront_Source_Code/openfrontio/`. Bridge code lives in `bridge/`, trainer code in `trainer/`.
