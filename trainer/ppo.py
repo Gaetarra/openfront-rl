@@ -23,12 +23,13 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 from trainer.control import Control, serve
-from trainer.env import RANKED_1V1, ROOT, VecEnv, game_commit
+from trainer.env import PLAYLISTS, RANKED_1V1, ROOT, VecEnv, game_commit
 from trainer.eval import play
 from trainer.league import ROTATE, League, name, panel_table, ratings
-from trainer.model import ACT_NAMES, CORES, ActionDist, arch_of, load_net, new_net
+from trainer.model import ACT_NAMES, ATTENDED, CORES, ActionDist, arch_of, load_net, new_net
 
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
+WHOLE = ("ffa", "hvn")  # setups where every seat is the learner's: the opponents are the game's own nations (4N)
 REF_OUTPUTS = ("type", "maps", "ptr", "retreat", "shares", "bins")  # what ActionDist reads of the KL reference
 SNAPSHOT = 250  # updates between kept checkpoints
 AVERAGED = 5  # kept checkpoints in each weight average, --init counting as update 0: the last 1,000 updates. Averages
@@ -48,18 +49,22 @@ def parser():
     p.add_argument("--timer", type=int, default=5, help="game timer in minutes")
     p.add_argument("--setup", choices=("onion", "ranked1v1"), default="onion",
                    help="ranked1v1: the official ranked 1v1 playlist (the map, size, nation, bot and timer flags are ignored)")
+    p.add_argument("--mix", nargs="+", metavar="SETUP=WORKERS",
+                   help="instead of --setup, workers on several of the public playlists (ranked1v1, ffa, hvn), in the "
+                        "order given, e.g. ranked1v1=8 ffa=4 hvn=2: one learner seat in each ranked game, every seat in "
+                        "an FFA or Humans vs Nations game. --workers becomes their sum (4N)")
     p.add_argument("--seats", type=int, default=1, help="agent seats in the onion setup")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--games-per-worker", type=int, default=4)
     p.add_argument("--steps", type=int, default=None,
-                   help="decisions per game per update (default: 48 for ranked1v1, which keeps the run under 8 GiB of "
-                        "VRAM; 128 otherwise)")
+                   help="decisions per game per update (default: 48 for ranked1v1 and --mix, which keeps the run under "
+                        "8 GiB of VRAM; 128 otherwise)")
     p.add_argument("--updates", type=int, default=100_000)
     p.add_argument("--lr", type=float, default=2.5e-4)
     p.add_argument("--gamma", type=float, default=0.999)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--epochs", type=int, default=3)
-    p.add_argument("--minibatches", type=int, default=None, help="default: 8 for ranked1v1, 4 otherwise")
+    p.add_argument("--minibatches", type=int, default=None, help="default: 8 for ranked1v1 and --mix, 4 otherwise")
     p.add_argument("--clip", type=float, default=0.2)
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
@@ -88,8 +93,23 @@ def parser():
     return p
 
 
+def mix_of(a):
+    """--mix as {setup: workers}, in the order given."""
+    mix = {}
+    for item in a.mix:
+        setup, _, count = item.partition("=")
+        if setup not in PLAYLISTS or setup in mix or not count.isdigit() or int(count) < 1:
+            raise SystemExit(f"--mix takes SETUP=WORKERS, each setup once, one of {', '.join(PLAYLISTS)} and at least "
+                             f"1 worker: {item!r}")
+        mix[setup] = int(count)
+    return mix
+
+
 def parse_args(argv=None):
-    return parser().parse_args(argv)
+    a = parser().parse_args(argv)
+    if a.mix:
+        a.workers = sum(mix_of(a).values())  # the mix decides the workers
+    return a
 
 
 def given_flags(p, argv):
@@ -134,6 +154,9 @@ def network_args(p, argv, a):
 
 
 def env_config(a):
+    """The games' config: one for every worker, or with --mix a list with one per worker."""
+    if a.mix:
+        return [PLAYLISTS[s] for s, n in mix_of(a).items() for _ in range(n)]
     if a.setup == "ranked1v1":
         return RANKED_1V1
     return {"map": a.map, "compact": not a.normal_size, "nations": a.nations, "difficulty": a.difficulty,
@@ -142,18 +165,26 @@ def env_config(a):
 
 def run_info(a):
     """What the control page says about the run."""
-    if a.setup == "ranked1v1":
-        game, rivals = "ranked 1v1 (the official playlist)", f"frozen {a.opponent}"
-        if a.league:
-            rivals = f"a league of frozen policies: PFSP picks every {ROTATE} updates, averages join every {SNAPSHOT}"
+    frozen = f"a league of frozen policies: PFSP picks every {ROTATE} updates, averages join every {SNAPSHOT}" \
+        if a.league else f"frozen {a.opponent}"
+    if a.mix:
+        mix = mix_of(a)
+        game = "a mix of setups: " + ", ".join(f"{s} ({n * a.games_per_worker} games)" for s, n in mix.items())
+        rivals = "; ".join(f"{s}: " + ("the game's own nations" if s in WHOLE else frozen) for s in mix)
+        plays = {"Learner seat": "; ".join(
+            f"{s}: " + (f"all {PLAYLISTS[s]['seats']}" if s in WHOLE else f"one of {PLAYLISTS[s]['seats']}, in turn")
+            for s in mix)}
     else:
-        game = f"{a.map}, {'Normal' if a.normal_size else 'Compact'}, {a.timer} min"
-        rivals = f"{a.nations} {a.difficulty} nations" + (f" and {a.bots} bots" if a.bots else "")
-        if a.seats > 1:
-            rivals += f"; frozen {a.opponent} in the other seats"
-    seats = 2 if a.setup == "ranked1v1" else a.seats
-    plays = {"Learner seat": "both, half the games each" if seats == 2 else f"all {seats}, equally often"} \
-        if seats > 1 else {}
+        if a.setup == "ranked1v1":
+            game, rivals = "ranked 1v1 (the official playlist)", frozen
+        else:
+            game = f"{a.map}, {'Normal' if a.normal_size else 'Compact'}, {a.timer} min"
+            rivals = f"{a.nations} {a.difficulty} nations" + (f" and {a.bots} bots" if a.bots else "")
+            if a.seats > 1:
+                rivals += f"; frozen {a.opponent} in the other seats"
+        seats = 2 if a.setup == "ranked1v1" else a.seats
+        plays = {"Learner seat": "both, half the games each" if seats == 2 else f"all {seats}, equally often"} \
+            if seats > 1 else {}
     ref = {"KL reference": a.kl_ref} if a.kl_ref else {}
     panel = {"Frozen evaluations": f"{a.eval_games} games against {len(a.panel)} policies every {SNAPSHOT} updates"} \
         if a.panel else {}
@@ -163,12 +194,35 @@ def run_info(a):
             "Updates": f"{a.updates:,}"}
 
 
-def seat_rows(E, S, device="cpu"):
-    """Rows of the learner and of every other seat. The learner plays seat e % S of game slot e, so it plays each seat
-    equally often, as in trainer.eval (the game is symmetric, so the per-seat win rates should match)."""
-    seat = torch.arange(E, device=device) % S
-    base = torch.arange(E, device=device) * S
-    return base + seat, [base + (seat + s) % S for s in range(1, S)], seat
+def seat_rows(seats, whole, device="cpu"):
+    """Who plays which row, for games of `seats[e]` rows each, game after game (VecEnv's layout).
+    - A game with whole[e] (FFA, Humans vs Nations: the opponents are the game's own nations) gives every row to the
+      learner.
+    - In the others the learner plays seat k % S of the k-th such game, so it plays each seat equally often, as in
+      trainer.eval (the game is symmetric, so the per-seat win rates should match); the frozen opponents play the rest.
+    Returns the learner's rows [L], the opponents' (a tensor [K] per seat but the learner's), the K frozen-opponent
+    games (the league's slots), and the (game, seat) of each learner row."""
+    seats = [int(n) for n in seats]
+    first = np.cumsum(seats) - seats
+    slots, owner = [], []
+    for e, n in enumerate(seats):
+        if whole[e]:
+            owner += [(e, s) for s in range(n)]
+        else:
+            owner.append((e, len(slots) % n))
+            slots.append(e)
+    rows = lambda pairs: torch.tensor([int(first[e]) + s for e, s in pairs], dtype=torch.long, device=device)
+    S = seats[slots[0]] if slots else 1  # ponytail: the K games share one seat count (ranked's 2), else a list per game
+    return (rows(owner), [rows([(e, (k + s) % seats[e]) for k, e in enumerate(slots)]) for s in range(1, S)], slots,
+            owner)
+
+
+def cap_binds(players):
+    """Where the transformer's ATTENDED slots (trainer/model.py) fall short: the seat's real players (those that exist
+    and are self, friendly or enemy; tribes do not count) and row 0, the unowned land, outnumber them. players: [n, P,
+    F], bridge/obs.ts's features (0 exists, 2 self, 3 friendly, 4 enemy)."""
+    real = (players[:, 1:, 0] > 0) & (players[:, 1:, 2:5] > 0).any(-1)
+    return real.sum(1) + 1 > ATTENDED
 
 
 def gae(rewards, values, dones, last_value, gamma, lam):
@@ -207,7 +261,9 @@ class Outcomes:
     between value and final reward (the gate's measure; rank-based rewards keep it defined without wins)."""
 
     def __init__(self, rows, window=200):
+        self.window = window
         self.episodes = collections.deque(maxlen=window)
+        self.by_setup = {}  # setup -> its own window of episodes (4N: a mixed run's setups finish games at other rates)
         self.pending = [[] for _ in range(rows)]
         self.samples = collections.deque(maxlen=50_000)  # (phase bucket, value, final reward)
 
@@ -216,20 +272,24 @@ class Outcomes:
             self.pending[row].append((p, v))
 
     def finish(self, infos):
-        """The learner's finished games; its row is the game slot, whichever seat it plays there."""
+        """The learner's finished games: each info carries the learner's `row` and its game's `setup`."""
         for info in infos:
-            row = info["env"]
+            row = info["row"]
             self.samples.extend((min(int(p * 3), 2), v, info["reward"]) for p, v in self.pending[row])
             self.pending[row] = []
             self.episodes.append(info)
+            self.by_setup.setdefault(info["setup"], collections.deque(maxlen=self.window)).append(info)
 
     def state(self):
         """The finished games and value samples, kept in checkpoints so the curves carry on after a resume."""
-        return {"episodes": list(self.episodes), "samples": list(self.samples)}
+        return {"episodes": list(self.episodes), "samples": list(self.samples),
+                "by_setup": {s: list(eps) for s, eps in self.by_setup.items()}}
 
     def load(self, state):
         self.episodes.extend(state["episodes"])
         self.samples.extend(state["samples"])
+        for s, eps in state.get("by_setup", {}).items():  # older checkpoints lack it
+            self.by_setup.setdefault(s, collections.deque(maxlen=self.window)).extend(eps)
 
     def summary(self):
         if not self.episodes:
@@ -239,8 +299,13 @@ class Outcomes:
                "episodes/mean_reward": float(np.mean([e["reward"] for e in ep])),
                "episodes/mean_rank": float(np.mean([e["rank"] for e in ep])),
                "episodes/ticks": float(np.mean([e["ticks"] for e in ep]))}
+        if len(self.by_setup) > 1:  # a mixed run: each setup's win rate, reward and game length
+            for s, eps in self.by_setup.items():
+                out[f"setups/win_rate/{s}"] = float(np.mean([e["rank"] == 1 for e in eps]))
+                out[f"setups/mean_reward/{s}"] = float(np.mean([e["reward"] for e in eps]))
+                out[f"setups/ticks/{s}"] = float(np.mean([e["ticks"] for e in eps]))
         seats = sorted({e["seat"] for e in ep})
-        if len(seats) > 1:  # the learner plays every seat: does it win from each?
+        if len(seats) > 1 and len(self.by_setup) < 2:  # the learner plays every seat: does it win from each?
             for seat in seats:
                 out[f"episodes/win_rate_seat{seat}"] = float(np.mean([e["rank"] == 1 for e in ep if e["seat"] == seat]))
         s = np.array(self.samples, float).reshape(-1, 3)
@@ -324,7 +389,7 @@ def main(argv=None):
     else:
         a = network_args(parser(), argv, a)
     a.kl_coef = a.kl_coef or 0.0
-    ranked = a.setup == "ranked1v1"
+    ranked = a.setup == "ranked1v1" or bool(a.mix)  # a mix's games share the ranked grid
     a.steps = a.steps or (48 if ranked else 128)
     a.minibatches = a.minibatches or (8 if ranked else 4)
     random.seed(a.seed)
@@ -357,9 +422,13 @@ def main(argv=None):
         np.random.set_state(state["rng"]["numpy"])
         torch.set_rng_state(state["rng"]["torch"])
         torch.cuda.set_rng_state_all(state["rng"]["cuda"])
-    S = envs.S
-    if S > 1 and not (a.opponent or a.league):
+    setups = [s for s, n in mix_of(a).items() for _ in range(n * a.games_per_worker)] if a.mix \
+        else [a.setup] * envs.E  # the setup of each game
+    learner, others, slots, owner = seat_rows(envs.seats, [s in WHOLE for s in setups], device)
+    if others and not (a.opponent or a.league):
         raise SystemExit("2-seat setups need --opponent or --league")
+    if a.league and not others:
+        raise SystemExit("--league needs games with a frozen opponent: ranked 1v1, or 2 seats")
     if a.kl_coef > 0 and not (a.kl_ref or a.init):
         raise SystemExit("--kl-coef needs --init or --kl-ref")
     if a.init and not state:
@@ -373,10 +442,9 @@ def main(argv=None):
 
     ref_path = a.kl_ref or a.init
     ref = net(ref_path) if a.kl_coef > 0 else None
-    league = League(pool, envs.E) if S > 1 else None
+    league = League(pool, len(slots)) if others else None  # a slot is a game with a frozen opponent
     if league and state and state.get("league"):
         league.load(state["league"])
-    learner, others, seat = seat_rows(envs.E, S, device)
     others_cpu = [r.cpu() for r in others]
 
     def opponents():
@@ -387,7 +455,12 @@ def main(argv=None):
                 for p in dict.fromkeys(league.slot)]
 
     teams = opponents() if league else []
-    games, seat = np.arange(envs.E), seat.cpu().numpy()  # for the per-seat arrays the workers return
+    learner_np = learner.cpu().numpy()  # for the per-row arrays the workers return
+    row_of = {game_seat: r for r, game_seat in enumerate(owner)}  # (game, seat) -> the learner's row
+    slot_of = {e: k for k, e in enumerate(slots)}
+    names = list(dict.fromkeys(setups))
+    setup_row = torch.tensor([names.index(setups[e]) for e, _ in owner], device=device)  # each learner row's setup
+    rows_of = np.bincount(setup_row.cpu().numpy(), minlength=len(names))  # learner rows per setup
     rows = lambda o, r: {k: v[r] for k, v in o.items()}
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
     control.update(run=run_info(a))
@@ -430,7 +503,8 @@ def main(argv=None):
         torch.cuda.empty_cache()
         t0 = time.perf_counter()
         with torch.random.fork_rng(devices=[device]):  # play() fixes its own seed; training's carries on after
-            r = play([spec, a.panel], env_config(a), a.eval_games, a.workers, a.games_per_worker, wait=control.wait)
+            r = play([spec, a.panel], PLAYLISTS["ranked1v1"] if a.mix else env_config(a), a.eval_games, a.workers,
+                     a.games_per_worker, wait=control.wait)  # the panel is a ranked 1v1 match, mixed run or not
         if r is None:
             return False
         evals.append({"update": update, "global_step": global_step, "minutes": (time.perf_counter() - t0) / 60,
@@ -446,7 +520,7 @@ def main(argv=None):
         control.set_state("running")
         return True
 
-    T, N = a.steps, envs.E
+    T, L = a.steps, len(learner)
     obs = envs.obs
     def stored(o):
         """A seat's rows as the rollout keeps them: the cell masks as bits and, with a KL penalty, the reference's
@@ -457,13 +531,16 @@ def main(argv=None):
                 kept.update({"ref_" + k: v for k, v in ref(o).items() if k in REF_OUTPUTS})
         return kept
 
-    host = HostRows(stored(rows(obs, learner)), T * N, T * N // a.minibatches)
-    actions = torch.zeros(T, N, 4, dtype=torch.long, device=device)
-    logps, values, rewards, dones = (torch.zeros(T, N, device=device) for _ in range(4))
-    outcomes = Outcomes(N)
+    host = HostRows(stored(rows(obs, learner)), T * L, T * L // a.minibatches)
+    actions = torch.zeros(T, L, 4, dtype=torch.long, device=device)
+    logps, values, rewards, dones = (torch.zeros(T, L, device=device) for _ in range(4))
+    outcomes = Outcomes(L)
     if state and "outcomes" in state:  # older checkpoints lack it
         outcomes.load(state["outcomes"])
-    act_counts, invalid_count, env_time = np.zeros(envs.T), 0, 0.0
+    # Per setup, on the GPU, read once per update: the action types taken, then the decisions where the attention cap
+    # binds, then those of a dead seat (past the spawn phase, not alive)
+    tally = torch.zeros(len(names), envs.T + 2, device=device)
+    invalid_count, env_time = 0, 0.0
 
     def rollout():
         """Collects T steps from every game; False if a stop was requested meanwhile."""
@@ -482,6 +559,10 @@ def main(argv=None):
                 act = dist.sample()
                 actions[step], logps[step], values[step] = act, dist.log_prob(act), out["value"].float()
                 full[learner] = act
+                dead = (mine["scalars"][:, 1] == 0) & (mine["scalars"][:, 4] == 0)
+                tally.index_add_(0, setup_row, torch.cat([nn.functional.one_hot(act[:, 0], envs.T).float(),
+                                                          cap_binds(mine["players"]).float()[:, None],
+                                                          dead.float()[:, None]], 1))
                 for opponent, r in teams:
                     theirs = rows(obs, r)
                     with torch.autocast("cuda", torch.bfloat16):
@@ -492,16 +573,17 @@ def main(argv=None):
             te = time.perf_counter()
             obs, rew, done, infos, invalid = envs.step(acts)
             env_time += time.perf_counter() - te
-            rewards[step] = torch.from_numpy(rew.reshape(envs.E, S)[games, seat]).to(device)
-            dones[step] = torch.from_numpy(done.reshape(envs.E, S)[games, seat]).to(device)
-            ended = [i for i in infos if i["seat"] == seat[i["env"]]]
+            rewards[step] = torch.from_numpy(rew[learner_np]).to(device)
+            dones[step] = torch.from_numpy(done[learner_np]).to(device)
+            ended = [{**i, "row": row_of[i["env"], i["seat"]], "setup": setups[i["env"]]}
+                     for i in infos if (i["env"], i["seat"]) in row_of]
             outcomes.finish(ended)
-            if league and ended:  # these slots' next games are against the current pick
-                league.finished(ended)
+            slotted = [{**i, "env": slot_of[i["env"]]} for i in ended if i["env"] in slot_of]  # the league's view
+            if league and slotted:  # these slots' next games are against the current pick
+                league.finished(slotted)
                 teams = opponents()
-            np.add.at(act_counts, act.cpu().numpy()[:, 0], 1)
-            invalid_count += int(invalid.reshape(envs.E, S)[games, seat].sum())
-            global_step += N
+            invalid_count += int(invalid[learner_np].sum())
+            global_step += L
             control.throttle(time.perf_counter() - t0)
         return True
 
@@ -512,7 +594,7 @@ def main(argv=None):
         ret = adv + values
         b_act, b_logp, b_adv, b_ret = actions.flatten(0, 1), logps.flatten(), adv.flatten(), ret.flatten()
         stats = collections.defaultdict(list)
-        idx = [mb for _ in range(a.epochs) for mb in torch.randperm(T * N).split(host.size)]  # every epoch's minibatches
+        idx = [mb for _ in range(a.epochs) for mb in torch.randperm(T * L).split(host.size)]  # every epoch's minibatches
         on_gpu = torch.cat(idx).pin_memory().to(device, non_blocking=True).split([len(mb) for mb in idx])
         for i, (mb, o) in enumerate(zip(on_gpu, host.batches(idx, device))):
             o["cell_mask"] = unpack_bits(o["cell_mask"])
@@ -575,20 +657,28 @@ def main(argv=None):
             update += 1
             metrics.update(outcomes.summary())
             dt = time.perf_counter() - t0
-            metrics["perf/decisions_per_s"] = T * N / dt
+            metrics["perf/decisions_per_s"] = T * L / dt
             metrics["perf/rollout_share"] = (t1 - t0) / dt
             metrics["perf/env_share"] = env_time / dt  # the workers' simulation and the pipes, within the rollouts
             # past the card's size when Windows pages GPU memory into system RAM (nvidia-smi stops at the card)
             metrics["perf/gpu_reserved_gb"] = torch.cuda.max_memory_reserved() / 2**30
             metrics["perf/gpu_allocated_gb"] = torch.cuda.max_memory_allocated() / 2**30  # in use; the rest is cache
             metrics["perf/private_gb"] = psutil.Process().memory_info().private / 2**30  # Windows adds its GPU memory
-            metrics["actions/invalid_rate"] = invalid_count / (T * N)
+            metrics["actions/invalid_rate"] = invalid_count / (T * L)
+            counts = tally.cpu().numpy()
+            tally.zero_()
             for i, act_name in enumerate(ACT_NAMES):
-                metrics[f"actions/{act_name}"] = float(act_counts[i] / (T * N))
+                metrics[f"actions/{act_name}"] = float(counts[:, i].sum() / (T * L))
+            for k, setup in enumerate(names):
+                n = T * rows_of[k]  # this setup's decisions
+                for i, act_name in enumerate(ACT_NAMES):
+                    metrics[f"actions/{setup}/{act_name}"] = float(counts[k, i] / n)
+                metrics[f"setups/cap_binds/{setup}"] = float(counts[k, envs.T] / n)
+                metrics[f"setups/dead_share/{setup}"] = float(counts[k, envs.T + 1] / n)
             if a.league:
                 metrics["league/pool"], metrics["league/opponents"] = len(league.pool), len(teams)
                 control.update(league=league.table())
-            act_counts[:], invalid_count, env_time = 0, 0, 0.0
+            invalid_count, env_time = 0, 0.0
             for k, v in metrics.items():
                 writer.add_scalar(k, v, global_step)
             control.update(update=update, global_step=global_step, metrics=metrics)

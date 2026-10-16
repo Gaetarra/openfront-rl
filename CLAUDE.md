@@ -95,6 +95,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.ppo --run ppo-bc2 --setup ranked1v1 --init checkpoints/bc/update0060000.pt --opponent checkpoints/bc/update0060000.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --updates 5000   # PPO from the Gate A clone (settings: docs/PLAN.md, Phase 2 results)
 .venv/Scripts/python -m trainer.ppo --run ppo4a-s0 --setup ranked1v1 --init checkpoints/bc3b-v4/latest.pt --opponent checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --minibatches 12 --updates 3000   # 4A Stage 0 (PLAN "League design"): PPO from the 3B clone against its frozen self
 .venv/Scripts/python -m trainer.ppo --run league4a2 --setup ranked1v1 --init checkpoints/swa-lr4a/update1000-2000.pt --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 2.5e-5 --ent-coef 0 --workers 16 --games-per-worker 2 --minibatches 12 --updates 4000 --league checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/bc3-moe/latest.pt checkpoints/ppo-bc2/update005000.pt checkpoints/bc/update0060000.pt --panel checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/ppo-bc2/update005000.pt --eval-games 128   # league v2 (PLAN 4A, "League v2"): PFSP over a pool, frozen evaluations of the weight averages every 250 updates; launcher with a restart loop: explorer.exe runs\league4a2.cmd
+.venv/Scripts/python -m trainer.ppo --run ffa4n --mix ranked1v1=8 ffa=4 hvn=2 --games-per-worker 1 --init checkpoints/league4a2/avg004000.pt --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 2.5e-5 --ent-coef 0 --minibatches 12 --updates 4000 --league checkpoints/league4a2/avg004000.pt checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/ppo-bc2/update005000.pt   # 4N (PLAN 4N): 14 workers on three setups at once, one learner seat per ranked game against the league and every seat of FFA and Humans vs Nations games
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # Gate B: PPO vs the frozen clone (bar ~0.545), also per seat
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --a-cooldown 1 --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # bandwidth test (PLAN 3B): A's decision after each action is a no-op; every match prints A's meters
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --a-two-bins --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # its upward probe: A takes a troop and a gold action per decision
@@ -193,6 +194,13 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   Step 4's BC night and its scoring ran from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
   indexed record, so after a crawl `data/` mixes in v0.34.24 records: a BC run on both needs them split by version
   (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
+- Mixed runs (`--mix SETUP=WORKERS ...`, PLAN 4N): workers play the setups in the order given and `--workers` is
+  their sum. Rows are game-major (game e owns `first[e]` .. `first[e] + seats[e] - 1`); the learner has one seat
+  of each ranked game (the k-th plays seat k % 2, the league's pick the other) and every seat of an FFA or Humans
+  vs Nations game, decided by the setup's name (`WHOLE` in trainer/ppo.py). `global_step` counts learner rows,
+  and the curves are per setup: `setups/{win_rate,mean_reward,ticks}/<s>` (once two setups have finished games),
+  `actions/<s>/<act>`, `setups/cap_binds/<s>` (decisions with over 63 real players) and `setups/dead_share/<s>`
+  (decisions of a dead seat past the spawn phase).
 - The league (PLAN 4A, "League design"):
   - `--league` takes checkpoints and globs. Quote the globs: Python expands them.
   - Every 250 updates PPO also saves `avg<update>.pt`, the average of the weights of the last 5 kept checkpoints

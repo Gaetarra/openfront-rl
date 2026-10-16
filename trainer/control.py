@@ -358,6 +358,10 @@ const CHARTS = [
     ["episodes/win_rate_seat1", "seat 1"]], goal: "higher is better", ref: [0.545, "Gate B bar"],
     note: "Share of the last 200 games the learner won, overall and from each seat it plays. Against a copy of " +
       "itself, 0.5 is a draw. Dashed: the Gate B bar, for games against the frozen clone." },
+  { title: "Win rate by setup", prefix: "setups/win_rate/", goal: "higher is better",
+    note: "A mixed run (--mix): the share of each setup's last 200 learner games won. Ranked 1v1 against the league " +
+      "sits near 0.5. In FFA the learner holds four seats and one game has one winner, so the rate tops out at 0.25; " +
+      "Humans vs Nations seats share their team's result." },
   { title: "KL to the initial policy", lines: [["loss/kl_ref", "KL"]], goal: "small and level",
     note: "How far the policy has moved from where it started, per decision. A lower --kl-coef lets it move further: " +
       "expect a step up that levels off. If it keeps climbing while the win rate stays flat or falls, resume with a " +

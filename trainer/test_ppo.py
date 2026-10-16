@@ -9,10 +9,10 @@ import psutil
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from trainer.env import ROOT
+from trainer.env import FFA, HVN, ONION, ROOT
 from trainer.model import PolicyV1
-from trainer.ppo import (HostRows, Outcomes, gae, main, pack_bits, parse_args, parser, resume_args, run_info,
-                         seat_rows, unpack_bits)
+from trainer.ppo import (HostRows, Outcomes, cap_binds, gae, main, mix_of, pack_bits, parse_args, parser, resume_args,
+                         run_info, seat_rows, unpack_bits)
 
 
 class RunInfoTest(unittest.TestCase):
@@ -36,6 +36,21 @@ class RunInfoTest(unittest.TestCase):
         self.assertEqual(league["KL reference"], "c.pt")
         self.assertEqual(league["Frozen evaluations"], "128 games against 2 policies every 250 updates")
 
+    def test_a_mix_lists_each_setups_games_and_learner_seats(self):
+        mixed = run_info(parse_args(["--mix", "ranked1v1=2", "ffa=1", "hvn=1", "--games-per-worker", "2",
+                                     "--league", "a.pt", "b.pt"]))
+        self.assertEqual(mixed["Game"], "a mix of setups: ranked1v1 (4 games), ffa (2 games), hvn (2 games)")
+        self.assertEqual(mixed["Games at once"], "8 (4 workers x 2)", "the mix decides the workers")
+        self.assertEqual(mixed["Learner seat"], "ranked1v1: one of 2, in turn; ffa: all 4; hvn: all 4")
+        self.assertTrue(mixed["Against"].startswith("ranked1v1: a league of frozen policies"))
+        self.assertTrue(mixed["Against"].endswith("ffa: the game's own nations; hvn: the game's own nations"))
+
+    def test_a_mix_names_playlists_and_counts_of_at_least_one_worker(self):
+        self.assertEqual(mix_of(parse_args(["--mix", "ranked1v1=2", "ffa=3"])), {"ranked1v1": 2, "ffa": 3})
+        for bad in (["onion=1"], ["ffa=0"], ["ffa"], ["ffa=x"], ["ffa=1", "ffa=2"]):
+            with self.assertRaises(SystemExit, msg=bad):
+                parse_args(["--mix", *bad])
+
 
 class ResumeArgsTest(unittest.TestCase):
     SAVED = vars(parse_args(["--run", "r", "--setup", "ranked1v1", "--lr", "1e-4", "--kl-coef", "0.2"]))
@@ -58,22 +73,46 @@ class ResumeArgsTest(unittest.TestCase):
 
 class SeatRowsTest(unittest.TestCase):
     def test_the_learner_plays_every_seat_equally(self):
-        learner, others, seat = seat_rows(4, 2)
+        learner, others, slots, owner = seat_rows([2] * 4, [False] * 4)
         self.assertEqual(learner.tolist(), [0, 3, 4, 7])  # game slot e, seat e % 2: row e * 2 + seat
         self.assertEqual([o.tolist() for o in others], [[1, 2, 5, 6]])
-        self.assertEqual(seat.tolist(), [0, 1, 0, 1])
+        self.assertEqual((slots, owner), ([0, 1, 2, 3], [(0, 0), (1, 1), (2, 0), (3, 1)]))
         per_seat = np.arange(8).reshape(4, 2)  # what the workers return per game and seat: rewards, dones
-        self.assertEqual(per_seat[np.arange(4), seat.numpy()].tolist(), learner.tolist(), "the learner's own values")
-        learner, others, seat = seat_rows(3, 1)
-        self.assertEqual((learner.tolist(), others, seat.tolist()), ([0, 1, 2], [], [0, 0, 0]))
+        self.assertEqual([per_seat[e, s] for e, s in owner], learner.tolist(), "the learner's own values")
+        learner, others, slots, owner = seat_rows([1, 1, 1], [False] * 3)
+        self.assertEqual((learner.tolist(), others, slots, owner), ([0, 1, 2], [], [0, 1, 2], [(0, 0), (1, 0), (2, 0)]))
+
+    def test_the_learner_plays_one_seat_of_ranked_games_and_every_seat_of_ffa_and_hvn(self):
+        learner, others, slots, owner = seat_rows([2, 2, 4, 4], [False, False, True, True])
+        self.assertEqual(learner.tolist(), [0, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+        self.assertEqual([o.tolist() for o in others], [[1, 2]])
+        self.assertEqual(slots, [0, 1])
+        self.assertEqual(owner[:3], [(0, 0), (1, 1), (2, 0)])
+        uniform = seat_rows([2] * 4, [False] * 4)  # today's league: seat e % 2
+        self.assertEqual(uniform[0].tolist(), [0, 3, 4, 7])
+        learner, others, slots, owner = seat_rows([4, 4], [True, True])
+        self.assertEqual((learner.tolist(), others, slots), (list(range(8)), [], []), "no frozen opponent at all")
+
+
+class CapBindsTest(unittest.TestCase):
+    def test_the_attention_cap_binds_above_63_real_players(self):
+        players = torch.zeros(3, 80, 17)
+        players[:, 0, 0] = 1  # row 0, the unowned land, exists
+        players[:, 1:64, 0] = 1  # 63 players exist: ...
+        players[:, 1, 2] = 1  # ... the seat itself,
+        players[:, 2:30, 3] = 1  # friends,
+        players[:, 30:64, 4] = 1  # and enemies
+        players[1, 64, 0], players[1, 64, 4] = 1, 1  # row 1 has a 64th
+        players[2, 64:74, 0], players[2, 64:74, 5] = 1, 1  # row 2 has 10 bots instead: they do not count
+        self.assertEqual(cap_binds(players).tolist(), [False, True, False], "63 players and row 0 fit the 64 slots")
 
 
 class OutcomesTest(unittest.TestCase):
     def test_results_survive_a_restart(self):
         o = Outcomes(rows=2)
         o.record([0.9, 0.9], [0.8, -0.8])
-        o.finish([{"env": 0, "seat": 0, "reward": 1.0, "rank": 1, "ticks": 10},
-                  {"env": 1, "seat": 0, "reward": -1.0, "rank": 2, "ticks": 20}])
+        o.finish([{"row": 0, "setup": "s", "env": 0, "seat": 0, "reward": 1.0, "rank": 1, "ticks": 10},
+                  {"row": 1, "setup": "s", "env": 1, "seat": 0, "reward": -1.0, "rank": 2, "ticks": 20}])
         resumed = Outcomes(rows=2)
         resumed.load(o.state())
         self.assertEqual(resumed.summary(), o.summary(), "the win rate and value curves carry on after a resume")
@@ -81,9 +120,10 @@ class OutcomesTest(unittest.TestCase):
 
     def test_win_rate_per_seat(self):
         o = Outcomes(rows=2)
-        o.finish([{"env": 0, "seat": 0, "reward": 1.0, "rank": 1, "ticks": 10},
-                  {"env": 1, "seat": 1, "reward": -1.0, "rank": 2, "ticks": 20}])
+        o.finish([{"row": 0, "setup": "s", "env": 0, "seat": 0, "reward": 1.0, "rank": 1, "ticks": 10},
+                  {"row": 1, "setup": "s", "env": 1, "seat": 1, "reward": -1.0, "rank": 2, "ticks": 20}])
         s = o.summary()
+        self.assertFalse([k for k in s if k.startswith("setups/")], "one setup: no per-setup tags")
         self.assertEqual((s["episodes/win_rate_seat0"], s["episodes/win_rate_seat1"]), (1.0, 0.0))
 
     def test_value_outcome_correlation_by_phase(self):
@@ -91,7 +131,8 @@ class OutcomesTest(unittest.TestCase):
         rewards = [1.0, -1.0, -2 / 3, -5 / 6]
         o.record([0.1] * 4, [0.3, 0.3, -0.2, -0.2])  # early: only loosely related to the outcome
         o.record([0.9] * 4, [0.9 * r for r in rewards])  # late: tracks it
-        o.finish([{"env": i, "seat": 0, "reward": r, "rank": 1, "ticks": 1} for i, r in enumerate(rewards)])
+        o.finish([{"row": i, "setup": "s", "env": i, "seat": 0, "reward": r, "rank": 1, "ticks": 1}
+                  for i, r in enumerate(rewards)])
         s = o.summary()
         self.assertAlmostEqual(s["value/outcome_corr_late"], 1.0, places=5)
         self.assertLess(s["value/outcome_corr_early"], 0.9)
@@ -100,10 +141,29 @@ class OutcomesTest(unittest.TestCase):
     def test_no_correlation_when_every_game_ends_the_same(self):
         o = Outcomes(rows=2)
         o.record([0.9, 0.9], [-0.5, -0.8])
-        o.finish([{"env": i, "seat": 0, "reward": -1.0, "rank": 4, "ticks": 1} for i in range(2)])
+        o.finish([{"row": i, "setup": "s", "env": i, "seat": 0, "reward": -1.0, "rank": 4, "ticks": 1}
+                  for i in range(2)])
         s = o.summary()
         self.assertEqual(s["value/outcome_acc_late"], 1.0)  # trivially right: why the gate uses the correlation
         self.assertNotIn("value/outcome_corr_late", s)
+
+    def test_each_setup_keeps_its_own_window_and_it_survives_a_restart(self):
+        def game(row, setup, rank, ticks):
+            return {"row": row, "setup": setup, "env": row, "seat": 0, "reward": 1.0 if rank == 1 else -1.0,
+                    "rank": rank, "ticks": ticks}
+        o = Outcomes(rows=2, window=2)
+        o.finish([game(0, "ranked1v1", 1, 100)])
+        o.finish([game(1, "ffa", 3, 200), game(1, "ffa", 4, 300), game(1, "ffa", 1, 400)])
+        s = o.summary()
+        self.assertEqual((s["setups/win_rate/ranked1v1"], s["setups/ticks/ranked1v1"]), (1.0, 100.0))
+        self.assertEqual((s["setups/win_rate/ffa"], s["setups/mean_reward/ffa"], s["setups/ticks/ffa"]),
+                         (0.5, 0.0, 350.0), "the last 2 of the setup's games; the other setup's never pushed them out")
+        self.assertEqual(s["episodes/win_rate"], 0.5, "the overall window still holds the last 2 games of any setup")
+        self.assertNotIn("episodes/win_rate_seat0", s, "seats mean different things in different setups")
+        self.assertEqual(sorted(o.state()["by_setup"]), ["ffa", "ranked1v1"])
+        resumed = Outcomes(rows=2, window=2)
+        resumed.load(o.state())
+        self.assertEqual(resumed.summary(), s)
 
 
 class PackTest(unittest.TestCase):
@@ -209,7 +269,7 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(first["global_step"], 2 * 16 * 2)
         # 32 decisions do not finish a game: the unfinished games are skipped on resume, so no seed is played twice
         self.assertEqual(first["episodes"], [1, 1])
-        self.assertEqual(first["outcomes"], {"episodes": [], "samples": []}, "no game finished yet")
+        self.assertEqual(first["outcomes"], {"episodes": [], "samples": [], "by_setup": {}}, "no game finished yet")
         main(common + ["--updates", "3", "--resume"])
         second = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
         self.assertEqual(second["update"], 3)
@@ -281,6 +341,45 @@ class SmokeTest(unittest.TestCase):
         logs.Reload()
         self.assertEqual(len(logs.Scalars("eval/rating")), 4)
         self.assertEqual(len(logs.Scalars(f"eval/vs_{self.RUN}/pool1")), 4)
+
+    def test_a_mixed_run_learns_from_every_ffa_and_hvn_seat(self):
+        """4N: a ranked game gives the learner one seat (the frozen opponent plays the other), an FFA or Humans vs Nations
+        game all four. The patched ranked entry is a 2-seat Onion game: the rows follow the setup's name, not its
+        config. Games of 1 minute end at tick ~800 when someone wins, but a Humans vs Nations game the nations lead
+        runs to the backstop at tick 1400, 280 steps: at 96 steps an update, every setup finishes a game."""
+        init = ROOT / "checkpoints" / self.RUN / "init.pt"
+        init.parent.mkdir(parents=True, exist_ok=True)
+        torch.manual_seed(0)
+        net = PolicyV1({"channels": 22, "playerFeatures": 17, "scalars": 16, "acts": 5})
+        torch.save({"model": net.state_dict(), "args": {"widths": "64,128,192"}}, init)
+        playlists = {"ranked1v1": {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1},
+                     "ffa": {**FFA, "timerMinutes": 1}, "hvn": {**HVN, "timerMinutes": 1}}
+        with mock.patch.dict("trainer.env.PLAYLISTS", playlists):
+            main(["--run", self.RUN, "--mix", "ranked1v1=1", "ffa=1", "hvn=1", "--games-per-worker", "1", "--steps", "96",
+                  "--minibatches", "2", "--epochs", "1", "--port", "0", "--init", str(init), "--opponent", str(init),
+                  "--updates", "4"])
+            main(["--run", self.RUN, "--resume", "--port", "0", "--updates", "5"])
+        state = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
+        self.assertEqual(state["update"], 5)
+        self.assertEqual(state["global_step"], 5 * 96 * 9, "1 + 4 + 4 learner rows")
+        self.assertEqual((state["args"]["mix"], state["args"]["workers"]), (["ranked1v1=1", "ffa=1", "hvn=1"], 3))
+        logs = EventAccumulator(str(ROOT / "runs" / self.RUN))
+        logs.Reload()
+        tags = logs.Tags()["scalars"]
+        for tag in ("setups/win_rate/ranked1v1", "setups/win_rate/ffa", "setups/win_rate/hvn", "setups/cap_binds/ffa",
+                    "setups/dead_share/hvn", "actions/hvn/attack", "actions/attack"):
+            self.assertIn(tag, tags)
+        by_setup = state["outcomes"]["by_setup"]
+        for setup, seats in (("ffa", 4), ("hvn", 4), ("ranked1v1", 1)):
+            eps = by_setup[setup]
+            self.assertTrue(eps and len(eps) % seats == 0, f"{setup}: whole games, one episode per learner seat")
+            for i in range(0, len(eps), seats):  # a finished game's seats come together
+                game = eps[i:i + seats]
+                self.assertEqual(len({(e["env"], e["ticks"]) for e in game}), 1, setup)
+                if seats == 4:
+                    self.assertEqual([e["seat"] for e in game], [0, 1, 2, 3], setup)
+                if setup == "hvn":
+                    self.assertEqual(len({e["reward"] for e in game}), 1, "a Humans vs Nations team shares one result")
 
 
 if __name__ == "__main__":
