@@ -125,6 +125,14 @@ test("the held-out and seen maps are fixed, fit the ranked grid and stay out of 
   }
 });
 
+test("every FFA and Humans vs Nations config has the ranked grid, whichever maps it draws from", () => {
+  // the network pools over the whole grid, padding included: a gate on the held-out maps (176 x 192 alone) must play
+  // the grid it trained on
+  assert.deepEqual(gridFor({ ...FFA, maps: "heldout" }), [192, 256]);
+  assert.deepEqual(gridFor({ ...HVN, maps: "heldout" }), [192, 256]);
+  assert.deepEqual(gridFor({ ...FFA, seats: 1, maps: "seen" }), [192, 256]);
+});
+
 test("a mixed run shares the ranked grid and the largest player table", () => {
   assert.deepEqual(gridFor(FFA), [192, 256]);
   assert.equal(slotsFor(FFA), 1 + 4 + 72 + 400); // World's 72 nations

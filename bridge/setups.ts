@@ -182,11 +182,15 @@ function bothSizes(maps: GameMapType[]): [GameMapType, GameMapSize][] {
   ]);
 }
 
-/** Every map and size a config can produce. */
+/**
+ * Every map and size a config can produce. FFA and Humans vs Nations take every public map that fits the ranked grid
+ * (training's and the held-out ones) whatever `maps` they draw from: the network pools its last CNN stage over the
+ * whole grid, padding included, so the gate's games on 4 maps (176 x 192 alone) must play on the grid training used.
+ */
 function mapsOf(cfg: EnvConfig): [GameMapType, GameMapSize][] {
   if (cfg.playlist === "ranked1v1") return bothSizes(RANKED_1V1_MAPS);
   if (cfg.playlist === "ffa" || cfg.playlist === "hvn") {
-    return bothSizes(publicMaps(cfg.playlist === "hvn", cfg.maps ?? "training"));
+    return bothSizes([...publicMaps(cfg.playlist === "hvn", "training"), ...HELD_OUT_MAPS]);
   }
   return [[cfg.map as GameMapType, cfg.compact ? GameMapSize.Compact : GameMapSize.Normal]];
 }
@@ -209,7 +213,11 @@ export function gridFor(cfg: EnvConfig): [number, number] {
   return gridOf(mapsOf(cfg));
 }
 
-/** Player-table rows: row 0 (unowned land), the seats, the nations and the most bots any game of the config has. */
+/**
+ * Player-table rows: row 0 (unowned land), the seats, the nations and the most bots any game of the config has. Unlike
+ * the grid, it follows the config's own `maps`: absent players are masked, so a gate's table may be smaller than
+ * training's.
+ */
 export function slotsFor(cfg: EnvConfig): number {
   switch (cfg.playlist) {
     case "ranked1v1":

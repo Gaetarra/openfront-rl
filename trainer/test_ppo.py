@@ -174,6 +174,18 @@ class OutcomesTest(unittest.TestCase):
         resumed.load(o.state())
         self.assertEqual(resumed.summary(), s)
 
+    def test_a_mixed_run_logs_each_setups_share_of_cut_games(self):
+        """4N: a game the env's backstop ended is decided by tiles, so a setup whose win rate rests on them shows it.
+        Games from before the flag (older checkpoints) count as not cut."""
+        def game(row, setup, **extra):
+            return {"row": row, "setup": setup, "env": row, "seat": 0, "reward": 1.0, "rank": 1, "ticks": 10, **extra}
+        o = Outcomes(rows=2)
+        o.finish([game(0, "ffa", cut=False)] + [game(0, "ffa", cut=True)] * 3)
+        self.assertFalse([k for k in o.summary() if "cut_share" in k], "one setup: no per-setup tags")
+        o.finish([game(1, "ranked1v1")])
+        s = o.summary()
+        self.assertEqual((s["setups/cut_share/ffa"], s["setups/cut_share/ranked1v1"]), (0.75, 0.0))
+
 
 class PackTest(unittest.TestCase):
     def test_cell_masks_come_back_exactly_from_their_bits(self):
@@ -357,10 +369,11 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(len(logs.Scalars(f"eval/vs_{self.RUN}/pool1")), 4)
 
     def test_a_mixed_run_learns_from_every_ffa_and_hvn_seat(self):
-        """4N: a ranked game gives the learner one seat (the frozen opponent plays the other), an FFA or Humans vs Nations
+        """4N: a ranked game gives the learner one seat (the league's pick plays the other), an FFA or Humans vs Nations
         game all four. The patched ranked entry is a 2-seat Onion game: the rows follow the setup's name, not its
-        config. Games of 1 minute end at tick ~800 when someone wins, but a Humans vs Nations game the nations lead
-        runs to the backstop at tick 1400, 280 steps: at 96 steps an update, every setup finishes a game."""
+        config. It is listed second, so it is game 1 but the league's slot 0. Games of 1 minute end at tick ~800 when
+        someone wins, but a Humans vs Nations game the nations lead runs to the backstop at tick 1400, 280 steps: at 96
+        steps an update, every setup finishes a game."""
         init = ROOT / "checkpoints" / self.RUN / "init.pt"
         init.parent.mkdir(parents=True, exist_ok=True)
         torch.manual_seed(0)
@@ -369,16 +382,16 @@ class SmokeTest(unittest.TestCase):
         playlists = {"ranked1v1": {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1},
                      "ffa": {**FFA, "timerMinutes": 1}, "hvn": {**HVN, "timerMinutes": 1}}
         with mock.patch.dict("trainer.env.PLAYLISTS", playlists), mock.patch("trainer.ppo.SNAPSHOT", 2):
-            main(["--run", self.RUN, "--mix", "ranked1v1=1", "ffa=1", "hvn=1", "--games-per-worker", "1", "--steps", "96",
-                  "--minibatches", "2", "--epochs", "1", "--port", "0", "--init", str(init), "--opponent", str(init),
-                  "--panel", str(init), "--eval-every", "4", "--eval-games", "2", "--eval-games-public", "1",
-                  "--save-every", "1", "--updates", "4"])
+            main(["--run", self.RUN, "--mix", "ffa=1", "ranked1v1=1", "hvn=1", "--games-per-worker", "1",
+                  "--steps", "96", "--minibatches", "2", "--epochs", "1", "--port", "0", "--init", str(init),
+                  "--league", str(init), "--panel", str(init), "--eval-every", "4", "--eval-games", "2",
+                  "--eval-games-public", "1", "--save-every", "1", "--updates", "4"])
             main(["--run", self.RUN, "--resume", "--port", "0", "--updates", "5", "--eval-every", "6",
                   "--eval-games-public", "2"])
         state = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
         self.assertEqual(state["update"], 5)
         self.assertEqual(state["global_step"], 5 * 96 * 9, "1 + 4 + 4 learner rows")
-        self.assertEqual((state["args"]["mix"], state["args"]["workers"]), (["ranked1v1=1", "ffa=1", "hvn=1"], 3))
+        self.assertEqual((state["args"]["mix"], state["args"]["workers"]), (["ffa=1", "ranked1v1=1", "hvn=1"], 3))
         self.assertEqual((state["args"]["eval_every"], state["args"]["eval_games_public"]), (6, 2),
                          "a resume may change both")
         log = (ROOT / "runs" / self.RUN / "panel.jsonl").read_text(encoding="utf-8")
@@ -393,7 +406,7 @@ class SmokeTest(unittest.TestCase):
         tags = logs.Tags()["scalars"]
         self.assertEqual([len(logs.Scalars(f"eval/nations_{s}")) for s in ("ffa", "hvn")], [2, 2])
         for tag in ("setups/win_rate/ranked1v1", "setups/win_rate/ffa", "setups/win_rate/hvn", "setups/cap_binds/ffa",
-                    "setups/dead_share/hvn", "actions/hvn/attack", "actions/attack"):
+                    "setups/dead_share/hvn", "setups/cut_share/hvn", "actions/hvn/attack", "actions/attack"):
             self.assertIn(tag, tags)
         by_setup = state["outcomes"]["by_setup"]
         for setup, seats in (("ffa", 4), ("hvn", 4), ("ranked1v1", 1)):
@@ -406,6 +419,8 @@ class SmokeTest(unittest.TestCase):
                     self.assertEqual([e["seat"] for e in game], [0, 1, 2, 3], setup)
                 if setup == "hvn":
                     self.assertEqual(len({e["reward"] for e in game}), 1, "a Humans vs Nations team shares one result")
+        self.assertEqual(sum(map(len, state["league"]["results"].values())), len(by_setup["ranked1v1"]),
+                         "every finished ranked game counts for PFSP, though its game number is not its league slot")
 
 
 if __name__ == "__main__":

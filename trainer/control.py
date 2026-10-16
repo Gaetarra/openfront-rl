@@ -349,8 +349,9 @@ async function refresh() {
 // way is good; ref: [height of a dashed line, its name].
 const CHARTS = [
   { title: "Frozen evaluations", prefix: "eval/vs_", goal: "higher is better", ref: [0.8, "Gate 4A bar, 3B clone"],
-    note: "Every 250 updates the snapshot plays fixed games against each panel policy while training waits: its win " +
-      "rate against each. Dashed: Gate 4A's bar against the 3B clone (0.70 against the Phase 2 PPO bot)." },
+    note: "Every --eval-every updates (250 by default) the snapshot plays fixed games against each panel policy " +
+      "while training waits: its win rate against each. Dashed: Gate 4A's bar against the 3B clone (0.70 against the " +
+      "Phase 2 PPO bot)." },
   { title: "Frozen evaluations against the nations", prefix: "eval/nations_", goal: "higher is better",
     ref: [0.5, "Gate 4N bar, FFA"],
     note: "A mixed run's frozen evaluations also play the FFA (one seat) and Humans vs Nations (the 4-seat team) games " +
@@ -364,9 +365,10 @@ const CHARTS = [
     note: "Share of the last 200 games the learner won, overall and from each seat it plays. Against a copy of " +
       "itself, 0.5 is a draw. Dashed: the Gate B bar, for games against the frozen clone." },
   { title: "Win rate by setup", prefix: "setups/win_rate/", goal: "higher is better",
-    note: "A mixed run (--mix): the share of each setup's last 200 learner games won. Ranked 1v1 against the league " +
-      "sits near 0.5. In FFA the learner holds four seats and one game has one winner, so the rate tops out at 0.25; " +
-      "Humans vs Nations seats share their team's result." },
+    note: "A mixed run (--mix): the share of each setup's last 200 learner episodes won, one per learner seat: 200 " +
+      "games in ranked 1v1 (one seat) and 50 in FFA and Humans vs Nations (four seats each). Ranked 1v1 against the " +
+      "league sits near 0.5. In FFA the learner holds four seats and one game has one winner, so the rate tops out " +
+      "at 0.25; Humans vs Nations seats share their team's result." },
   { title: "KL to the initial policy", lines: [["loss/kl_ref", "KL"]], goal: "small and level",
     note: "How far the policy has moved from where it started, per decision. A lower --kl-coef lets it move further: " +
       "expect a step up that levels off. If it keeps climbing while the win rate stays flat or falls, resume with a " +

@@ -28,6 +28,17 @@ class EvalTest(unittest.TestCase):
         s = summarize([{"reward": 1, "rank": 1, "cut": False}, {"reward": -1, "rank": 2, "cut": True}])
         self.assertEqual(s["cut_share"], 0.5, "the share of games the backstop ended, decided by tiles")
 
+    def test_a_cut_game_is_not_a_decided_win(self):
+        """Gate 4N's bars read the games won and not cut, over all games: the public rules play a cut game on."""
+        s = summarize([{"reward": 1, "rank": 1, "cut": False}, {"reward": 1, "rank": 1, "cut": True},
+                       {"reward": -1, "rank": 2, "cut": False}])
+        self.assertAlmostEqual(s["win_rate"], 2 / 3, msg="the lead at the backstop still counts here")
+        self.assertAlmostEqual(s["decided_win_rate"], 1 / 3)
+        self.assertAlmostEqual(s["decided_win_rate_se"], 1 / 3, msg="the std of [1, 0, 0] over sqrt(3), as win_rate_se")
+        self.assertAlmostEqual(s["cut_share"], 1 / 3)
+        old = summarize([{"reward": 1, "rank": 1}, {"reward": -1, "rank": 2}])
+        self.assertEqual((old["decided_win_rate"], old["cut_share"]), (0.5, 0.0), "results without the flag: not cut")
+
     def test_summarize_splits_the_win_rate_by_seat(self):
         s = summarize([{"reward": 1, "rank": 1, "seat": 0}, {"reward": 1, "rank": 1, "seat": 1},
                        {"reward": -1, "rank": 2, "seat": 1}])

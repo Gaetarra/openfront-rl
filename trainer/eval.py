@@ -8,7 +8,8 @@
 A policy is "random", "scripted" or a checkpoint path. The results are the first policy's; in 2-seat setups the two
 policies swap seats from one game slot to the next. The setups ffa and hvn (4N) play the public rules, no timer, on
 --maps: FFA with policy A in one seat against the map's Hard nations, Humans vs Nations with it in all four (--b is not
-used). Every result is printed and saved to runs/eval/<date>-<time>.json.
+used). Gate 4N's bars read decided_win_rate, the games won and not cut by the env's backstop (win_rate counts a lead
+at the backstop as a win). Every result is printed and saved to runs/eval/<date>-<time>.json.
 """
 import argparse
 import datetime
@@ -39,7 +40,9 @@ def summarize(results):
     seat = np.array([r.get("seat", 0) for r in results])
     by_seat = {f"win_rate_seat{s}": float(win[seat == s].mean()) for s in np.unique(seat)} if len(set(seat)) > 1 else {}
     cut = np.array([r.get("cut", False) for r in results], float)  # games the env's backstop ended, decided by tiles
+    decided = win * (1 - cut)  # Gate 4N's win: the public rules play a cut game on, so a lead at the backstop is none
     return {"episodes": n, "win_rate": float(win.mean()), "win_rate_se": se(win), **by_seat,
+            "decided_win_rate": float(decided.mean()), "decided_win_rate_se": se(decided),
             "mean_reward": float(reward.mean()), "mean_reward_se": se(reward), "mean_rank": float(rank.mean()),
             "cut_share": float(cut.mean())}
 

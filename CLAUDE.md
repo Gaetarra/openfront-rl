@@ -95,12 +95,12 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.ppo --run ppo-bc2 --setup ranked1v1 --init checkpoints/bc/update0060000.pt --opponent checkpoints/bc/update0060000.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --updates 5000   # PPO from the Gate A clone (settings: docs/PLAN.md, Phase 2 results)
 .venv/Scripts/python -m trainer.ppo --run ppo4a-s0 --setup ranked1v1 --init checkpoints/bc3b-v4/latest.pt --opponent checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --minibatches 12 --updates 3000   # 4A Stage 0 (PLAN "League design"): PPO from the 3B clone against its frozen self
 .venv/Scripts/python -m trainer.ppo --run league4a2 --setup ranked1v1 --init checkpoints/swa-lr4a/update1000-2000.pt --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 2.5e-5 --ent-coef 0 --workers 16 --games-per-worker 2 --minibatches 12 --updates 4000 --league checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/bc3-moe/latest.pt checkpoints/ppo-bc2/update005000.pt checkpoints/bc/update0060000.pt --panel checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/ppo-bc2/update005000.pt --eval-games 128   # league v2 (PLAN 4A, "League v2"): PFSP over a pool, frozen evaluations of the weight averages every 250 updates; launcher with a restart loop: explorer.exe runs\league4a2.cmd
-.venv/Scripts/python -m trainer.ppo --run ffa4n --mix ranked1v1=8 ffa=4 hvn=2 --games-per-worker 1 --init checkpoints/league4a2/avg004000.pt --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 2.5e-5 --ent-coef 0 --minibatches 12 --updates 4000 --league checkpoints/league4a2/avg004000.pt checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/ppo-bc2/update005000.pt   # 4N (PLAN 4N): 14 workers on three setups at once, one learner seat per ranked game against the league and every seat of FFA and Humans vs Nations games
+.venv/Scripts/python -m trainer.ppo --run ffa4n --mix ranked1v1=8 ffa=4 hvn=2 --games-per-worker 1 --init checkpoints/league4a2/avg004000.pt --kl-ref checkpoints/bc3b-v4/latest.pt --kl-coef 0.2 --lr 2.5e-5 --ent-coef 0 --minibatches 12 --updates 4000 --league "checkpoints/league4a2/avg*.pt" checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt checkpoints/ppo-bc2/update005000.pt --panel checkpoints/league4a2/avg004000.pt checkpoints/swa-lr4a/update1000-2000.pt checkpoints/bc3b-v4/latest.pt --eval-every 500 --eval-games 56 --eval-games-public 28   # the 4N run (PLAN 4N): 14 workers on three setups at once; its pool and panel are the plan's proposal (Task 8); the eval sizes are multiples of the 14 game slots (play() rounds up to a multiple of the slots)
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # Gate B: PPO vs the frozen clone (bar ~0.545), also per seat
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --a-cooldown 1 --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # bandwidth test (PLAN 3B): A's decision after each action is a no-op; every match prints A's meters
 .venv/Scripts/python -m trainer.eval --a checkpoints/ppo-bc2/update005000.pt --a-two-bins --b checkpoints/bc/update0060000.pt --episodes 512 --workers 16 --games-per-worker 2   # its upward probe: A takes a troop and a gold action per decision
-.venv/Scripts/python -m trainer.eval --setup ffa --a <ckpt> --maps heldout --episodes 128 --workers 16 --games-per-worker 2   # Gate 4N (PLAN 4N): policy A in one FFA seat against the map's Hard nations, public rules (no timer), 128 games on the 4 held-out maps; then --maps seen (4 training maps: the gap between seen and unseen). Bar 0.50; the result JSON adds maps and cut_share (games the env's backstop ended)
-.venv/Scripts/python -m trainer.eval --setup hvn --a <ckpt> --maps heldout --episodes 128 --workers 16 --games-per-worker 2   # Gate 4N: policy A in all 4 seats of the team against 4 Hard nations, held-out maps, no timer; one result per game (bar 0.70). --b is not used
+.venv/Scripts/python -m trainer.eval --setup ffa --a <ckpt> --maps heldout --episodes 128 --workers 16 --games-per-worker 2   # Gate 4N (PLAN 4N): policy A in one FFA seat against the map's Hard nations, public rules (no timer), 128 games on the 4 held-out maps; then --maps seen (4 training maps: the gap between seen and unseen). Bar 0.50 on decided_win_rate (games won and not cut: a lead at the env's backstop is no win); the result JSON adds maps and cut_share (games the backstop ended)
+.venv/Scripts/python -m trainer.eval --setup hvn --a <ckpt> --maps heldout --episodes 128 --workers 16 --games-per-worker 2   # Gate 4N: policy A in all 4 seats of the team against 4 Hard nations, held-out maps, no timer; one result per game (bar 0.70, on decided_win_rate). --b is not used
 .venv/Scripts/python -m trainer.eval --a checkpoints/bc/update0060000.pt --b random --episodes 8 --record 1   # save games to replays/<A> vs <B>/, players named after their policies
 .venv/Scripts/python -m trainer.watch --dir "bc 60000 vs random"   # watch one matchup's saved games: starts the game's dev client and serves them; open http://localhost:9000/game/<id>, Ctrl+C stops both
 .venv/Scripts/python scripts/diag_baselines.py                  # random vs scripted expansion (Phase 1 diagnosis)
@@ -124,8 +124,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   - A resume hides from the curves what the crashed sitting logged after its last checkpoint.
   - BC saves every 250 updates and keeps every 2,500th; PPO saves every 25.
 - `--resume` keeps the run's settings and refuses flags it would ignore. It takes `--updates` (and, for PPO,
-  `--kl-coef`) and this sitting's `--port`, `--duty` and `--gpu-temp-limit`. To change anything else, start a new
-  run from the checkpoint with `--init`.
+  `--kl-coef`, `--eval-games`, `--eval-every` and `--eval-games-public`) and this sitting's `--port`, `--duty` and
+  `--gpu-temp-limit`. To change anything else, start a new run from the checkpoint with `--init`.
 - BC: an update averages `--accum` replay windows (default 8), and the learning rate warms up, then decays (cosine)
   over `--updates` (default: one pass over the training records). BC checkpoints from before Phase 3 cannot resume;
   start from them with `--init`. Runs with the same `--seed` replay the same records in the same order.
@@ -196,13 +196,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   Step 4's BC night and its scoring ran from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
   indexed record, so after a crawl `data/` mixes in v0.34.24 records: a BC run on both needs them split by version
   (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
-- Mixed runs (`--mix SETUP=WORKERS ...`, PLAN 4N): workers play the setups in the order given and `--workers` is
-  their sum. Rows are game-major (game e owns `first[e]` .. `first[e] + seats[e] - 1`); the learner has one seat
-  of each ranked game (the k-th plays seat k % 2, the league's pick the other) and every seat of an FFA or Humans
-  vs Nations game, decided by the setup's name (`WHOLE` in trainer/ppo.py). `global_step` counts learner rows,
-  and the curves are per setup: `setups/{win_rate,mean_reward,ticks}/<s>` (once two setups have finished games),
-  `actions/<s>/<act>`, `setups/cap_binds/<s>` (decisions with over 63 real players) and `setups/dead_share/<s>`
-  (decisions of a dead seat past the spawn phase).
+- Mixed runs (`--mix SETUP=WORKERS ...`, PLAN 4N): workers play the setups in the order given; rows are game-major
+  (game e owns `first[e]` .. `first[e] + seats[e] - 1`). The learner has one seat of each ranked game (the league's pick
+  the other) and every seat of an FFA or Humans vs Nations game (`WHOLE` in ppo.py); `global_step` counts learner rows.
 - The league (PLAN 4A, "League design"):
   - `--league` takes checkpoints and globs. Quote the globs: Python expands them.
   - Every 250 updates PPO also saves `avg<update>.pt`, the average of the weights of the last 5 kept checkpoints

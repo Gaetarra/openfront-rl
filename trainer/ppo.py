@@ -78,8 +78,9 @@ def parser():
                    help="instead of --opponent, a pool of frozen checkpoints (globs expand): PFSP picks the opponent of "
                         "new games every 25 updates, and the learner's weight averages join it every 250 (PLAN 4A)")
     p.add_argument("--panel", nargs="+",
-                   help="frozen checkpoints that every 250th update's weight average (and --init) plays on fixed games "
-                        "while training waits; the first anchors the Bradley-Terry rating (PLAN 4A)")
+                   help="frozen checkpoints that the weight average (and --init) plays on fixed games every "
+                        "--eval-every updates while training waits; the first anchors the Bradley-Terry rating "
+                        "(PLAN 4A)")
     p.add_argument("--eval-games", type=int, default=128,
                    help="games per panel evaluation, split over the panel by game slot (given with --resume, it replaces "
                         "the run's)")
@@ -313,11 +314,13 @@ class Outcomes:
                "episodes/mean_reward": float(np.mean([e["reward"] for e in ep])),
                "episodes/mean_rank": float(np.mean([e["rank"] for e in ep])),
                "episodes/ticks": float(np.mean([e["ticks"] for e in ep]))}
-        if len(self.by_setup) > 1:  # a mixed run: each setup's win rate, reward and game length
+        if len(self.by_setup) > 1:  # a mixed run: each setup's win rate, reward, game length and share of cut games
             for s, eps in self.by_setup.items():
                 out[f"setups/win_rate/{s}"] = float(np.mean([e["rank"] == 1 for e in eps]))
                 out[f"setups/mean_reward/{s}"] = float(np.mean([e["reward"] for e in eps]))
                 out[f"setups/ticks/{s}"] = float(np.mean([e["ticks"] for e in eps]))
+                cut = [e.get("cut", False) for e in eps]  # games from before the flag (older checkpoints) were not cut
+                out[f"setups/cut_share/{s}"] = float(np.mean(cut))
         seats = sorted({e["seat"] for e in ep})
         if len(seats) > 1 and len(self.by_setup) < 2:  # the learner plays every seat: does it win from each?
             for seat in seats:
