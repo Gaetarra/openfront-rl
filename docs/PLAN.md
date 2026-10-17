@@ -1715,8 +1715,27 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - **Frozen evaluations: 56 ranked games and 28 each for FFA and Humans vs Nations**, instead of 64 and 32.
         - Both are multiples of the run's 14 game slots: `play()` rounds up to a multiple of the slots.
         - Layout: `--mix ranked1v1=8 ffa=4 hvn=2 --games-per-worker 1`.
+  - **The speed check** (2026-10-17, 02:36–03:05, the user's go; `runs/speed4n`): the run's full command for 30
+    updates, exit 0.
+    - **Speed:** 132 decisions/s over updates 10–30 (96–142), 11.6 s per update. League v2: 115–137, ~16.5 s per update
+      with its evaluations.
+    - **Memory:** the trainer 20.2 GiB private (league v2: 19.4–19.9), the GPU 8.5 GB reserved and 6.6 GB in use. The
+      Node workers hold at most 8.2 GB in the evaluation round (28 alive) and 4.3 GB in training (14).
+    - **The evaluation round:** 23 minutes. 4,000 updates: ~13 h of training plus 9 rounds (~3.5 h), ~16.5 h in all, the
+      evaluations ~19% of it.
+      - Both will grow as the bot survives longer: the env ends a game when all its seats are dead, and the FFA games
+        ended early.
+    - **Dead seats:** 39% of the FFA rows and 22% of the Humans vs Nations rows over updates 10–30, ~25% of all learner
+      rows.
+      - The 64-player cap never bound (only 4 FFA games), and no game was cut.
+    - **The start against the nations** (the round at update 0: training maps, the 30-minute timer):
+      - FFA, one seat against Hard nations: 1 win in 28, mean rank 19.2.
+      - Humans vs Nations: 0 wins in 28.
+      - In training games the bot attacked in ~5% of its decisions in FFA and Humans vs Nations, against 16% in ranked
+        1v1, and did nothing in ~94%.
+      - Humans vs Nations has two teams, so its reward is ±1 (decision 9). Without wins it gives PPO no signal. FFA's
+        reward is graded by rank, so its games carry signal without wins.
     - **Next, each on the user's go:**
-      - the speed check: 30 updates and one evaluation round, with the run's full flags;
       - the baselines (~3–4 h);
       - the run.
   - **After 4N**, in this order: alliance and donation actions; the crawl of public FFA/Team and ranked 2v2 records,
