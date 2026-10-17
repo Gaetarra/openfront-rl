@@ -1733,8 +1733,9 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - Humans vs Nations: 0 wins in 28.
       - In training games the bot attacked in ~5% of its decisions in FFA and Humans vs Nations, against 16% in ranked
         1v1, and did nothing in ~94%.
-      - Humans vs Nations has two teams, so its reward is ±1 (decision 9). Without wins it gives PPO no signal. FFA's
-        reward is graded by rank, so its games carry signal without wins.
+      - Humans vs Nations has two teams, so its reward is ±1 (decision 9). Without wins its only signal is the
+        discount's push to lose later (γ 0.999 per decision: a loss 10 minutes away weighs −0.30). FFA's reward is
+        graded by rank, so its games carry signal without wins.
     - **Next, each on the user's go:**
       - the baselines (~3–4 h);
       - the run.
