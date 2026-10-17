@@ -1758,7 +1758,12 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       - A game between copies always has a winning team, so even two teams give a signal, and more teams rank them.
       - Public Team games are ~60% "2–7 teams" and ~20% Duos, Trios or Quads; Humans vs Nations is the other ~20%.
       - Whether the 4N run waits for them is the user's call.
-    - **Next, on the user's go:** the run.
+  - **The run** started 2026-10-17 at 04:38 (the user's go; `explorer.exe runs\ffa4n.cmd`, the 6-attempt restart loop;
+    attempts in `runs/ffa4n-runs.log`, evaluations in `runs/ffa4n/panel.jsonl`).
+    - The pool and panel are as proposed: league v2's 16 averages, the lr4a average, the 3B clone and the Phase 2 PPO
+      bot; the panel is league v2's final average (0 Elo), the lr4a average and the 3B clone.
+    - Team games are not in it: the recommendation was to add them after 4N.
+    - ETA ~16–20 h. Then Gate 4N, with the start's baselines on the same games.
   - **After 4N**, in this order: alliance and donation actions; the crawl of public FFA/Team and ranked 2v2 records,
     BC on all modes with the mode as an input, and 3C's MoE routing test; modifiers; bigger maps and the 64-player cap
     (Phase 6).
