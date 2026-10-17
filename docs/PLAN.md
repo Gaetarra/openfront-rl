@@ -1764,6 +1764,33 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
       bot; the panel is league v2's final average (0 Elo), the lr4a average and the 3B clone.
     - Team games are not in it: the recommendation was to add them after 4N.
     - ETA ~16–20 h. Then Gate 4N, with the start's baselines on the same games.
+    - **Results (04:38–22:36, one sitting, exit 0): the run failed.**
+      - **Ranked 1v1 collapsed after update ~2,000.**
+        - The averages against the start (league v2's final average), 20 games each: 0.35, 0.55 and 0.65 at updates
+          0–1,000, then 0.35, 0.25, 0.15, 0.15, 0.10 and 0.15.
+        - Against the lr4a average: 0.70 at update 0, 0.05–0.35 from update 2,500. Against the 3B clone: 0.94, then
+          0.75–0.81.
+        - The training win rate against the league, by quarter: 0.27, 0.19, 0.06, 0.08 (league v2: median 0.31).
+      - **Against Hard nations nothing moved.**
+        - FFA: 1 win in 28 up to update 1,000, then 0; the mean rank went from 19.2 to 20.75.
+        - Humans vs Nations: 0 of 28 at every evaluation.
+      - **Training games.**
+        - FFA: win rate 0.01–0.02, mean reward flat at −0.86.
+        - Humans vs Nations (Medium and Hard): 0.14–0.19, mean reward −0.73 to −0.62. The check gave 0.86 against
+          Medium alone, so the Medium games won far less in training.
+      - **PPO's statistics looked normal.**
+        - KL to the clone ~0.037, approx_kl 0.002, 2.3% clipped, entropy ~0.19, explained variance ~0.97.
+        - 134–139 decisions/s, memory flat at ~19.9 GiB, evaluation rounds of 20–30 minutes, no worker errors.
+      - In ranked 1v1 the bot attacked less as it trained: 12% of decisions in the first quarter, 10% in the last (the
+        start: 16%). In FFA, among live seats, it attacked slightly more (~10% to ~11%).
+      - **Open: why. Two hypotheses, to separate before any new run:**
+        - a bug in the mixed run's ranked rows. Learner rows paired with the other seat's reward or observation would
+          teach it to lose, and the steady decline fits;
+        - interference. 75% of the learner's rows come from FFA and Humans vs Nations, whose rewards barely vary, so
+          their gradients act as noise on the shared network.
+        - Also open: why Humans vs Nations' Medium games won far less in training than in the check.
+      - **Gate 4N waits:** the evaluations already show the final average below its start in 1v1 and no gain against
+        Hard nations.
   - **After 4N**, in this order: alliance and donation actions; the crawl of public FFA/Team and ranked 2v2 records,
     BC on all modes with the mode as an input, and 3C's MoE routing test; modifiers; bigger maps and the 64-player cap
     (Phase 6).
