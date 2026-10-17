@@ -64,10 +64,10 @@ def tag(spec):
     return f"{ckpt['args'].get('run', Path(spec).parent.name)} {ckpt['update']}"
 
 
-def replay_dir(specs):
-    """Where a match's recorded games go: one folder per matchup, since fixed seeds give every match the same game
-    IDs."""
-    return REPLAYS / " vs ".join(tag(s) for s in specs)
+def replay_dir(specs, tags=()):
+    """Where a match's recorded games go: one folder per matchup and setting (`tags`), since fixed seeds give every
+    match the same game IDs."""
+    return REPLAYS / " ".join([" vs ".join(tag(s) for s in specs), *tags])
 
 
 def name_players(path, by_seat):
@@ -268,8 +268,8 @@ def main(argv=None):
     p.add_argument("--seed", default="eval")
     p.add_argument("--difficulty", choices=("Easy", "Medium", "Hard", "Impossible"),
                    help="the nations' difficulty (default: the setup's)")
-    p.add_argument("--timer", type=int, help="the game timer in minutes, 0 for none (default: the setup's; Gate 4N has "
-                                              "none, training 30)")
+    p.add_argument("--timer", type=int,
+                   help="the game timer in minutes, 0 for none (default: the setup's; Gate 4N has none, training 30)")
     p.add_argument("--record", type=int, default=0, help="games saved per worker into replays/<A> vs <B>/, to watch them")
     p.add_argument("--a-cooldown", type=int, default=0,
                    help="after each action of policy A, its next N decisions are no-ops (the bandwidth test, PLAN 3B)")
@@ -290,7 +290,12 @@ def main(argv=None):
     if config["seats"] == 2 and a.b is None:
         p.error("--b is required in 2-seat setups")
     specs = [a.a] * config["seats"] if a.setup in GATES else [a.a, a.b][:config["seats"]]
-    folder = replay_dir(specs[:1] if a.setup in GATES else specs)  # one policy in every seat: one name, one load
+    tags = [a.setup, a.maps] if a.setup in GATES else []  # FFA and Humans vs Nations games share their IDs
+    if a.difficulty:
+        tags.append(a.difficulty)
+    if a.timer is not None:
+        tags.append(f"{a.timer} min")
+    folder = replay_dir(specs[:1] if a.setup in GATES else specs, tags)  # one policy in every seat: one name, one load
     record = {"dir": str(folder), "gitCommit": game_commit(), "games": a.record} if a.record > 0 else None
     result = play(specs, config, a.episodes, a.workers, a.games_per_worker, seed=a.seed, record=record,
                   a_cooldown=a.a_cooldown, a_two_bins=a.a_two_bins)

@@ -81,17 +81,21 @@ def disk_cells(zx, zy, zr, side, H, W):
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
 RANKED_1V1 = {"map": "Australia", "compact": False, "nations": 0, "difficulty": "Medium", "bots": 400,
               "timerMinutes": 15, "seats": 2, "playlist": "ranked1v1"}
-# 4N: 4 learner seats against the map's nations (FFA: Medium or Hard, drawn per game), or against 4 Hard nations (Humans
-# vs Nations), on "training" maps, with a 30-minute timer. Mirrors bridge/testkit.ts FFA and HVN.
+# 4N: 4 learner seats against the map's nations (FFA) or 4 nations (Humans vs Nations), Medium or Hard drawn per game,
+# on "training" maps, with a 30-minute timer. Mirrors bridge/testkit.ts FFA and HVN, except HvN's Medium games: the
+# public game's are Hard, and the start won 24 of 28 against Medium nations and 0 of 28 against Hard (PLAN 4N).
 FFA = {**RANKED_1V1, "playlist": "ffa", "seats": 4, "maps": "training", "difficulty": "Medium,Hard", "timerMinutes": 30}
-HVN = {**FFA, "playlist": "hvn", "difficulty": "Hard"}
+HVN = {**FFA, "playlist": "hvn"}
 PLAYLISTS = {"ranked1v1": RANKED_1V1, "ffa": FFA, "hvn": HVN}
 
 
 def frozen_eval_config(setup):
-    """A frozen evaluation's games: one FFA seat against Hard nations; ranked 1v1 and Humans vs Nations as trained."""
+    """A frozen evaluation's games: one FFA seat, or the Humans vs Nations team, against Hard nations; ranked 1v1 as
+    trained."""
     if setup == "ffa":
         return {**PLAYLISTS["ffa"], "seats": 1, "difficulty": "Hard"}
+    if setup == "hvn":
+        return {**PLAYLISTS["hvn"], "difficulty": "Hard"}
     return dict(PLAYLISTS[setup])
 
 

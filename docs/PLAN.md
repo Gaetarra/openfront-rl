@@ -1731,14 +1731,34 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     - **The start against the nations** (the round at update 0: training maps, the 30-minute timer):
       - FFA, one seat against Hard nations: 1 win in 28, mean rank 19.2.
       - Humans vs Nations: 0 wins in 28.
-      - In training games the bot attacked in ~5% of its decisions in FFA and Humans vs Nations, against 16% in ranked
-        1v1, and did nothing in ~94%.
+      - In training games, counting only seats still alive, the bot attacked in ~7% of its decisions in FFA and Humans
+        vs Nations, against 16% in ranked 1v1, and did nothing in ~91% (81% in 1v1). The action shares count dead seats'
+        rows as no-ops.
+        - The user's reading: FFA and Team games sit closer to an equilibrium, where timing (and the ocean, with
+          warships) matters more than speed, so humans may attack less there too. Public FFA records can test it.
       - Humans vs Nations has two teams, so its reward is ±1 (decision 9). Without wins its only signal is the
         discount's push to lose later (γ 0.999 per decision: a loss 10 minutes away weighs −0.30). FFA's reward is
         graded by rank, so its games carry signal without wins.
-    - **Next, each on the user's go:**
-      - the baselines (~3–4 h);
-      - the run.
+  - **The checks before the run** (2026-10-17, 03:52–04:04, the user's choice; `runs/checks4n.cmd`):
+    - **Humans vs Nations against Medium nations** (training maps, the 30-minute timer, 28 games): the start won **24**
+      (0.857 ± 0.067), against 0 of 28 against Hard. Medium and Hard nations are far apart.
+    - **The rule, fixed before the check:** 3 or more wins, and Humans vs Nations trains against Medium or Hard nations,
+      half each, as FFA does. Its frozen evaluations and the gate stay against Hard (`trainer/env.py`). Fewer would have
+      taken it out of the mix.
+    - **Games to watch** (`trainer.watch --dir`): FFA and Humans vs Nations against Hard nations on Venice
+      ("league4a2 4000": 3Ky1Z3nU and atVyzIap), and ranked 1v1, league v2's final average against the lr4a average
+      ("league4a2 4000 vs lr4a swa 1000-2000", 4 games).
+      - The Humans vs Nations game overwrote the second FFA game: the gates' games of one policy and seed share their
+        IDs. Recorded games now go to a folder per setup, maps, difficulty and timer.
+    - **The baselines (Task 7) wait.** The round at update 0 already shows no bar met. The start can play Gate 4N's
+      games after the run, on the same fixed games, as the before-and-after reference.
+    - `trainer.eval --difficulty` and `--timer` change a match's nations and timer.
+    - **Open (the user's idea, 2026-10-17):** team games of StockShip copies only, as in public Team games (no
+      nations), beside or instead of Humans vs Nations in training.
+      - A game between copies always has a winning team, so even two teams give a signal, and more teams rank them.
+      - Public Team games are ~60% "2–7 teams" and ~20% Duos, Trios or Quads; Humans vs Nations is the other ~20%.
+      - Whether the 4N run waits for them is the user's call.
+    - **Next, on the user's go:** the run.
   - **After 4N**, in this order: alliance and donation actions; the crawl of public FFA/Team and ranked 2v2 records,
     BC on all modes with the mode as an input, and 3C's MoE routing test; modifiers; bigger maps and the 64-player cap
     (Phase 6).

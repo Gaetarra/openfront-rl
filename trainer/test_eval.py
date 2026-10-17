@@ -151,6 +151,12 @@ class EvalTest(unittest.TestCase):
         (specs, config), saved = run("--setup", "hvn", "--maps", "training", "--difficulty", "Medium", "--timer", "30")
         self.assertEqual(config, {**gate_config("hvn", "training"), "difficulty": "Medium", "timerMinutes": 30})
         self.assertEqual((saved["difficulty"], saved["timer"]), ("Medium", 30))
+        fake = mock.patch("trainer.eval.play", return_value={"recorded": [], "win_rate": 0.5})
+        with tempfile.TemporaryDirectory() as d, mock.patch("trainer.eval.RESULTS", Path(d)), fake as played:
+            with redirect_stdout(io.StringIO()):
+                main(["--setup", "hvn", "--maps", "seen", "--timer", "30", "--record", "1", "--a", "random"])
+        self.assertEqual(Path(played.call_args.kwargs["record"]["dir"]).name, "random hvn seen 30 min",
+                         "the gates' games of one policy and seed share IDs, so each setting gets its folder")
         self.assertIsNone(run("--setup", "onion")[1]["maps"], "the other setups draw no maps from the gate's lists")
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             main(["--setup", "onion", "--maps", "seen", "--a", "random"])

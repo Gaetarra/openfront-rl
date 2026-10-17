@@ -293,7 +293,9 @@ class VecEnvTest(unittest.TestCase):
 class ConfigTest(unittest.TestCase):
     def test_frozen_evaluations_and_gates_derive_from_the_playlists(self):
         self.assertEqual(frozen_eval_config("ranked1v1"), RANKED_1V1)
-        self.assertEqual(frozen_eval_config("hvn"), HVN)
+        self.assertEqual(HVN["difficulty"], "Medium,Hard")
+        hvn = frozen_eval_config("hvn")
+        self.assertEqual(hvn, {**HVN, "difficulty": "Hard"}, "trained on Medium or Hard, judged on Hard")
         ffa = frozen_eval_config("ffa")
         self.assertEqual((ffa["seats"], ffa["difficulty"], ffa["timerMinutes"]), (1, "Hard", 30))
         self.assertEqual(gate_config("ffa", "heldout"), {**ffa, "timerMinutes": 0, "maps": "heldout"})
