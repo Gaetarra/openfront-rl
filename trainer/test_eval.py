@@ -148,6 +148,9 @@ class EvalTest(unittest.TestCase):
         self.assertEqual((config["timerMinutes"], saved["maps"]), (0, "heldout"))
         (specs, config), saved = run("--setup", "ffa", "--maps", "seen")
         self.assertEqual((specs, config, saved["maps"]), (["random"], gate_config("ffa", "seen"), "seen"))
+        (specs, config), saved = run("--setup", "hvn", "--maps", "training", "--difficulty", "Medium", "--timer", "30")
+        self.assertEqual(config, {**gate_config("hvn", "training"), "difficulty": "Medium", "timerMinutes": 30})
+        self.assertEqual((saved["difficulty"], saved["timer"]), ("Medium", 30))
         self.assertIsNone(run("--setup", "onion")[1]["maps"], "the other setups draw no maps from the gate's lists")
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             main(["--setup", "onion", "--maps", "seen", "--a", "random"])

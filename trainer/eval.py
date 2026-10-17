@@ -266,6 +266,10 @@ def main(argv=None):
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--games-per-worker", type=int, default=4)
     p.add_argument("--seed", default="eval")
+    p.add_argument("--difficulty", choices=("Easy", "Medium", "Hard", "Impossible"),
+                   help="the nations' difficulty (default: the setup's)")
+    p.add_argument("--timer", type=int, help="the game timer in minutes, 0 for none (default: the setup's; Gate 4N has "
+                                              "none, training 30)")
     p.add_argument("--record", type=int, default=0, help="games saved per worker into replays/<A> vs <B>/, to watch them")
     p.add_argument("--a-cooldown", type=int, default=0,
                    help="after each action of policy A, its next N decisions are no-ops (the bandwidth test, PLAN 3B)")
@@ -279,6 +283,10 @@ def main(argv=None):
         p.error("--maps applies to --setup ffa and hvn")
     else:
         config = SETUPS[a.setup]
+    if a.difficulty:
+        config = {**config, "difficulty": a.difficulty}
+    if a.timer is not None:
+        config = {**config, "timerMinutes": a.timer}
     if config["seats"] == 2 and a.b is None:
         p.error("--b is required in 2-seat setups")
     specs = [a.a] * config["seats"] if a.setup in GATES else [a.a, a.b][:config["seats"]]
@@ -286,8 +294,9 @@ def main(argv=None):
     record = {"dir": str(folder), "gitCommit": game_commit(), "games": a.record} if a.record > 0 else None
     result = play(specs, config, a.episodes, a.workers, a.games_per_worker, seed=a.seed, record=record,
                   a_cooldown=a.a_cooldown, a_two_bins=a.a_two_bins)
-    text = json.dumps({"a": a.a, "b": a.b, "setup": a.setup, "maps": a.maps, "seed": a.seed, "a_cooldown": a.a_cooldown,
-                       "a_two_bins": a.a_two_bins, **result}, indent=2)
+    text = json.dumps({"a": a.a, "b": a.b, "setup": a.setup, "maps": a.maps, "seed": a.seed,
+                       "difficulty": config.get("difficulty"), "timer": config.get("timerMinutes"),
+                       "a_cooldown": a.a_cooldown, "a_two_bins": a.a_two_bins, **result}, indent=2)
     out = RESULTS / f"{datetime.datetime.now():%Y%m%d-%H%M%S}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")  # first, so a closed terminal cannot lose it
