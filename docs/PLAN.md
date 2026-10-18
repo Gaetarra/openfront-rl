@@ -1992,6 +1992,24 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
          - every one replays in sync at v0.35.2 with the usernames blanked: 6,807 hash checkpoints, among them Clan
            Wars, a 100-player FFA and two Team games;
          - the listing's first minutes after the go-live still held v0.34.25 games (34 skipped).
+       - **The crawl** (2026-10-18, 05:07–07:40 UTC, `runs/crawl035.cmd`, the user's go): `--modes ranked1v1 ranked2v2
+         rankedffa clanwars ffa=0.25 team=0.5`, over the games from 2026-10-16 17:45 UTC to the crawl's start.
+         - **8,386 records** in `data/v0.35.0/` (346 MB, every file readable); 520 void and 18 of v0.34.25 skipped. The
+           purge before it removed nothing.
+
+           | Mode | Records | Players (median, max) | Maps | Compact |
+           |---|---|---|---|---|
+           | Ranked 1v1 | 2,852 | 2 | 4 | 20% |
+           | Ranked 2v2 | 682 | 4 | 4 | 51% |
+           | Ranked FFA | 664 | 4, 10 | 6 | 0% |
+           | Clan Wars | 9 | 4, 6 | 4 | 0% |
+           | Public FFA (a quarter) | 2,269 | 25, 210 | 124 | 34% |
+           | Public Team (half) | 1,910 | 28, 182 | 125 | 27% |
+
+         - **By version:** v0.35.0 2,056, v0.35.1 534 and v0.35.2 5,796. One stored record per mode replays in sync
+           (4,149 hash checkpoints).
+         - **Top-ups:** rerunning the same command adds the newer games, and the purge runs daily while the data is
+           kept.
        - Two analyses, whose tables go into this plan:
          - **What predicts winning, per mode** (the user's reward theories):
            - replayed records log tiles, troops, gold, kills and rivals alive per player every 10 s;
