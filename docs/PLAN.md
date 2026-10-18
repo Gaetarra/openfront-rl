@@ -1939,10 +1939,25 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
     user's calls: upgrade first, then specialists; the control run is deferred.
     1. **v0.35.2** (production since 2026-10-16). Decision 14 holds its scan.
        - The upgrade: done 2026-10-18 (decision 14's log).
-       - The 1v1 bot against the 3B clone at the new pin, 256 games (0.977 at v0.34.24). A short fine-tune if it lost
-         strength.
-       - The nations probes again: Easy, Medium and Hard nations, FFA with one seat and Humans vs Nations, 28 games
-         each. The nations' AI changed, so 4N's numbers against them are history.
+       - **The re-baseline** (2026-10-18, 04:40–05:52, `runs/rebaseline035.cmd`): league v2's final average,
+         `checkpoints/league4a2/avg004000.pt`.
+         - **Ranked 1v1 against the 3B clone:** **0.938 ± 0.015** over 256 games (seats 0.953 / 0.922).
+           - At v0.34.24 it scored 0.977 over 44 panel games, 1.45 SE away, so no loss shows.
+           - The short fine-tune is therefore skipped. The 1v1 specialist trains at v0.35.2 later anyway (item 5).
+         - **The nations probes:** training maps, training's 30-minute timer, 28 games each. The v0.34.24 numbers are
+           in brackets.
+
+           | Nations | Humans vs Nations | FFA, one seat (mean rank) |
+           |---|---|---|
+           | Easy | 28 of 28 | 17 of 28 (7.7) |
+           | Medium | 24 of 28 (24 of 28) | 3 of 28 (17.7) |
+           | Hard | 1 of 28 (0 of 28) | 0 of 28, 21.1 (1 of 28, 19.2) |
+
+           - The rewritten nations' AI left the numbers against Medium and Hard where they were. Against Hard nations
+             the bot still wins almost nothing in either mode.
+           - Humans vs Nations' training gap stays open: half Medium and half Hard games predict ~0.45, while 4N's
+             training won ~0.15.
+         - **Time:** the 256 ranked games took 30 minutes; each probe took 5–12 minutes.
     2. **Human games of every mode at v0.35.2.** The crawler takes Ranked FFA, public FFA, public Team, Clan Wars,
        ranked 2v2 and ranked 1v1, kept apart from the old pin's records. Two analyses, whose tables go into this plan:
        - **What predicts winning, per mode** (the user's reward theories):
