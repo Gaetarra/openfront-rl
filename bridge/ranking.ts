@@ -1,4 +1,9 @@
-import { Game, GameMode, Player, PlayerType, Team } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import {
+  GameMode,
+  PlayerType,
+  Team,
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { Game, Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 
 export interface Standing {
   /** The game's winner is this player or its team. */

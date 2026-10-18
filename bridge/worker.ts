@@ -17,8 +17,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
+import { simpleHash } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/Util";
 import { N_ACTS } from "./actions";
 import { UNIT_TYPES } from "./frame";
 import { Blob, EnvConfig, EnvGame } from "./game";

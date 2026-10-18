@@ -1,5 +1,6 @@
-import { Game, Unit, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { GameMap, TileRef } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameMap";
+import { GameMap, TileRef } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameMap";
+import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { Game, Unit } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 
 /** Cell record: u32 cell, u16 owner 1, u16 owner 2, u8 tiles of owner 1, u8 tiles of owner 2, u8 fallout tiles. */
 export const CELL_BYTES = 11;

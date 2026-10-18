@@ -1,12 +1,14 @@
-// ranked1v1.json.gz: ranked 1v1 game c5QTvwaU5x, Compact, v0.34.24; usernames, account IDs and tribe names blanked.
+// ranked1v1.json.gz: ranked 1v1 game ct4rBkTH3R, Normal Australia, v0.35.2; usernames, account IDs and tribe names
+// blanked.
 import assert from "node:assert/strict";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { GameRecord, GameRecordSchema, StampedIntent, Turn } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
-import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
+import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { StampedIntent, Turn } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
+import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/SharedUtil";
+import { GameRecord, GameRecordSchema } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/WireSchemas";
 import { Act, BUILDS } from "./actions";
 import { EnvGame, seatClientID } from "./game";
 import { labelOf, OUT_OF_SET, readRecord, RecordGame, shareOf, UNMAPPED } from "./replay";

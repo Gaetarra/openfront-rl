@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
 import { LatencyQueue } from "./latency";
 
 const intent = (tile: number): StampedIntent => ({ type: "spawn", tile, clientID: "AGENT000" });

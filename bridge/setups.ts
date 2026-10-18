@@ -1,16 +1,18 @@
 import {
   Difficulty,
   GameMapSize,
-  GameMapType,
   GameMode,
   GameType,
   HumansVsNations,
-  maps as allMaps,
   RankedType,
-} from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { GameConfig } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
-import { simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import {
+  GameMapType,
+  maps as allMaps,
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/Maps.gen";
+import { GameConfig } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
+import { simpleHash } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/Util";
 import type { EnvConfig } from "./game";
 import { mapGrid, nationCount } from "./maps";
 
@@ -37,7 +39,7 @@ export const RANKED_1V1_MAPS: GameMapType[] = [
 ];
 
 /**
- * A ranked 1v1 game as the official servers create it: a copy of get1v1Config in src/server/MapPlaylist.ts (v0.34.22),
+ * A ranked 1v1 game as the official servers create it: a copy of get1v1Config in src/server/MapPlaylist.ts (v0.35.2),
  * which draws with Math.random. Compare it with the game's on every upgrade.
  */
 export function ranked1v1Config(random: PseudoRandom): GameConfig {
@@ -115,7 +117,7 @@ export function publicMaps(team: boolean, which: "training" | "heldout" | "seen"
 
 /**
  * A public FFA or Humans vs Nations game as the official servers create it: a copy of the FFA and Team branch of
- * MapPlaylist.rollConfig in src/server/MapPlaylist.ts (v0.34.24), which draws with Math.random. Compare it with the
+ * MapPlaylist.rollConfig in src/server/MapPlaylist.ts (v0.35.2), which draws with Math.random. Compare it with the
  * game's on every upgrade. Ours: the lobby size is the seats, the map comes from `publicMaps`, the difficulty is one
  * of the config's list and the timer is the config's (the public games have none).
  */

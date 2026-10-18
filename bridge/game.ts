@@ -1,30 +1,32 @@
-import { Config } from "../OpenFront_Source_Code/openfrontio/src/core/configuration/Config";
-import { Executor } from "../OpenFront_Source_Code/openfrontio/src/core/execution/ExecutionManager";
 import {
-  Game,
   GameMapSize,
-  Player,
   PlayerInfo,
   PlayerType,
-} from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { createGame } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameImpl";
-import { GameUpdateType, HashUpdate } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameUpdates";
-import { createNationsForGame } from "../OpenFront_Source_Code/openfrontio/src/core/game/NationCreation";
-import { GameRunner } from "../OpenFront_Source_Code/openfrontio/src/core/GameRunner";
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
 import {
-  GameRecord,
+  GameUpdateType,
+  HashUpdate,
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameUpdates";
+import {
   GameStartInfo,
-  PlayerRecord,
   StampedIntent,
   Turn,
   Winner,
-} from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
-import { createPartialGameRecord, simpleHash } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
+import { simpleHash } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/Util";
+import { EngineConfig } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/configuration/EngineConfig";
+import { Executor } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/execution/ExecutionManager";
+import { Game, Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
+import { createGame } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/GameImpl";
+import { createNationsForGame } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/NationCreation";
+import { GameRunner } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/GameRunner";
+import { createPartialGameRecord } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/SharedUtil";
+import { GameRecord, PlayerRecord } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/WireSchemas";
 import { Act, attackMask, decodeAction, N_ACTS, retreatMask, typeMask } from "./actions";
 import { CellFrame, encodeUnits, terrainCells } from "./frame";
 import { LatencyQueue } from "./latency";
-import { loadFreshTerrain, resetGameStatics } from "./maps";
+import { loadFreshTerrain } from "./maps";
 import { encodeSeat, PLAYER_FEATURES, SCALARS } from "./obs";
 import { rewardOf, seatStanding } from "./ranking";
 import { gameConfigOf, gameIdOf, shapeOf } from "./setups";
@@ -125,7 +127,6 @@ export class EnvGame {
    * from the game ID and the seats are the start info's players, in order. `stride`: the trainer's grid width in cells.
    */
   static async fromStart(start: GameStartInfo, stride: number, slots: number, latencySeed: string): Promise<EnvGame> {
-    resetGameStatics();
     const config = start.config;
     const terrain = await loadFreshTerrain(config.gameMap, config.gameMapSize);
     const random = new PseudoRandom(simpleHash(start.gameID));
@@ -148,7 +149,7 @@ export class EnvGame {
       nations,
       terrain.gameMap,
       terrain.miniGameMap,
-      new Config(config, null, false),
+      new EngineConfig(config, false, start.listed),
       terrain.teamGameSpawnAreas,
     );
     const frame = new CellFrame(game.map(), config.gameMapSize === GameMapSize.Compact ? 4 : 8, stride);

@@ -18,20 +18,22 @@ read it before starting new work, and update it when a decision changes.
 
 ## Game version
 
-The submodule is pinned to the production release the official servers run (currently `v0.34.24`, commit `3f5633b9`).
+The submodule is pinned to the production release the official servers run (currently `v0.35.2`, commit `08b63c05`).
 Check what production runs by reading `gitCommit` from a recent record:
 `https://api.openfront.io/public/game/<id>?turns=false` (list games via `/public/games`, see the game's `docs/API.md`).
-To upgrade, follow the playbook in `docs/PLAN.md` (decision 14): diff `src/core` between the tags, move the submodule,
+To upgrade, follow the playbook in `docs/PLAN.md` (decision 14): diff the engine between the tags (`packages/` since
+v0.35, `src/core` before), move the submodule,
 run the bridge tests and determinism check, then fine-tune from the latest checkpoint. A simulation change also needs
 a replay fixture recorded at the new pin, and a worktree for the old simulation (below).
 
 Records of an older simulation desync at the pin, so each older simulation keeps a worktree at its last tag in `pins/`
 (git-ignored). `pins/v0.34.23` replays the records of v0.34.17-v0.34.23, which is all of `data/` today.
-- It holds the same bridge and trainer code on a detached HEAD. After code changes, update it with
-  `git -C pins/v0.34.23 checkout --detach <branch>`.
+- It holds our bridge and trainer code on a detached HEAD, frozen before the v0.35 upgrade: later commits import the
+  engine from `packages/`, which v0.34 lacks. It sits at bac9a8b with the user's uncommitted `trainer/eval.py` edits;
+  0c0cb02 is the last commit it can run.
 - Its game folder is a worktree of the game repo at the old tag.
-- Junctions lead to the main checkout's `data`, `checkpoints`, `runs` and the game's `node_modules` (same
-  dependencies; if a later pin changes them, give the old one its own `npm ci`).
+- Junctions lead to the main checkout's `data`, `checkpoints`, `runs` and the game's `node_modules` (same runtime
+  dependencies through v0.35.2; if a later pin changes them, give the old one its own `npm ci`).
 - Run trainer commands from it with the main venv: `cd pins/v0.34.23`, then `../../.venv/Scripts/python -m trainer.bc
   ...`. Checkpoints record the game commit they were trained on.
 - Made with `git worktree add --detach pins/<tag> <commit>`, then `git -C OpenFront_Source_Code/openfrontio worktree
@@ -73,7 +75,8 @@ npx tsx ../../scripts/troop_shares.ts 60                    # share of their tro
 The A/B's old code lives in the worktree `pins/ab-base` (git-ignored), a detached HEAD at the commit before the change:
 `git worktree add --detach pins/ab-base <commit>` (later `git -C pins/ab-base checkout --detach <commit>`), then
 replace its empty `OpenFront_Source_Code/openfrontio` and add `checkpoints` and `runs` as PowerShell junctions
-(`New-Item -ItemType Junction`) to this checkout's.
+(`New-Item -ItemType Junction`) to this checkout's. Its game is this checkout's, so both commits of an A/B must come
+after the v0.35 upgrade.
 
 Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUDA 13.0 wheels).
 
@@ -194,8 +197,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
 - `data/` holds only records of v0.34.17-v0.34.22, which replay in full only in `pins/v0.34.23` ("Game version").
   Step 4's BC night and its scoring ran from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
-  indexed record, so after a crawl `data/` mixes in v0.34.24 records: a BC run on both needs them split by version
-  (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
+  indexed record, so after a crawl `data/` mixes in newer records (v0.34.24's replay nowhere now, v0.35.2's only in
+  this checkout): a BC run needs them split by version (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
 - Mixed runs (`--mix SETUP=WORKERS ...`, PLAN 4N): workers play the setups in the order given; rows are game-major
   (game e owns `first[e]` .. `first[e] + seats[e] - 1`). The learner has one seat of each ranked game (the league's pick
   the other) and every seat of an FFA or Humans vs Nations game (`WHOLE` in ppo.py); `global_step` counts learner rows.
@@ -231,13 +234,14 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 ## Simulation facts the bridge relies on
 
 - 10 ticks = 1 s of game time. One turn is executed per tick.
-- Stepping: `createGameRunner(gameStart, clientID, mapLoader, callback)` (`src/core/GameRunner.ts`), then per tick
+- Stepping: `createGameRunner(gameStart, clientID, mapFiles, callback)` (`packages/engine/src/GameRunner.ts`), then per
+  tick
   `runner.addTurn({ turnNumber, intents })` and `runner.executeNextTick()`. Intents are `StampedIntent`s
-  (intent + the player's `clientID`), defined in `src/core/Schemas.ts`.
+  (intent + the player's `clientID`), defined in `packages/engine-api/src/Schemas.ts`.
 - An intent's execution starts on the tick after the one that receives it: a built unit or a launched attack exists
   one tick later, so tests tick once more before reading it.
 - Use `GameType.Private` or `Public` for training games: Singleplayer has no spawn timer.
-- Determinism: the core uses `PseudoRandom` (never `Math.random`) and `src/core/DetMath.ts` instead of
+- Determinism: the core uses `PseudoRandom` (never `Math.random`) and `packages/engine-lib/src/DetMath.ts` instead of
   `Math.exp/log/pow/atan2`. Anything we add that feeds the simulation must follow the same rules.
 - Ownership: `game.map().tileStateBuffer()` is a live `Uint16Array` (owner = `v & 0xFFF`, fallout = bit 13).
   Read it only between ticks. Each tick's changed tiles arrive as `[tileRef, state]` pairs in the runner callback's
@@ -252,11 +256,15 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - Replays: archived records contain only human intents; nations and bots re-simulate from the game seed. A record
   replays in sync when no simulation code changed between its `gitCommit` and the pin (v0.34.17-v0.34.23 are
   identical); the hashes it carries every 10 turns decide, not the commit string. v0.34.24 changed attacks, and
-  older records desync there within ~500 turns (median): replay them in `pins/v0.34.23`.
-- v0.34.x has no game snapshots. `loadTerrainMap` caches one mutable map per map and size per process, so the bridge
-  builds a fresh map for every game (`bridge/maps.ts: loadFreshTerrain`) and resets the game's cross-game static
-  fields before each game (`resetGameStatics`); several games can then share a worker process. On every upgrade, grep
-  `src/core` for non-readonly `private static` fields and add new ones to `resetGameStatics`.
+  older records desync there within ~500 turns (median): replay them in `pins/v0.34.23`. v0.35 changed it again
+  (boat paths, trade ships and trains, the nations' AI), so only v0.35.2 records replay at the pin; no v0.34.24 records
+  were crawled.
+- `loadTerrainMap` takes over the map files it is given: a map writes to its terrain bytes, and compact maps scale the
+  manifest in place. So the bridge passes fresh copies for every game (`bridge/maps.ts: loadFreshTerrain`).
+- v0.35 left no mutable static fields in the engine (v0.34's needed a reset before each game), so several games share
+  a worker process. On every upgrade, grep `packages/` for non-readonly `static` fields and module-level state; a new
+  one needs a reset before each game.
+- v0.35 has game snapshots (`GameRunner.snapshot`, `createGameRunnerFromSnapshot`).
 - Code that only builds observations may use `Math.*`; code whose output reaches the simulation (intents, latency)
   must use seeded `PseudoRandom`.
 - Structures (city, port, factory, silo, SAM, defense post) of all players stay at least `structureMinDist()` = 15

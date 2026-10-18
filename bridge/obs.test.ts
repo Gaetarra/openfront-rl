@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
 import { attackMask, BUILDS } from "./actions";
 import { EnvGame } from "./game";
 import { encodeSeat, PLAYER_FEATURES, Rel, SCALARS } from "./obs";

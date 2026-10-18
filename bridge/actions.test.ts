@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Player, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { TileRef } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameMap";
-import { Intent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { TileRef } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameMap";
+import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { Intent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 import { Act, attackMask, decodeAction, N_ACTS, retreatMask, typeMask } from "./actions";
 import { EnvGame, seatClientID } from "./game";
 import { ONION, script, spawnCell } from "./testkit";

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TransportShipExecution } from "../OpenFront_Source_Code/openfrontio/src/core/execution/TransportShipExecution";
-import { GameMapSize, GameMapType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { loadFreshTerrain, resetGameStatics } from "./maps";
+import { GameMapSize } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { GameMapType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/Maps.gen";
+import { loadFreshTerrain } from "./maps";
 
 test("each call returns new map objects with compact coordinates halved once", async () => {
   const a = await loadFreshTerrain(GameMapType.Onion, GameMapSize.Compact);
@@ -15,10 +15,4 @@ test("each call returns new map objects with compact coordinates halved once", a
   const normal = await loadFreshTerrain(GameMapType.Onion, GameMapSize.Normal);
   const [x, y] = normal.nations[0].coordinates!;
   assert.deepEqual(a.nations[0].coordinates, [Math.floor(x / 2), Math.floor(y / 2)]);
-});
-
-test("resetGameStatics zeroes the ship stagger counters", () => {
-  (TransportShipExecution as unknown as { _staggerCounter: number })._staggerCounter = 7;
-  resetGameStatics();
-  assert.equal((TransportShipExecution as unknown as { _staggerCounter: number })._staggerCounter, 0);
 });

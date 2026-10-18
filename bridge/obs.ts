@@ -1,4 +1,5 @@
-import { Game, Player, PlayerType, UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
+import { PlayerType, UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { Game, Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 import { BUILDS } from "./actions";
 import { loaded } from "./frame";
 

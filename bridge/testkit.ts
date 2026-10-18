@@ -1,5 +1,5 @@
-import { TileRef } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameMap";
-import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { TileRef } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameMap";
+import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
 import { EnvConfig, EnvGame, seatClientID } from "./game";
 
 /** The Phase 1 gate setup: one agent against 3 Easy nations on Compact Onion, 5-minute timer. */

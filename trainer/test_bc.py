@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import gzip
 import json
 import math
 import shutil
@@ -19,6 +20,7 @@ from trainer.model import ACT_NAMES, ATTACK, BUILD, RETREAT, SHARES, ActionDist,
 from trainer.test_model import DIMS, N as ROWS, exact_fp32, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
+FIXTURE_SIZE = json.loads(gzip.decompress(FIXTURE.read_bytes()))["info"]["config"]["gameMapSize"].lower()  # its bucket
 
 
 class LabelTest(unittest.TestCase):
@@ -251,10 +253,10 @@ class ScoreTest(unittest.TestCase):
                 self.assertTrue(math.isclose(a[k], b[k], abs_tol=1e-4) or (math.isnan(a[k]) and math.isnan(b[k])), k)
         old, moe, shares, full = first["metrics"]
         self.assertIn("labels/build_silo", full)
-        for k in ("bc/nll", "bc/nll_type", "bc/nll_compact", "bc/type_acc", "bc/value_mse", "value/outcome_corr"):
+        for k in ("bc/nll", "bc/nll_type", f"bc/nll_{FIXTURE_SIZE}", "bc/type_acc", "bc/value_mse", "value/outcome_corr"):
             self.assertIn(k, old)
         self.assertFalse(any(k.startswith("router/") for k in old), "the Phase 2 network has no router")
-        self.assertAlmostEqual(sum(moe[f"router/compact_{i}"] for i in range(8)), 1.0, places=4)
+        self.assertAlmostEqual(sum(moe[f"router/{FIXTURE_SIZE}_{i}"] for i in range(8)), 1.0, places=4)
         self.assertIn("bc/nll_shares", shares)
         self.assertNotIn("bc/nll_shares", moe)
         self.assertIn("old 1", text)

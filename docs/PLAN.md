@@ -294,15 +294,16 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
       (step 4 trains the v4 network, and Gate 3B measures it on v0.34.24).
     - v0.34.24 records: 7,973 ranked 1v1 games from go-live to 2026-10-10 03:00 UTC (2,392 a day), 6,899 of them
       with two players; none crawled yet. Which records step 4 uses is decided in 3B ("Step 4's records").
-    v0.34.24 → **v0.35.2** (scanned 2026-10-18; the upgrade is next, Phase 4 "After 4N" item 1). Production runs it
-    since 2026-10-16: commit 08b63c05, read from 5 public games of 2026-10-17. It is 227 commits away.
+    v0.34.24 → **v0.35.2** (2026-10-18, Phase 4 "After 4N" item 1). Production runs it since 2026-10-16: commit
+    08b63c05, read from 5 public games of 2026-10-17 and 3 of 2026-10-18. It is 227 commits away.
     - **The engine moved.** `src/core` is now `packages/{engine,engine-lib,engine-api,shared,zbin}`, and 20 bridge and
       script files import it. The map:
       - **`engine-lib`:** Config, PseudoRandom, Util, DetMath;
       - **`engine`:** GameRunner, the executions, `*Impl`;
       - **`engine-api`:** Schemas, the game types, GameMap, GameUpdates;
       - **`shared`:** records and the wire schemas.
-      - `Config` becomes `EngineConfig(config, false)`, and `createGameRunner` takes map files.
+      - `Config` becomes `EngineConfig(config, false, listed)`, and `loadTerrainMap` and `createGameRunner` take map
+        files.
     - **Simulation changes** (old records desync):
       - trade-ship and train spawn rates, with a boost for small economies (balance);
       - the water graph's edge order, which changes boat paths (rules);
@@ -319,15 +320,39 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
       - **Game snapshots in the engine:** `GameRunner.snapshot`, `createGameRunnerFromSnapshot`.
       - Lobby sizes now come from the map's land, up to ~210.
       - No mutable statics are left, so `resetGameStatics` goes.
-    - **The steps** (`docs/superpowers/plans/2026-10-18-after-4n-v035.md`):
-      - move the submodule and `npm ci`;
-      - rewrite the imports;
-      - re-copy the playlist configs and add Ranked FFA's;
-      - fix the tsconfig;
-      - record a new replay fixture;
-      - typecheck, run the tests and the determinism check, and replay 5 production records in sync.
-      - `pins/v0.34.23` stays at the last pre-upgrade commit, since its code cannot import `packages/`.
-    - Node 24.18.1 meets the new engines (Node ≥ 24.15, npm ≥ 12.1 via npx).
+    - **Done 2026-10-18** (steps: `docs/superpowers/plans/2026-10-18-after-4n-v035.md`). Node 24.18.1 meets the new
+      engines (Node ≥ 24.15, npm ≥ 12.1 via npx).
+      - **Imports:** the 20 files import the packages by relative path, one import per module. The game's own files
+        import `@openfront/*` through its `node_modules`, which our folders outside the game cannot see.
+      - **Maps:** `loadTerrainMap` no longer caches maps; it takes over the files it is given. `loadFreshTerrain` now
+        hands it fresh copies of the map's files (read once per process) instead of copying its logic.
+      - **Statics:** `resetGameStatics` is gone. `packages/` has no non-readonly static field, and its one shared
+        scratch set (in `PlayerImpl`) is cleared before each use. The determinism test passes without the reset.
+      - **Playlists:** the 1v1 and the public FFA and Team branches are unchanged. v0.35.2 adds the Ranked FFA and
+        Clan Wars configs, map-weight overrides the server reads from the API, and new Crowded lobby sizes. Ranked
+        FFA's config gets copied when a setup first uses it.
+      - **Map pool:** FFA and Humans vs Nations training draws from 32 maps, up from 30. Of v0.35.2's 12 new maps, two
+        fit the ranked grid with a weight: Bab el-Mandeb Strait and Benelux (neither has map layers). The held-out and
+        seen maps are fixed, so they did not change.
+      - **tsconfig:** no change. Ours extends the game's, which now extends `tsconfig.base.json`.
+      - **Fixture:** ranked 1v1 game `ct4rBkTH3R` (Normal Australia, 259 s, 2,581 turns), one of 3 matches among 161
+        short v0.35.2 games. It has a nuke, 5 defense posts, 12 structures, boats, ports and 2 emojis (out of set).
+        The BC score test now reads the fixture's size bucket instead of assuming Compact.
+      - **Checks:**
+        - the typecheck is clean, and 57 bridge tests and 155 trainer tests pass;
+        - 5 of 5 recent v0.35.2 ranked 1v1 records (all four maps, both sizes) replay in sync, in the game's replay
+          tool and in our `RecordGame` alike (2,796 hash checkpoints);
+        - 4-game smoke runs of ranked 1v1, FFA and Humans vs Nations play to the end, none cut, ~0.3% invalid
+          actions;
+        - `scripts/bench_env.ts` runs: 16.6 ms of simulation per step on Normal Australia, with the trainer tests
+          sharing the CPU.
+      - **The old pin:** no runtime dependency changed (the formatter moved from prettier to oxfmt, and the workspaces
+        add `node_modules/@openfront/*` links). `pins/v0.34.23` keeps the shared `node_modules`, and a v0.34.23 record
+        still replays in sync there (345 checkpoints).
+        - It stays at bac9a8b with the user's uncommitted `trainer/eval.py` edits; 0c0cb02 is the last commit it can
+          run.
+        - `pins/ab-base` shares this checkout's game, so both commits of an A/B must come after the upgrade.
+      - **Next:** the re-baseline (Phase 4 "After 4N" item 1).
 
 ## Architecture
 ```
@@ -1913,7 +1938,7 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - **After 4N** (re-planned 2026-10-18 with the user, `docs/superpowers/plans/2026-10-18-after-4n-v035.md`). The
     user's calls: upgrade first, then specialists; the control run is deferred.
     1. **v0.35.2** (production since 2026-10-16). Decision 14 holds its scan.
-       - The upgrade.
+       - The upgrade: done 2026-10-18 (decision 14's log).
        - The 1v1 bot against the 3B clone at the new pin, 256 games (0.977 at v0.34.24). A short fine-tune if it lost
          strength.
        - The nations probes again: Easy, Medium and Hard nations, FFA with one seat and Humans vs Nations, 28 games

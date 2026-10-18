@@ -1,8 +1,12 @@
 import fs from "node:fs";
 import zlib from "node:zlib";
-import { Player } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { GameRecord, StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
-import { decompressGameRecord, toWireGameStartInfo } from "../OpenFront_Source_Code/openfrontio/src/core/Util";
+import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
+import {
+  decompressGameRecord,
+  toWireGameStartInfo,
+} from "../OpenFront_Source_Code/openfrontio/packages/shared/src/SharedUtil";
+import { GameRecord } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/WireSchemas";
 import { Act, BUILDS } from "./actions";
 import { EnvGame, STEP_TICKS } from "./game";
 

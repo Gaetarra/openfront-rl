@@ -1,14 +1,8 @@
-import {
-  Attack,
-  Game,
-  Player,
-  TerraNullius,
-  Unit,
-  UnitType,
-} from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { TileRef } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameMap";
-import { canBuildTransportShip } from "../OpenFront_Source_Code/openfrontio/src/core/game/TransportShipUtils";
-import { Intent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { TileRef } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameMap";
+import { TerraNullius, UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { Intent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { Attack, Game, Player, Unit } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
+import { canBuildTransportShip } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/TransportShipUtils";
 import { CellFrame } from "./frame";
 
 /** Action types (PLAN 3B "Actions"): Phase 1's five, then every other command ranked 1v1 players give, except

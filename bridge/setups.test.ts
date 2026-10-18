@@ -3,14 +3,20 @@ import { test } from "node:test";
 import {
   Difficulty,
   GameMapSize,
-  GameMapType,
   GameMode,
   GameType,
   HumansVsNations,
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import {
+  GameMapType,
   maps as allMaps,
-} from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { GAME_ID_REGEX, GameConfig, GameConfigSchema } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/Maps.gen";
+import {
+  GAME_ID_REGEX,
+  GameConfig,
+  GameConfigSchema,
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
 import { mapGrid } from "./maps";
 import {
   gameIdOf,
@@ -113,7 +119,7 @@ test("the held-out and seen maps are fixed, fit the ranked grid and stay out of 
   assert.ok(HELD_OUT_MAPS.every((m) => !SEEN_MAPS.includes(m)));
   for (const team of [false, true]) {
     const training = new Set(publicMaps(team, "training"));
-    assert.equal(training.size, 30);
+    assert.equal(training.size, 32); // 30 at v0.34.24; v0.35.2 added Bab el-Mandeb Strait and Benelux
     assert.ok(SEEN_MAPS.every((m) => training.has(m)));
     assert.ok(HELD_OUT_MAPS.every((m) => !training.has(m)));
     for (const which of ["training", "heldout", "seen"] as const) {

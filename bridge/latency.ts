@@ -1,5 +1,5 @@
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
 
 /**
  * Delays agent intents like a real client's network latency: L = 1, 2 or 3 turns with p = .6/.3/.1 (PLAN decision

@@ -11,32 +11,25 @@
  *   npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]
  */
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import { Config } from "../OpenFront_Source_Code/openfrontio/src/core/configuration/Config";
-import { Executor } from "../OpenFront_Source_Code/openfrontio/src/core/execution/ExecutionManager";
 import {
   GameMapSize,
   PlayerInfo,
   PlayerType,
-} from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { createGame } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameImpl";
-import { createNationsForGame } from "../OpenFront_Source_Code/openfrontio/src/core/game/NationCreation";
-import { loadTerrainMap } from "../OpenFront_Source_Code/openfrontio/src/core/game/TerrainMapLoader";
-import { GameRunner } from "../OpenFront_Source_Code/openfrontio/src/core/GameRunner";
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { GameStartInfo } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { GameStartInfo } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
+import { simpleHash } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/Util";
+import { EngineConfig } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/configuration/EngineConfig";
+import { Executor } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/execution/ExecutionManager";
+import { createGame } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/GameImpl";
+import { createNationsForGame } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/NationCreation";
+import { GameRunner } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/GameRunner";
 import {
   decompressGameRecord,
-  simpleHash,
   toWireGameStartInfo,
-} from "../OpenFront_Source_Code/openfrontio/src/core/Util";
-import { NodeGameMapLoader } from "../OpenFront_Source_Code/openfrontio/tests/perf/fullgame/NodeGameMapLoader";
+} from "../OpenFront_Source_Code/openfrontio/packages/shared/src/SharedUtil";
+import { loadFreshTerrain } from "../bridge/maps";
 
-const GAME_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../OpenFront_Source_Code/openfrontio",
-);
 const STEP_TICKS = 5;
 const DELTA_BYTES = 11; // u32 cell index + 7-byte cell record
 
@@ -58,12 +51,7 @@ async function main(): Promise<void> {
     players: info.players,
     tribes: info.tribes,
   });
-  const terrain = await loadTerrainMap(
-    info.config.gameMap,
-    info.config.gameMapSize,
-    new NodeGameMapLoader(path.join(GAME_ROOT, "resources/maps")),
-    false,
-  );
+  const terrain = await loadFreshTerrain(info.config.gameMap, info.config.gameMapSize);
   const random = new PseudoRandom(simpleHash(gameStart.gameID));
   const humans = gameStart.players.map(
     (p) =>
@@ -90,7 +78,7 @@ async function main(): Promise<void> {
     nations,
     terrain.gameMap,
     terrain.miniGameMap,
-    new Config(info.config, null, false),
+    new EngineConfig(info.config, false, gameStart.listed),
     terrain.teamGameSpawnAreas,
   );
 

@@ -3,12 +3,12 @@ import { test } from "node:test";
 import {
   ColoredTeams,
   GameMapSize,
-  GameMapType,
   PlayerType,
   UnitType,
-} from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/src/core/PseudoRandom";
-import { GameConfig } from "../OpenFront_Source_Code/openfrontio/src/core/Schemas";
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { GameMapType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/Maps.gen";
+import { GameConfig } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
 import { Act, N_ACTS } from "./actions";
 import { CellFrame } from "./frame";
 import { EnvConfig, EnvGame, seatPlayers } from "./game";

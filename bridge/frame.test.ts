@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { UnitType } from "../OpenFront_Source_Code/openfrontio/src/core/game/Game";
-import { TileRef } from "../OpenFront_Source_Code/openfrontio/src/core/game/GameMap";
+import { TileRef } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameMap";
+import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
 import { encodeUnits, UNIT_BYTES, UNIT_TYPES } from "./frame";
 import { EnvGame } from "./game";
 import { ONION, script } from "./testkit";
