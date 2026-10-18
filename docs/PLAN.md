@@ -105,6 +105,35 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
   cap = 2 × (tiles^0.6 × 1000 + 50,000) + 250,000 per city level (bots: half the growth, a third of the cap; nations
   0.9–1.05× by difficulty). The model sees troops ÷ cap for itself (scalar 6) and for every player (player feature 9);
   the formulas stay in the game's Config, never in our code.
+- **Economy, kills and diplomacy** (checked in v0.34.24 on 2026-10-18; v0.35.2 changes only the trade-ship and train
+  spawn rates):
+  - **Gold.** Income is flat, 100 a tick for humans (1,000/s), and land makes none.
+    - Trade pays the full route value to both port owners: 75,000 / (1 + e^(−0.03(d − 300))) + 50d for d tiles
+      travelled. That is 14k at 200 tiles, 52k at 300 and 125k at 1,000.
+    - Trains pay both owners at each stop.
+  - **Warships.**
+    - They capture trade ships near their patrol tile. The captor alone is paid the route's value when the ship
+      reaches its own port.
+    - They sink a transport boat with one shell, from up to 130 tiles away.
+  - **Attacks.** One troop pool defends all of a player's land, and an attack removes its troops at once
+    (`AttackExecution.ts:117-123`). Per tile taken (`Config.attackLogic`):
+    - the attacker's time grows with the defender's home troops ÷ the attack's troops, clamped to 0.82–7.5;
+    - the attacker's loss grows with the same ratio, clamped to 0.6–2, times a base plus 0.0039 × the defender's troops
+      per tile;
+    - the defender loses its troops per tile.
+    - Large territories are up to 30% cheaper and faster to attack into.
+    - Attacking a human or a nation gives the victim a 5-minute embargo on the attacker.
+  - **Kills.** The attack that takes a player under 100 tiles conquers it: the rest of its land, all of a nation's gold,
+    half of a human's (`AttackExecution.handleDeadDefender`, `GameImpl.conquerPlayer`). A player killed by a nuke
+    credits nobody, and its gold is destroyed.
+  - **Nukes.** Each tile hit costs the target 5 × troops ÷ tiles left. Losing 10% of the land therefore costs ~41% of
+    the troops, attacks and boats included.
+  - **Team.** Teammates cannot attack each other or land boats on each other. Donations are on in Team and off in FFA:
+    up to a third of the stock, every 10 s per recipient.
+  - **Alliances.** They last 5 minutes, and both sides can extend them. A betrayer is a traitor for 30 s: attacks on it
+    lose half the troops and take tiles ~25% faster.
+  - **Win.** Over 80% of the land without fallout, in every mode. Public FFA lowers the bar 2 points a minute after 30
+    minutes.
 
 ## Key decisions
 1. **No C++ port.** Measured in Phase 0: PPO learner ≈0.7–1k decisions/s (~6M-param net), while ~10 cores of TS sim
@@ -133,6 +162,16 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
       the 1/16-res spatial + player tokens; swappable dense ↔ Soft-MoE (4–8 experts, the variant that helped deep-RL
       scaling in 2024 work). It adds capacity at ~zero extra compute (the CNN, which always runs, is ~95% of the
       FLOPs); it does not reduce compute. A/B during BC on held-out accuracy per situation bucket, confirmed in RL.
+   **Specialists now, distillation later** (the user's call, 2026-10-18, after 4N):
+   - Behaviour cloning trains one model on all modes (5a). RL then trains one copy of it per mode family.
+   - Mixed RL coupled the modes' training signals and cost 1v1 ~300 Elo (Phase 4, 4N "Results"). Mixed BC has no such
+     coupling: its labels are fixed human actions, with no value baseline and no advantage normalisation.
+   - The MoE (5c) did not separate the modes under PPO: its router used the same 3 of 8 experts in every mode.
+   - **The merge** is policy distillation (Rusu et al. 2016). The student matches each specialist's action
+     probabilities on that mode's positions, a supervised loss against fixed targets.
+     - A weight average of the specialists is a cheap first try, since they start from one clone ("model soups",
+       Wortsman et al. 2022). It is unproven for RL fine-tunes.
+     - Until then, deployment picks the specialist by lobby type (5b).
 6. **Model size: spend parameters where they are cheap.** Compute ≈ CNN width² × map cells, so the CNN ("eyes") stays
    modest and is sized by the GPU benchmark (doubling its width ≈ 4× compute ≈ 4× less experience per day). The
    "brain" (core, player transformer, heads, MoE experts) costs ~1 MAC per parameter per decision, so it can grow from
@@ -150,6 +189,22 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
 9. **Reward terminal only.** Win = +1, else r = −1 + 0.5·(N−rank)/(N−1) (1v1/2v2 → ±1). Agent rank: `deathPosition` if
    dead; alive at end: 1 + alive non-bot players with more tiles; never spawned = last. Teams: team placement shared.
    If learning stalls: reverse curriculum (start from mid/late-game states), only then annealed potential-based shaping.
+   **Reviewed 2026-10-18, after 4N** (the user's questions on rank, kills and land):
+   - FFA's rank-graded reward carried no usable signal in 4N: the training games' mean reward sat at −0.86 for 4,000
+     updates.
+   - **No kill bonus.**
+     - A kill goes to the attack that takes the victim under 100 tiles, so kills can be stolen. A nuke kill credits
+       nobody.
+     - Conquest already pays: gold, land and buildings.
+     - Tribes and weak nations would be farmed.
+   - **No raw land reward.** Land makes no gold, and a big empire with few troops per tile is cheaper and faster to take
+     (Findings, "Economy, kills and diplomacy").
+   - **Potential-based shaping is the safe form** (Ng, Harada & Russell 1999).
+     - The reward is the change of a potential, so land lost later takes its reward back, and the best policy does not
+       change.
+     - The potential comes from the analysis of what predicts winning in each mode (Phase 4, "After 4N" item 2).
+   - **Order when a mode's results stay flat:** late-game starts first, now practical since v0.35's snapshots save and
+     restore any tick; then shaping.
 10. **PPO** (CleanRL-style), GAE, masked logits, KL-to-BC (annealed), territory-delta channel; PyTorch eager + bf16.
 11. **Δ = 5 ticks (0.5 s), one action per decision**: ~2,400 decisions per 20-min game instead of 12,000. Extra human
     intents inside a BC window queue into following windows. Measured on 61 replays (2026-09-30): median 21 commands/min
@@ -177,6 +232,9 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
     **Changed 2026-10-15 (the user's call):** Ranked 1v1 → FFA and Humans vs Nations against the nations (4N) →
     alliance and donation actions → human data of every mode (public FFA/Team, ranked 2v2) with the MoE routing test
     → modifiers → bigger and augmented/procedural maps. Public lobbies are where the bot will play (Phase 4, "4N").
+    **Changed 2026-10-18 (after 4N; the user's calls):** v0.35.2 → human games of every mode and their analyses →
+    alliance and donation actions → BC on all modes → RL specialists per mode family (ranked 1v1, Ranked FFA, public FFA
+    against the nations, Team) → distillation → modifiers → bigger maps (Phase 4, "After 4N").
     Ranked first: 4 maps, no nations, 2–4 players (natural self-play), 10–15 min games, best human data, clean win/loss.
 14. **Game updates: the base model tracks the official servers.** The game submodule is pinned to the production release
     tag (currently v0.34.x) and moved to each new gameplay-relevant release via the playbook below. Upstream ships a minor
@@ -236,6 +294,40 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
       (step 4 trains the v4 network, and Gate 3B measures it on v0.34.24).
     - v0.34.24 records: 7,973 ranked 1v1 games from go-live to 2026-10-10 03:00 UTC (2,392 a day), 6,899 of them
       with two players; none crawled yet. Which records step 4 uses is decided in 3B ("Step 4's records").
+    v0.34.24 → **v0.35.2** (scanned 2026-10-18; the upgrade is next, Phase 4 "After 4N" item 1). Production runs it
+    since 2026-10-16: commit 08b63c05, read from 5 public games of 2026-10-17. It is 227 commits away.
+    - **The engine moved.** `src/core` is now `packages/{engine,engine-lib,engine-api,shared,zbin}`, and 20 bridge and
+      script files import it. The map:
+      - **`engine-lib`:** Config, PseudoRandom, Util, DetMath;
+      - **`engine`:** GameRunner, the executions, `*Impl`;
+      - **`engine-api`:** Schemas, the game types, GameMap, GameUpdates;
+      - **`shared`:** records and the wire schemas.
+      - `Config` becomes `EngineConfig(config, false)`, and `createGameRunner` takes map files.
+    - **Simulation changes** (old records desync):
+      - trade-ship and train spawn rates, with a boost for small economies (balance);
+      - the water graph's edge order, which changes boat paths (rules);
+      - a train fix;
+      - nukes annex cut-off land again (rules);
+      - a MIRV fix;
+      - a large nation AI rewrite for Medium and harder, whose boat routes the tribes share (nation AI). Hard and
+        harder add 1% beachhead boats, warship squads, nuking back, and a gang-up on a runaway FFA leader.
+    - **Unchanged:** `attackLogic`, troop growth, gold, unit costs, warships, SAMs and the intents.
+    - **New:**
+      - **Ranked FFA** (`getFfaConfig`): 4–10 players on six continent maps at Normal size, nations off, 400 tribes,
+        20 minutes; the last human wins.
+      - **Ranked Clan Wars:** 2–5 a side, up to 4 clans, donations on.
+      - **Game snapshots in the engine:** `GameRunner.snapshot`, `createGameRunnerFromSnapshot`.
+      - Lobby sizes now come from the map's land, up to ~210.
+      - No mutable statics are left, so `resetGameStatics` goes.
+    - **The steps** (`docs/superpowers/plans/2026-10-18-after-4n-v035.md`):
+      - move the submodule and `npm ci`;
+      - rewrite the imports;
+      - re-copy the playlist configs and add Ranked FFA's;
+      - fix the tsconfig;
+      - record a new replay fixture;
+      - typecheck, run the tests and the determinism check, and replay 5 production records in sync.
+      - `pins/v0.34.23` stays at the last pre-upgrade commit, since its code cannot import `packages/`.
+    - Node 24.18.1 meets the new engines (Node ≥ 24.15, npm ≥ 12.1 via npx).
 
 ## Architecture
 ```
@@ -1783,17 +1875,76 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
         - 134–139 decisions/s, memory flat at ~19.9 GiB, evaluation rounds of 20–30 minutes, no worker errors.
       - In ranked 1v1 the bot attacked less as it trained: 12% of decisions in the first quarter, 10% in the last (the
         start: 16%). In FFA, among live seats, it attacked slightly more (~10% to ~11%).
-      - **Open: why. Two hypotheses, to separate before any new run:**
-        - a bug in the mixed run's ranked rows. Learner rows paired with the other seat's reward or observation would
-          teach it to lose, and the steady decline fits;
-        - interference. 75% of the learner's rows come from FFA and Humans vs Nations, whose rewards barely vary, so
-          their gradients act as noise on the shared network.
-        - Also open: why Humans vs Nations' Medium games won far less in training than in the check.
-      - **Gate 4N waits:** the evaluations already show the final average below its start in 1v1 and no gain against
-        Hard nations.
-  - **After 4N**, in this order: alliance and donation actions; the crawl of public FFA/Team and ranked 2v2 records,
-    BC on all modes with the mode as an input, and 3C's MoE routing test; modifiers; bigger maps and the 64-player cap
-    (Phase 6).
+      - **Why 1v1 collapsed (2026-10-18): the setups' training signals were coupled.** This is the user's reading, and
+        the evidence supports it. One network learned from all three setups at once, and their rewards reached it
+        together in three ways.
+        - **The value baseline.** One value head fit every setup's returns, so each setup's GAE advantages rest on a
+          baseline shaped by the others. Over all setups' games, its mid-game outcome correlation fell from 0.72 in
+          the first quarter to 0.49–0.55. League v2, on 1v1 only, held 0.76–0.82.
+        - **Advantage normalisation.** Each minibatch normalises the advantages over all its rows. About 75% of them
+          were FFA rows (mean reward flat at −0.86) or Humans vs Nations rows, so their returns set the mean and the
+          spread that every 1v1 advantage is shifted and scaled by.
+        - **One summed gradient.** Every row's gradient adds into one update, and the network did not keep the modes
+          apart:
+          - A gate probe found the MoE router using the same 3 of its 8 experts (0, 1, 5) in every setup. The other 5
+            got 1–6% each.
+          - From the gates alone, a nearest-centroid guess finds the setup in 51% of positions for the start and 59%
+            for 4N's final average, against 33% for chance.
+          - 4N moved those experts the same way in every setup: expert 0 down, expert 5 up.
+          - The probe: 6 games (2 per setup, seed "gates-diag") for 500 decisions, with the start policy acting; it
+            counts live seats after decision 60.
+          - The 1v1 attack share drifted toward FFA's: 12.1% → 10.0% by quarter. League v2 held 12–14%.
+        - **The cost.** 25% of the learner's rows came from 1v1, on their own ±1 rewards, and the averages still ended
+          ~300 Elo below the start. The KL to the 3B clone stayed ~0.037, so the leash did not protect 1v1.
+        - **No indexing bug.** The code was reread: `seat_rows` and the rollout in `trainer/ppo.py`, `trainer/env.py`,
+          `bridge/worker.ts`, `bridge/game.ts` and `bridge/ranking.ts`. Every 1v1 learner row carries its own seat's
+          observation, action and reward.
+          - A control run checks the mixed code path before the next mixed PPO run: 4N's flags with only
+            `ranked1v1=8` and `--minibatches 3`, ~4 h.
+          - The user's call (2026-10-18): deferred until that run.
+        - **If setups share a PPO run again,** the fixes follow from the three couplings:
+          - per-setup advantage normalisation;
+          - per-setup value targets: PopArt (Hessel et al. 2019), or a value head per setup;
+          - a check of each setup's share of the gradient.
+        - **Still open:** Humans vs Nations won ~0.15 in training. Its half-Medium, half-Hard games predict ~0.43 from
+          the checks (0.857 against Medium, 0 against Hard). It is measured again at v0.35.2.
+      - **Gate 4N is not played:** the evaluations already show the final average below its start in 1v1 and no gain
+        against Hard nations. The 1v1 bot stays league v2's final average, `checkpoints/league4a2/avg004000.pt`.
+  - **After 4N** (re-planned 2026-10-18 with the user, `docs/superpowers/plans/2026-10-18-after-4n-v035.md`). The
+    user's calls: upgrade first, then specialists; the control run is deferred.
+    1. **v0.35.2** (production since 2026-10-16). Decision 14 holds its scan.
+       - The upgrade.
+       - The 1v1 bot against the 3B clone at the new pin, 256 games (0.977 at v0.34.24). A short fine-tune if it lost
+         strength.
+       - The nations probes again: Easy, Medium and Hard nations, FFA with one seat and Humans vs Nations, 28 games
+         each. The nations' AI changed, so 4N's numbers against them are history.
+    2. **Human games of every mode at v0.35.2.** The crawler takes Ranked FFA, public FFA, public Team, Clan Wars,
+       ranked 2v2 and ranked 1v1, kept apart from the old pin's records. Two analyses, whose tables go into this plan:
+       - **What predicts winning, per mode** (the user's reward theories):
+         - replayed records log tiles, troops, gold, kills and rivals alive per player every 10 s;
+         - the win probability is fit per mode at minutes 5, 10, 15 and 20, with each measure's AUC and calibration;
+         - it tests whether kills add anything once land is known, and whether a big empire with few troops per tile
+           loses land later;
+         - the best predictor is the potential if a mode needs shaping (decision 9).
+       - **How humans play each mode**, per player-minute:
+         - attacks, boats and builds by type;
+         - nukes, alliances and donations;
+         - the share of commands outside the 15 actions.
+         - It tests the user's picture of FFA and Team, and it sizes item 3.
+    3. **Alliance and donation actions**, perhaps warship moves, designed with the user while the crawl runs.
+       - The crawl moves ahead of this item (it was second). Its analysis sizes the actions.
+       - BC still waits for both, which was the reason the actions came first.
+    4. **BC on all modes** with the mode as an input (decision 5a), with 3C's MoE routing test.
+    5. **RL specialists, one per mode family, all from that clone** (decision 5, 2026-10-18). Each has its own gate.
+       - The families:
+         - ranked 1v1 (the league);
+         - Ranked FFA (copies, on Asia and Australia first: Phase 6);
+         - public FFA against the nations;
+         - Team (copies as in Clan Wars, and Humans vs Nations).
+       - Rewards stay terminal. Where a mode's results stay flat, late-game starts from v0.35's snapshots come first,
+         then potential-based shaping (decision 9).
+    6. **Distillation** of the specialists into one network, or one specialist per lobby type (decision 5b).
+    7. **Then:** modifiers; bigger maps and the 64-player cap (Phase 6).
 
 **Phase 5 — Exact nuke-interception predictor (≈1–2 weeks)**: silo choice as `PlayerImpl.nukeSpawn`,
 `UniversalPathFinding.Parabola`, targetable window, copied SAM targeting (slots, cooldowns, upgrade ramp, stacked-launch
@@ -1820,6 +1971,19 @@ stagger). Gate A: frozen-world harness matches 100% per nuke. Gate B (metric): i
     already ranks every real player above every tribe.
   - Options: a larger cap for those modes, or ranking real players by threat and distance. The transformer's weights
     do not depend on the cap, so raising it keeps the trained network (a short fine-tune at most).
+- Ranked FFA's maps (v0.35) at Normal size, in cells (W × H):
+
+  | Map | Cells |
+  |---|---|
+  | Europe | 363 × 209 |
+  | North America | 350 × 181 |
+  | South America | 218 × 297 |
+  | Africa | 244 × 254 |
+  | Australia | 250 × 188 |
+  | Asia | 250 × 150 |
+
+  - Only Asia and Australia fit the ranked grid (256 × 192).
+  - All six need ~368 × 304 cells, 2.3× today's grid, or 368 × 256 (1.9×) with the two tall maps transposed.
 - an optional rented GPU run.
 
 The sampler, augmentation and CNN sizes were moved here from Phase 3 on 2026-10-03.
