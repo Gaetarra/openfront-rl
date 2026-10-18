@@ -294,8 +294,14 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
       (step 4 trains the v4 network, and Gate 3B measures it on v0.34.24).
     - v0.34.24 records: 7,973 ranked 1v1 games from go-live to 2026-10-10 03:00 UTC (2,392 a day), 6,899 of them
       with two players; none crawled yet. Which records step 4 uses is decided in 3B ("Step 4's records").
-    v0.34.24 → **v0.35.2** (2026-10-18, Phase 4 "After 4N" item 1). Production runs it since 2026-10-16: commit
-    08b63c05, read from 5 public games of 2026-10-17 and 3 of 2026-10-18. It is 227 commits away.
+    v0.34.24 → **v0.35.2** (2026-10-18, Phase 4 "After 4N" item 1). It is 227 commits away. Production runs it
+    (commit 08b63c05, read from 5 public games of 2026-10-17 and 3 of 2026-10-18).
+    - **Timeline** (from the games' commits, 2026-10-18):
+      - v0.34.25 (dfd9e478) ran until 2026-10-16, when v0.35.0 (dfd420fd) replaced it between 17:46 and 17:49 UTC;
+      - v0.35.2 ran by midday 2026-10-17.
+    - **One simulation:** v0.35.0–v0.35.2 share it. Their engine packages differ only in a map's tribe themes and an API
+      schema, and a v0.35.0 record replays in sync at v0.35.2 (346 checkpoints). So the crawler keeps all three
+      versions' records (item 2).
     - **The engine moved.** `src/core` is now `packages/{engine,engine-lib,engine-api,shared,zbin}`, and 20 bridge and
       script files import it. The map:
       - **`engine-lib`:** Config, PseudoRandom, Util, DetMath;
@@ -1959,18 +1965,45 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
              training won ~0.15.
          - **Time:** the 256 ranked games took 30 minutes; each probe took 5–12 minutes.
     2. **Human games of every mode at v0.35.2.** The crawler takes Ranked FFA, public FFA, public Team, Clan Wars,
-       ranked 2v2 and ranked 1v1, kept apart from the old pin's records. Two analyses, whose tables go into this plan:
-       - **What predicts winning, per mode** (the user's reward theories):
-         - replayed records log tiles, troops, gold, kills and rivals alive per player every 10 s;
-         - the win probability is fit per mode at minutes 5, 10, 15 and 20, with each measure's AUC and calibration;
-         - it tests whether kills add anything once land is known, and whether a big empire with few troops per tile
-           loses land later;
-         - the best predictor is the potential if a mode needs shaping (decision 9).
-       - **How humans play each mode**, per player-minute:
-         - attacks, boats and builds by type;
-         - nukes, alliances and donations;
-         - the share of commands outside the 15 actions.
-         - It tests the user's picture of FFA and Team, and it sizes item 3.
+       ranked 2v2 and ranked 1v1, kept apart from the old pin's records.
+       - **The crawler** (2026-10-18): `trainer.crawl --modes MODE[=SHARE] ...`.
+         - **Modes:** `ranked1v1`, `ranked2v2`, `rankedffa`, `clanwars`, `ffa` and `team`. The last two are the public
+           games, and Humans vs Nations is among the Team ones.
+         - **Store:** records go to `data/v0.35.0/`, one store per simulation (CLAUDE.md). Records of other game
+           commits are skipped.
+         - **Void records:** only ranked 1v1 needs every player to have spawned; every mode needs a winner.
+         - **Shares:** a share keeps a stable, hash-picked part of a mode's games.
+         - **Purge:** it covers every store.
+       - **Games on 2026-10-17**, with the gzip size of one record:
+
+         | Mode | Games a day | Players (median, max) | Record |
+         |---|---|---|---|
+         | Ranked 1v1 | 2,253 | 2 | 19 KB |
+         | Ranked 2v2 | 606 | 4 | 18 KB |
+         | Ranked FFA | 420 | 4, 9 | 30 KB |
+         | Clan Wars | 0 (it had games on 2026-10-16) | 4 | – |
+         | Public FFA | 6,117 | 25, 206 | 63 KB |
+         | Public Team | 2,653 | 27, 188 | 64 KB |
+
+         - Public Team splits into 2 teams (663 games), Humans vs Nations (395), 3–7 teams (~1,150), and Duos to Quads
+           (the rest).
+         - At one request a second, all of it takes ~3.3 h of API time per day of games and ~0.6 GB of disk a day.
+       - **A sample of 2 records per mode** (12, into a scratch store):
+         - every one replays in sync at v0.35.2 with the usernames blanked: 6,807 hash checkpoints, among them Clan
+           Wars, a 100-player FFA and two Team games;
+         - the listing's first minutes after the go-live still held v0.34.25 games (34 skipped).
+       - Two analyses, whose tables go into this plan:
+         - **What predicts winning, per mode** (the user's reward theories):
+           - replayed records log tiles, troops, gold, kills and rivals alive per player every 10 s;
+           - the win probability is fit per mode at minutes 5, 10, 15 and 20, with each measure's AUC and calibration;
+           - it tests whether kills add anything once land is known, and whether a big empire with few troops per tile
+             loses land later;
+           - the best predictor is the potential if a mode needs shaping (decision 9).
+         - **How humans play each mode**, per player-minute:
+           - attacks, boats and builds by type;
+           - nukes, alliances and donations;
+           - the share of commands outside the 15 actions.
+           - It tests the user's picture of FFA and Team, and it sizes item 3.
     3. **Alliance and donation actions**, perhaps warship moves, designed with the user while the crawl runs.
        - The crawl moves ahead of this item (it was second). Its analysis sizes the actions.
        - BC still waits for both, which was the reason the actions came first.

@@ -12,9 +12,9 @@ from unittest import mock
 from trainer import crawl
 
 
-def record(game_id, a="A1", b="B1", winner="ca", spawned=("ca", "cb"), start=0):
+def record(game_id, a="A1", b="B1", winner="ca", spawned=("ca", "cb"), start=0, commit="x" * 40):
     turns = [{"turnNumber": 5, "intents": [{"type": "spawn", "tile": 1, "clientID": c} for c in spawned]}]
-    return {"gitCommit": "x" * 40, "turns": turns,
+    return {"gitCommit": commit, "turns": turns,
             "info": {"gameID": game_id, "start": start, "num_turns": 100,
                      "winner": ["player", winner] if winner else None,
                      "config": {"gameMap": "Iceland", "gameMapSize": "Normal"},
@@ -40,8 +40,7 @@ class FakeApi:
 class CrawlTest(unittest.TestCase):
     def setUp(self):
         data = Path(tempfile.mkdtemp()) / "data"
-        self.patch = mock.patch.multiple(crawl, DATA=data, RECORDS=data / "records", INDEX=data / "index.jsonl",
-                                         SKIPPED=data / "skipped.txt", PURGED_AT=data / "purged_at.txt")
+        self.patch = mock.patch.multiple(crawl, DATA=data, PURGED_AT=data / "purged_at.txt", SIM_COMMITS={"x" * 40})
         self.patch.start()
         self.t0 = dt.datetime(2026, 9, 30, tzinfo=dt.timezone.utc)
 
@@ -52,6 +51,8 @@ class CrawlTest(unittest.TestCase):
         self.assertFalse(crawl.is_void(record("g1")))
         self.assertTrue(crawl.is_void(record("g1", winner=None)))
         self.assertTrue(crawl.is_void(record("g1", spawned=("ca",))))
+        self.assertFalse(crawl.is_void(record("g1", spawned=("ca",)), "ffa"), "only ranked 1v1 needs every player")
+        self.assertTrue(crawl.is_void(record("g1", winner=None), "team"))
 
     def test_blank_keeps_simulation_inputs(self):
         r = crawl.blank(record("g1"))
@@ -63,22 +64,54 @@ class CrawlTest(unittest.TestCase):
         api = FakeApi(games=[{"game": "good", "start": "t"}, {"game": "void", "start": "t"}],
                       records={"good": record("good"), "void": record("void", winner=None)})
         hour = dt.timedelta(hours=1)
-        self.assertEqual(crawl.crawl(api, self.t0, self.t0 + hour), (1, 1))
-        with gzip.open(crawl.record_path("good"), "rt", encoding="utf-8") as f:
+        self.assertEqual(crawl.crawl(api, self.t0, self.t0 + hour), (1, 1, 0))
+        with gzip.open(crawl.record_path("good", crawl.store()), "rt", encoding="utf-8") as f:
             self.assertEqual(json.load(f)["info"]["players"][0]["username"], "Player1")
-        self.assertEqual([e["id"] for e in crawl.load_index()], ["good"])
-        self.assertEqual(crawl.load_index()[0]["winner"], "ca")
+        self.assertEqual([e["id"] for e in crawl.load_index(crawl.store())], ["good"])
+        self.assertEqual(crawl.load_index(crawl.store())[0]["winner"], "ca")
+        self.assertEqual(crawl.load_index(), [], "the old pin's store stays as it was")
         fetches = sum(1 for p, _ in api.calls if p.startswith("/game/"))
-        self.assertEqual(crawl.crawl(api, self.t0, self.t0 + hour), (0, 0))
+        self.assertEqual(crawl.crawl(api, self.t0, self.t0 + hour), (0, 0, 0))
         self.assertEqual(sum(1 for p, _ in api.calls if p.startswith("/game/")), fetches, "nothing fetched twice")
+
+    def test_records_of_other_versions_are_skipped_once(self):
+        api = FakeApi(games=[{"game": "old", "start": "t"}], records={"old": record("old", commit="y" * 40)})
+        hour = dt.timedelta(hours=1)
+        self.assertEqual(crawl.crawl(api, self.t0, self.t0 + hour), (0, 0, 1))
+        self.assertEqual(crawl.crawl(api, self.t0, self.t0 + hour), (0, 0, 0))
+        self.assertEqual(sum(1 for p, _ in api.calls if p.startswith("/game/")), 1)
+
+    def test_modes_filter_the_listing_and_label_their_entries(self):
+        api = FakeApi(games=[{"game": "f1", "start": "t"}], records={"f1": record("f1", spawned=("ca",))})
+        crawl.crawl(api, self.t0, self.t0 + dt.timedelta(hours=1), modes=[("ffa", 1.0)])
+        listing = [params for path, params in api.calls if path == "/games"]
+        self.assertEqual((listing[0]["rankedType"], listing[0]["mode"], listing[0]["type"]),
+                         ("unranked", "Free For All", "Public"))
+        self.assertEqual([(e["id"], e["mode"]) for e in crawl.load_index(crawl.store())], [("f1", "ffa")])
+
+    def test_a_share_keeps_a_stable_part_of_the_games(self):
+        ids = [f"g{i:04d}" for i in range(4000)]
+        kept = [i for i in ids if crawl.sampled(i, 0.25)]
+        self.assertAlmostEqual(len(kept) / len(ids), 0.25, delta=0.03)
+        self.assertEqual(kept, [i for i in ids if crawl.sampled(i, 0.25)])
+        self.assertTrue(all(crawl.sampled(i, 1.0) for i in ids[:10]))
+        self.assertEqual(crawl.mode_share("team=0.5"), ("team", 0.5))
+        for bad in ("chess", "ffa=0", "ffa=1.5", "ffa=x"):
+            with self.assertRaises(Exception, msg=bad):
+                crawl.mode_share(bad)
 
     def test_purge_removes_deleted_players_records(self):
         api = FakeApi(games=[{"game": "g1", "start": "t"}, {"game": "g2", "start": "t"}],
                       records={"g1": record("g1", b="GONE"), "g2": record("g2")})
         crawl.crawl(api, self.t0, self.t0 + dt.timedelta(hours=1))
-        self.assertEqual(crawl.purge(FakeApi(deleted=["GONE"])), 1)
-        self.assertEqual([e["id"] for e in crawl.load_index()], ["g2"])
-        self.assertFalse(crawl.record_path("g1").exists())
+        old = record("o1", a="GONE")  # a record in the old pin's store
+        crawl.save(old)
+        crawl.append_index(crawl.entry_of(old))
+        self.assertEqual(crawl.purge(FakeApi(deleted=["GONE"])), 2, "every store is purged")
+        self.assertEqual([e["id"] for e in crawl.load_index(crawl.store())], ["g2"])
+        self.assertFalse(crawl.record_path("g1", crawl.store()).exists())
+        self.assertEqual(crawl.load_index(), [])
+        self.assertFalse(crawl.record_path("o1").exists())
         self.assertTrue(crawl.PURGED_AT.exists())
 
     def test_elo_is_the_rating_before_each_game(self):

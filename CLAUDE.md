@@ -87,8 +87,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.ppo --run onion                 # train; control page with the key curves: http://127.0.0.1:8787
 .venv/Scripts/python -m trainer.ppo --run onion --resume        # continue from checkpoints/onion/latest.pt
 .venv/Scripts/python -m trainer.ctl pause|resume|save|stop|throttle half|status
-.venv/Scripts/python -m trainer.crawl                          # download ranked 1v1 records into data/ (hours: detach)
-.venv/Scripts/python -m trainer.crawl --purge                  # remove deleted players' records (daily while data is kept)
+.venv/Scripts/python -m trainer.crawl --modes ranked1v1 rankedffa ffa=0.25   # records of the pin's simulation into data/v0.35.0/; MODE=SHARE keeps that share of a mode's games, the default is ranked1v1 alone; --limit N per mode (hours: detach)
+.venv/Scripts/python -m trainer.crawl --purge                  # remove deleted players' records from every store (daily while data is kept)
 .venv/Scripts/python -m trainer.bc --run bc3-moe --core moe --workers 14 --games-per-worker 6   # behaviour cloning: one pass over data/ (~14 h); same control page
 .venv/Scripts/python -m trainer.bc --run bc3b --core moe --twin moe-swiglu --workers 14 --games-per-worker 6   # two new networks on the same windows (PLAN 3B): checkpoints/bc3b and checkpoints/bc3b-moe-swiglu
 .venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000 --warmup 100   # fine-tune a checkpoint (its network, a fresh optimizer)
@@ -195,10 +195,16 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     change only with `scripts/ab_speed.py`.
 - `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
   x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
-- `data/` holds only records of v0.34.17-v0.34.22, which replay in full only in `pins/v0.34.23` ("Game version").
-  Step 4's BC night and its scoring ran from there (user decision 2026-10-10, PLAN 3B). `trainer.bc` takes every
-  indexed record, so after a crawl `data/` mixes in newer records (v0.34.24's replay nowhere now, v0.35.2's only in
-  this checkout): a BC run needs them split by version (PLAN 3B, "Step 4's records", option 3). `--score` stays valid from the pin (its records predate 2026-10-01).
+- Records live in one store per simulation (`trainer/crawl.py`), since they desync at a pin with another one. Each
+  store holds `records/`, `index.jsonl` (one entry per record, with its mode) and `skipped.txt`.
+  - `data/` holds the old pin's records, v0.34.17-v0.34.22. They replay in full only in `pins/v0.34.23` ("Game
+    version"), where Step 4's BC night and its scoring ran (user decision 2026-10-10, PLAN 3B).
+  - `trainer.bc` reads only `data/` (ranked 1v1), and `--score` stays valid from the pin (its records predate
+    2026-10-01).
+  - `data/v0.35.0/` holds v0.35.0-v0.35.2 records of every mode, which replay in this checkout. The crawler fills it
+    and skips records of other game commits (`SIM_COMMITS`). BC on all modes will read it (PLAN "After 4N" item 4).
+  - On an upgrade that changes the simulation, give the crawler the new `SIM`, `SIM_COMMITS` and `SINCE`; one that
+    does not only adds its commit to `SIM_COMMITS`.
 - Mixed runs (`--mix SETUP=WORKERS ...`, PLAN 4N): workers play the setups in the order given; rows are game-major
   (game e owns `first[e]` .. `first[e] + seats[e] - 1`). The learner has one seat of each ranked game (the league's pick
   the other) and every seat of an FFA or Humans vs Nations game (`WHOLE` in ppo.py); `global_step` counts learner rows.

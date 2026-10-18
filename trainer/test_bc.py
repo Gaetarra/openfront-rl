@@ -291,8 +291,7 @@ class MainTest(unittest.TestCase):
             self.seeds.append(kwargs["seed"])
             return real(*args, **kwargs)
 
-        with mock.patch.multiple(crawl, DATA=self.data, RECORDS=self.data / "records",
-                                 INDEX=self.data / "index.jsonl"), mock.patch.object(bc, "VecEnv", spy):
+        with mock.patch.object(crawl, "DATA", self.data), mock.patch.object(bc, "VecEnv", spy):
             main(argv)
 
     def latest(self, run=None):
