@@ -203,6 +203,11 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
      - The reward is the change of a potential, so land lost later takes its reward back, and the best policy does not
        change.
      - The potential comes from the analysis of what predicts winning in each mode (Phase 4, "After 4N" item 2).
+       Measured 2026-10-18:
+       - in the ranked modes, the land share alone;
+       - in public FFA, Team and Humans vs Nations, all measures (cities, ports, alliances, SAMs), where land misses
+         half of the signal;
+       - kills add less than 0.02 held-out R² beyond land, except in Humans vs Nations.
    - **Order when a mode's results stay flat:** late-game starts first, now practical since v0.35's snapshots save and
      restore any tick; then shaping.
 10. **PPO** (CleanRL-style), GAE, masked logits, KL-to-BC (annealed), territory-delta channel; PyTorch eager + bf16.
@@ -2010,18 +2015,210 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
            (4,149 hash checkpoints).
          - **Top-ups:** rerunning the same command adds the newer games, and the purge runs daily while the data is
            kept.
-       - Two analyses, whose tables go into this plan:
-         - **What predicts winning, per mode** (the user's reward theories):
-           - replayed records log tiles, troops, gold, kills and rivals alive per player every 10 s;
-           - the win probability is fit per mode at minutes 5, 10, 15 and 20, with each measure's AUC and calibration;
-           - it tests whether kills add anything once land is known, and whether a big empire with few troops per tile
-             loses land later;
-           - the best predictor is the potential if a mode needs shaping (decision 9).
-         - **How humans play each mode**, per player-minute:
-           - attacks, boats and builds by type;
-           - nukes, alliances and donations;
-           - the share of commands outside the 15 actions.
-           - It tests the user's picture of FFA and Team, and it sizes item 3.
+       - **Two analyses** (`scripts/mode_analysis.py`, 2026-10-18). Humans vs Nations is kept apart from the other
+         public Team games: 300 of the 1,910.
+         - **How humans play each mode** (`mode_analysis.py play`, all 8,386 records, ~2 min). It tests the user's
+           picture of FFA and Team (2026-10-17) and sizes item 3.
+           - Counted per active human (one who sent a command). A player's minutes end at its elimination, at a
+             disconnect it did not come back from, or at the game's end.
+           - Rates are per player-minute, with the share of players who did it at least once in brackets:
+
+             | | Ranked 1v1 | Ranked 2v2 | Ranked FFA | Clan Wars | Public FFA | Public Team | Humans vs Nations |
+             |---|---|---|---|---|---|---|---|
+             | Games | 2,852 | 682 | 664 | 9 | 2,269 | 1,610 | 300 |
+             | Active players | 5,704 | 2,728 | 2,919 | 42 | 80,902 | 62,326 | 6,514 |
+             | Minutes per player | 6.9 | 6.5 | 11.8 | 5.5 | 8.0 | 8.9 | 6.9 |
+             | All commands | 22.4 | 18.9 | 19.5 | 19.3 | 12.6 | 12.2 | 13.8 |
+             | Attacks | 19.1 | 15.2 | 13.2 | 15.5 | 7.8 | 8.0 | 9.8 |
+             | Boats | 1.02 (71%) | 1.00 (79%) | 3.07 (95%) | 0.71 (74%) | 1.17 (76%) | 0.87 (79%) | 1.01 (77%) |
+             | Cities | 0.66 (92%) | 0.55 (94%) | 0.76 (98%) | 0.62 (100%) | 0.49 (84%) | 0.40 (87%) | 0.39 (86%) |
+             | Ports | 0.05 (22%) | 0.14 (47%) | 0.38 (82%) | 0.17 (45%) | 0.26 (59%) | 0.25 (71%) | 0.22 (64%) |
+             | Factories | 0.16 (50%) | 0.17 (65%) | 0.18 (68%) | 0.05 (12%) | 0.18 (57%) | 0.16 (65%) | 0.15 (55%) |
+             | Defense posts | 0.33 (52%) | 0.40 (63%) | 0.30 (49%) | 0.41 (71%) | 0.32 (58%) | 0.25 (51%) | 0.29 (60%) |
+             | SAMs | 0.04 (18%) | 0.03 (16%) | 0.08 (50%) | 0.01 (5%) | 0.08 (24%) | 0.08 (41%) | 0.05 (27%) |
+             | Silos | 0.24 (65%) | 0.12 (46%) | 0.15 (79%) | 0.11 (43%) | 0.09 (32%) | 0.06 (36%) | 0.04 (23%) |
+             | Warships | 0.025 (10%) | 0.04 (17%) | 0.11 (44%) | 0.07 (29%) | 0.25 (37%) | 0.21 (42%) | 0.23 (35%) |
+             | Atom bombs | 0.28 (50%) | 0.16 (34%) | 0.11 (42%) | 0.08 (29%) | 0.13 (22%) | 0.20 (26%) | 0.18 (17%) |
+             | Hydrogen bombs | 0.06 (25%) | 0.03 (11%) | 0.08 (41%) | 0.05 (24%) | 0.06 (13%) | 0.03 (10%) | 0.02 (5%) |
+             | Upgrades | 0.06 (13%) | 0.05 (13%) | 0.26 (39%) | 0.01 (7%) | 0.30 (24%) | 0.31 (35%) | 0.18 (26%) |
+             | Warship moves | 0.004 (2%) | 0.01 (3%) | 0.02 (9%) | 0.03 (5%) | 0.06 (10%) | 0.11 (15%) | 0.07 (12%) |
+             | Alliance requests | 0.03 (15%) | 0.06 (19%) | 0.28 (90%) | 0.07 (29%) | 0.69 (87%) | 0.19 (45%) | 0.11 (30%) |
+             | Alliance extensions | 0.004 (2%) | 0.003 (2%) | 0.11 (54%) | 0 | 0.18 (37%) | 0.04 (11%) | 0.002 (1%) |
+             | Alliances broken | 0.002 (1%) | 0.006 (4%) | 0.03 (25%) | 0.004 (2%) | 0.05 (25%) | 0.01 (9%) | 0.006 (3%) |
+             | Troop donations | 0 | 0.14 (35%) | 0 | 0.44 (69%) | 0.002 (1%) | 0.52 (53%) | 0.54 (42%) |
+             | Gold donations | 0 | 0.03 (11%) | 0 | 0.09 (33%) | 0 | 0.02 (7%) | 0.01 (4%) |
+             | Outside the 15 actions | 0.36% | 1.95% | 2.90% | 4.09% | 8.74% | 8.24% | 6.12% |
+             | of which alliances / donations / warship moves | 52 / 1 / 5% | 19 / 45 / 3% | 76 / 0 / 4% | 9 / 67 / 3% | 85 / 0 / 5% | 24 / 53 / 11% | 16 / 65 / 8% |
+
+           - From the players' end-of-game stats:
+
+             | | Ranked 1v1 | Ranked 2v2 | Ranked FFA | Clan Wars | Public FFA | Public Team | Humans vs Nations |
+             |---|---|---|---|---|---|---|---|
+             | Gold per player-minute | 1.69M | 1.09M | 2.74M | 1.32M | 2.50M | 1.85M | 1.18M |
+             | Gold from conquest | 93% | 70% | 39% | 65% | 4% | 5% | 5% |
+             | Gold from trade ships | 1% | 16% | 51% | 20% | 61% | 60% | 55% |
+             | Gold from trains (own and others') | 2% | 6% | 7% | 1% | 26% | 26% | 30% |
+             | Gold from captured trade ships | 0% | 1% | 1% | 0% | 7% | 5% | 4% |
+             | Gold from workers / donations | 3 / 0% | 5 / 3% | 2 / 0% | 4 / 10% | 3 / 0% | 4 / 2% | 5 / 1% |
+             | Trade ships captured per player-hour | 0.01 | 4.0 | 17 | 3.9 | 89 | 42 | 25 |
+             | Transport boats sunk | 2% | 2% | 1% | 7% | 8% | 11% | 8% |
+             | SAM interceptions per human nuke | 3% | 4% | 9% | 0% | 19% | 33% | 1% |
+
+             - Conquest gold is the conquered players' gold, mostly tribes': each ranked 1v1 player takes ~90 of the
+               400.
+             - The game counts a nuke's launch only on a player's land but every landing, so nukes are counted from
+               the commands. It credits an interception to the SAM's owner, so in public FFA and Humans vs Nations the
+               interceptions include the nations' nukes.
+             - Clan Wars has 9 games: too few for any conclusion.
+           - **The user's picture against the data:**
+             - *Warships and ports are much stronger in FFA and Team:* yes. Public FFA and Team players build warships
+               8–10× as often as ranked 1v1 players and ports ~5× as often. Trade ships and trains earn ~85% of their
+               gold, against 93% from conquest in ranked 1v1. Warships capture 89 trade ships per player-hour in
+               public FFA (7% of its gold) and sink 8–11% of transport boats (1–2% in the ranked modes).
+             - *In Team, troops go to donations and boats:* donations yes, half of Team players donate troops, 0.5 a
+               minute. Boats are no more frequent than elsewhere (0.87 a minute against 1.0–1.2, and 3.1 in Ranked
+               FFA), and attacks are less than half of ranked 1v1's (8.0 against 19.1).
+             - *In Team, nukes and SAMs matter more:* SAMs yes: 41% of Team players build one (18–24% in ranked 1v1
+               and public FFA, 50% in Ranked FFA), and a third of human nukes are intercepted. Nukes no: Team players
+               fire 0.23 a minute, ranked 1v1 players 0.35.
+             - *In FFA, attacking is dangerous:* public FFA players attack 7.8 times a minute, 19.1 in ranked 1v1,
+               while they upgrade 5× and build warships 10× as often. Ranked FFA sits in between (13.2). Whether an
+               attack thins the attacker's defence is 5a's question (below).
+             - *In FFA, diplomacy:* yes. 87–90% of FFA players request alliances, 0.69 times a minute in public FFA,
+               and a quarter of all FFA players break one.
+           - **For item 3:** alliance and donation commands are 85% of public FFA's commands outside the 15 actions
+             and 77% of public Team's; warship moves add 5–11%.
+           - **Humans vs Nations:** the humans won 131 of the 300 public games (0.44 ± 0.03), all against as many Hard
+             nations (a median of 17 humans, 5–50). Gate 4N's bar for 4 seats against 4 Hard nations, 0.70, is far
+             above what public human teams reach, so the Team specialist's gate needs its own bar (item 5).
+         - **What predicts winning, per mode** (the user's reward theories; `mode_analysis.py traces`, then `win`).
+           - **Data:** replays of 600 hash-picked records per mode, with all 300 Humans vs Nations and all 9 Clan Wars
+             games: 3,309 in all, none out of sync (2026-10-18, 10:50–12:47 on 12 workers, `runs\modes035.cmd`).
+             - `scripts/mode_traces.ts` logs, every 10 s, each human's and nation's tiles, troops, gold, structure
+               levels, alliances, rivals attacking it and troops away in attacks and boats. It also logs every
+               conquest (`EnvGame.conquests`).
+             - Its conquests match the game's own count for 2,710 of 2,726 humans. The other 16 are kills of humans
+               who never attacked, which the game's stats skip.
+           - **Method:** a conditional logit (one winner per game) over the sides alive at minutes 1–20 after the
+             spawn phase.
+             - Sides are the players, or the teams in team modes. In public FFA only humans can win: no nation won a
+               game of the store.
+             - Inputs:
+               - log shares of land, troops and gold;
+               - log(1 + level) of each structure type;
+               - log(1 + count) of kills and of tribes taken;
+               - alliances, rivals attacking, and the share of the army away.
+             - Each measure is fit alone, and all of them together (standardised, with a ridge of 1). Both are scored
+               on held-out games:
+               - McFadden's R² against a uniform pick among the sides;
+               - calibration;
+               - the favourite's mean probability against its win rate.
+             - Clan Wars has too few games for a fit.
+           - **How often the land leader wins.** At minute 5 the cells hold 417, 424, 596, 596, 570 and 249 games,
+             with 2, 2, 4.3, 22, 5.3 and 2 sides alive:
+
+             | | min 1 | min 2 | min 3 | min 5 | min 7 | min 10 | min 15 | min 20 |
+             |---|---|---|---|---|---|---|---|---|
+             | Ranked 1v1 | 0.61 | 0.68 | 0.73 | 0.84 | 0.86 | 0.87 | | |
+             | Ranked 2v2 | 0.66 | 0.78 | 0.84 | 0.87 | 0.87 | 0.87 | | |
+             | Ranked FFA | 0.30 | 0.42 | 0.52 | 0.61 | 0.65 | 0.68 | 0.71 | 1.00 (the timer) |
+             | Public FFA | 0.10 | 0.19 | 0.23 | 0.34 | 0.44 | 0.53 | 0.53 | 0.51 |
+             | Public Team | 0.43 | 0.49 | 0.54 | 0.63 | 0.63 | 0.67 | 0.62 | 0.67 |
+             | Humans vs Nations | 0.48 | 0.69 | 0.74 | 0.77 | 0.77 | 0.78 | 0.77 | |
+
+           - **Held-out R², land alone → all measures.** Brackets name the best single measure where it is not land:
+
+             | | min 1 | min 2 | min 3 | min 5 | min 7 | min 10 | min 15 | min 20 |
+             |---|---|---|---|---|---|---|---|---|
+             | Ranked 1v1 | 0.05 → 0.14 | 0.13 → 0.16 | 0.24 → 0.27 | 0.46 → 0.49 | 0.48 → 0.50 | 0.37 → 0.35 | | |
+             | Ranked 2v2 | 0.09 → 0.20 | 0.29 → 0.35 | 0.46 → 0.49 | 0.56 → 0.60 | 0.55 → 0.57 | 0.46 → 0.19 | | |
+             | Ranked FFA | 0.03 → 0.10 | 0.10 → 0.16 | 0.20 → 0.24 | 0.33 → 0.36 | 0.39 → 0.42 | 0.44 → 0.45 | 0.44 → 0.47 | 0.57 → 0.44 |
+             | Public FFA | 0.04 → 0.11 | 0.14 → 0.20 | 0.20 → 0.28 (cities 0.20) | 0.28 → 0.36 (cities 0.30) | 0.34 → 0.42 (cities 0.36) | 0.42 → 0.46 | 0.43 → 0.49 (cities 0.43) | 0.40 → 0.48 (cities 0.43) |
+             | Public Team | 0.07 → 0.10 | 0.16 → 0.17 | 0.22 → 0.27 | 0.35 → 0.46 | 0.41 → 0.54 (ports 0.46) | 0.48 → 0.61 (ports 0.53) | 0.43 → 0.60 (ports 0.52) | 0.38 → 0.59 (ports 0.51) |
+             | Humans vs Nations | 0.01 → 0.14 | 0.18 → 0.21 | 0.26 → 0.38 | 0.33 → 0.65 (cities 0.43) | 0.31 → 0.55 (cities 0.47) | 0.27 → 0.64 (ports 0.61) | 0.27 → 0.71 (ports 0.69) | |
+
+             - At minute 1 troops lead narrowly in ranked 1v1, Ranked FFA and Humans vs Nations (R² 0.04–0.06).
+             - Cells with fewer than ~100 games overfit the 15 inputs, for example ranked 2v2 at minute 10 (54 games).
+           - **All measures at minute 5,** per SD (bold: beyond 2 SE):
+
+             | | Ranked 1v1 | Ranked 2v2 | Ranked FFA | Public FFA | Public Team | Humans vs Nations |
+             |---|---|---|---|---|---|---|
+             | Land | **+2.60 ± 0.44** | **+2.14 ± 0.49** | **+2.28 ± 0.31** | **+1.61 ± 0.38** | **+3.02 ± 0.58** | +0.25 ± 0.31 |
+             | Troops | **+0.52 ± 0.20** | +0.49 ± 0.31 | -0.06 ± 0.12 | +0.34 ± 0.19 | -0.19 ± 0.36 | +0.71 ± 0.41 |
+             | Gold | +0.09 ± 0.12 | **+0.41 ± 0.15** | -0.09 ± 0.08 | **+0.20 ± 0.08** | +0.23 ± 0.19 | +0.36 ± 0.25 |
+             | Cities | +0.05 ± 0.16 | **+0.97 ± 0.25** | **+0.49 ± 0.10** | **+1.26 ± 0.15** | **+1.16 ± 0.34** | +0.85 ± 0.63 |
+             | Ports | +0.24 ± 0.14 | +0.08 ± 0.16 | +0.13 ± 0.07 | **+0.27 ± 0.08** | **+1.51 ± 0.27** | **+1.76 ± 0.60** |
+             | Factories | -0.00 ± 0.14 | -0.12 ± 0.15 | **-0.26 ± 0.06** | -0.08 ± 0.06 | -0.03 ± 0.20 | +0.46 ± 0.35 |
+             | Defense posts | **+0.27 ± 0.13** | +0.19 ± 0.15 | +0.04 ± 0.06 | +0.04 ± 0.05 | -0.05 ± 0.10 | -0.38 ± 0.33 |
+             | SAMs | -0.23 ± 0.13 | **+0.38 ± 0.18** | -0.11 ± 0.07 | **-0.11 ± 0.06** | **+0.27 ± 0.11** | **+1.00 ± 0.30** |
+             | Silos | **+0.32 ± 0.11** | **+0.42 ± 0.13** | +0.07 ± 0.06 | +0.06 ± 0.05 | **+0.19 ± 0.09** | +0.25 ± 0.25 |
+             | Warships | +0.00 ± 0.13 | +0.09 ± 0.14 | -0.04 ± 0.07 | +0.03 ± 0.05 | -0.09 ± 0.11 | **+0.71 ± 0.32** |
+             | Kills | (none) | +0.51 ± 0.33 | +0.07 ± 0.05 | **+0.20 ± 0.06** | **+0.24 ± 0.11** | +0.16 ± 0.42 |
+             | Tribes taken | +0.59 ± 0.33 | +0.71 ± 0.36 | +0.10 ± 0.23 | **+0.29 ± 0.10** | -0.47 ± 0.27 | +0.22 ± 0.61 |
+             | Alliances | +0.16 ± 0.11 | -0.08 ± 0.41 | **+0.21 ± 0.07** | **+0.49 ± 0.06** | +0.13 ± 0.11 | (none) |
+             | Rivals attacking | +0.16 ± 0.12 | -0.15 ± 0.13 | -0.02 ± 0.08 | -0.13 ± 0.09 | **-0.49 ± 0.10** | -0.50 ± 0.29 |
+             | Army away | **+0.31 ± 0.15** | +0.34 ± 0.21 | -0.03 ± 0.08 | **+0.19 ± 0.06** | +0.12 ± 0.09 | +0.46 ± 0.24 |
+
+             - By minute 10, ports grow in public FFA (+0.73 ± 0.14) and Team (+1.89 ± 0.39, the largest input).
+               Alliances hold in both FFA modes (+0.43 and +0.35), and land stays first in the ranked modes.
+           - **The user's FFA risks:** the chance of losing 10% of one's land or more in the next 3 minutes, for the
+             humans alive at minute 5. Below is a logistic regression on all five risks at once, per SD (bold: beyond
+             2 SE; its SEs ignore that players of one game are not independent), then the raw rates:
+
+             | | Ranked 1v1 | Ranked 2v2 | Ranked FFA | Public FFA | Public Team | Humans vs Nations |
+             |---|---|---|---|---|---|---|
+             | Land share | **-0.82 ± 0.19** | **-0.64 ± 0.15** | **-0.90 ± 0.09** | **-0.90 ± 0.04** | **-0.48 ± 0.03** | **-0.69 ± 0.07** |
+             | Troops per tile | **-0.41 ± 0.17** | -0.18 ± 0.12 | +0.07 ± 0.08 | **-0.84 ± 0.04** | **-0.36 ± 0.03** | **-0.38 ± 0.07** |
+             | Army away | -0.21 ± 0.19 | **-0.26 ± 0.12** | **-0.15 ± 0.07** | **-0.32 ± 0.02** | **-0.07 ± 0.02** | -0.02 ± 0.05 |
+             | Rivals attacking | -0.20 ± 0.21 | **+0.28 ± 0.09** | **+0.34 ± 0.05** | **+0.53 ± 0.03** | **+0.76 ± 0.03** | **+1.05 ± 0.06** |
+             | Alliances | -0.01 ± 0.16 | -0.02 ± 0.10 | **-0.28 ± 0.06** | **-0.35 ± 0.02** | **+0.21 ± 0.02** | +0.09 ± 0.05 |
+             | Lost land: all | 0.10 | 0.27 | 0.20 | 0.52 | 0.35 | 0.31 |
+             | attacked by 0 / 1 / 2+ rivals | 0.10 / 0.07 / – | 0.22 / 0.44 / 0.53 | 0.19 / 0.60 / 0.86 | 0.45 / 0.76 / 0.93 | 0.29 / 0.69 / 0.84 | 0.21 / 0.59 / 0.84 |
+             | no alliance / allied | 0.10 / 0.07 | 0.27 / 0.20 | 0.27 / 0.18 | 0.68 / 0.51 | 0.30 / 0.46 | 0.30 / 0.47 |
+
+           - **Findings:**
+             - **Land (the user's territory theory):** land decides the ranked modes. It is the best single measure
+               there from minute 3 at the latest, and all 15 measures together add only 0.01–0.06 R² from minute 2 on.
+               In ranked 1v1 the land leader at minute 5 wins 84% of the games.
+             - **Public FFA:** land shares the lead with cities, alliances and ports, and all measures add 0.04–0.08.
+             - **Public Team and Humans vs Nations:** the economy beats land.
+               - In Team, ports are the best single measure from minute 7. From minute 5 on, all measures add
+                 0.11–0.21 R² to land.
+               - In Humans vs Nations, land alone explains little (R² 0.26–0.33 from minute 3 on). Cities, ports and
+                 SAMs carry most of the signal: all measures reach 0.65 at minute 5. This fits the user's picture: in
+                 team games the economy and the defences decide more than land.
+             - **Kills (the user's kill bonus):** they add almost nothing once land is known.
+               - Adding kills to land moves the held-out R² by less than 0.02 in every mode but Humans vs Nations
+                 (+0.05 to +0.09 at minutes 3–10), and by at most 0.01 in the ranked modes.
+               - With all measures in, kills count only in public FFA (+0.20 ± 0.06 at minute 5) and Team (+0.24 ±
+                 0.11).
+               - Decision 9's "no kill bonus" stands.
+             - **The user's FFA risks,** each with the others held fixed:
+               - *Several rivals attacking you:* the largest risk in every multiplayer mode. At minute 5, 93% of public
+                 FFA players attacked by two or more rivals lose 10% of their land within 3 minutes, against 45% of
+                 the unattacked. Rivals attacking also lower the win chance in Team (−0.49 ± 0.10).
+               - *A big empire with few troops per tile:* yes. At equal land share, more troops per tile protect land:
+                 −0.84 per SD in public FFA at minute 5 and −1.58 at minute 10; −0.36 and −0.61 in Team.
+                 - The raw big-and-thin rates point the other way, and they mislead: the biggest empires are the
+                   thinnest and lose the least.
+               - *Attacking thins your defence:* not in net land. Players with more of their army away lose land less
+                 often (−0.32 per SD in public FFA), and in the win model the share away is neutral or positive.
+                 - The measure is net land: an attack's gains can hide what neighbours take meanwhile.
+               - *Alliances in FFA:* yes. Allied public FFA players lose land less often (0.51 against 0.68), and
+                 alliances predict the win beyond land (+0.49 ± 0.06).
+                 - In public Team an allied player loses land more often (+0.21 per SD). There an alliance is with a
+                   player of another team.
+             - **Calibration:** the full model's favourite gets about the probability it wins with: 0.85 / 0.84 in
+               ranked 1v1 at minute 5, 0.54 / 0.53 in public FFA and 0.77 / 0.78 in Team at minute 10. The calibration
+               error is at most 0.06 in cells of 150 games or more. So the model can serve as decision 9's potential:
+               - land share alone in the ranked modes, as P(win) ∝ share^β, where β is 2.4–5.2 from minute 2 to 7;
+               - all measures, per mode and minute, in public FFA, Team and Humans vs Nations, where land misses
+                 half of the signal.
+             - **Caveats:**
+               - These are correlations among humans: strong players may build ports because they are strong. A
+                 potential keeps the best policy whatever it measures (Ng et al.), but a measure here is no advice to
+                 the bot.
+               - Every public FFA game in the store was won by a human.
     3. **Alliance and donation actions**, perhaps warship moves, designed with the user while the crawl runs.
        - The crawl moves ahead of this item (it was second). Its analysis sizes the actions.
        - BC still waits for both, which was the reason the actions came first.
@@ -2034,6 +2231,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
          - Team (copies as in Clan Wars, and Humans vs Nations).
        - Rewards stay terminal. Where a mode's results stay flat, late-game starts from v0.35's snapshots come first,
          then potential-based shaping (decision 9).
+       - Gates against nations should be set from what humans reach: public human teams beat Hard nations in 0.44 of
+         Humans vs Nations games (item 2), well under Gate 4N's 0.70.
     6. **Distillation** of the specialists into one network, or one specialist per lobby type (decision 5b).
     7. **Then:** modifiers; bigger maps and the 64-player cap (Phase 6).
 

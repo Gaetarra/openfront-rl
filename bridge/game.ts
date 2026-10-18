@@ -4,6 +4,7 @@ import {
   PlayerType,
 } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
 import {
+  ConquestUpdate,
   GameUpdateType,
   HashUpdate,
 } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameUpdates";
@@ -91,7 +92,7 @@ export class EnvGame {
     /** Rows of the player table: smallID 0 (unowned land) up to the config's largest player count. */
     readonly slots: number,
     private readonly runner: GameRunner,
-    private readonly sim: { hash: number; hashTick: number; fatal: string | null },
+    private readonly sim: { hash: number; hashTick: number; fatal: string | null; conquests: ConquestUpdate[] },
     private readonly latency: LatencyQueue,
   ) {
     this.invalid = seats.map(() => false);
@@ -105,6 +106,11 @@ export class EnvGame {
   /** Tick of the latest hash. */
   get hashTick(): number {
     return this.sim.hashTick;
+  }
+
+  /** Every player conquered so far (its last land taken), in order, with its conqueror. */
+  get conquests(): readonly ConquestUpdate[] {
+    return this.sim.conquests;
   }
 
   /** The game length the observations measure progress and time left against. */
@@ -153,7 +159,7 @@ export class EnvGame {
       terrain.teamGameSpawnAreas,
     );
     const frame = new CellFrame(game.map(), config.gameMapSize === GameMapSize.Compact ? 4 : 8, stride);
-    const sim = { hash: 0, hashTick: -1, fatal: null as string | null };
+    const sim = { hash: 0, hashTick: -1, fatal: null as string | null, conquests: [] as ConquestUpdate[] };
     const executor = new Executor(game, start.gameID, undefined, start.tribes?.map((t) => t.name));
     const runner = new GameRunner(game, executor, (gu) => {
       if ("errMsg" in gu) {
@@ -165,6 +171,7 @@ export class EnvGame {
         sim.hash = h.hash;
         sim.hashTick = h.tick;
       }
+      sim.conquests.push(...(gu.updates[GameUpdateType.ConquestEvent] as ConquestUpdate[]));
     });
     runner.init();
     const seats = humans.map((h) => game.player(h.id));

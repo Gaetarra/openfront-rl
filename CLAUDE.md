@@ -67,6 +67,9 @@ npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a
 npx tsx ../../scripts/troop_shares.ts 60                    # share of their troops humans send per attack/boat, 60 replayed records (~10 min, game dir)
 .venv/Scripts/python scripts/bench_gpu.py                   # GPU encoder throughput (run from the repo root)
 .venv/Scripts/python scripts/coverage.py                    # Gate 3B's coverage: commands outside the 15 actions over all held-out records (seconds)
+.venv/Scripts/python scripts/mode_analysis.py play          # how humans play each mode, per player-minute, over every record of data/v0.35.0/ (~2 min; PLAN "After 4N" item 2)
+.venv/Scripts/python scripts/mode_analysis.py traces        # replays a stable sample of 600 records per mode (scripts/mode_traces.ts; ~2 h on 12 workers, resumable: detach, runs\modes035.cmd)
+.venv/Scripts/python scripts/mode_analysis.py win           # what predicts winning, per mode and minute, from the traces (seconds; runs/modes/win.json); `selftest` checks its fit
 .venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s, time split and peak VRAM of the Phase 2 network and a v4 network, BC rows/s of the v4 network (~15 min, PC idle); --v4 <checkpoint> times a trained one (Gate 3B)
 .venv/Scripts/python scripts/profile_ppo.py                     # where PPO's time goes: one update of the real loop with the 3B clone under torch.profiler, per part: CPU, idle GPU, syncs, GPU time (~2 min, PC idle; runs/profile/*.json)
 .venv/Scripts/python scripts/ab_speed.py --old pins/ab-base --label <change>   # code A/B of PPO speed: old, new, new, old probes and the rule's verdict (~15 min, PC idle; runs/ab/)
@@ -271,6 +274,8 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   a worker process. On every upgrade, grep `packages/` for non-readonly `static` fields and module-level state; a new
   one needs a reset before each game.
 - v0.35 has game snapshots (`GameRunner.snapshot`, `createGameRunnerFromSnapshot`).
+- A conquest (a player's last land taken) arrives as a `ConquestEvent` update, which `EnvGame.conquests` keeps. The
+  game's stats skip a conquered human who never attacked anyone (no gold moves), so they count one kill fewer there.
 - Code that only builds observations may use `Math.*`; code whose output reaches the simulation (intents, latency)
   must use seeded `PseudoRandom`.
 - Structures (city, port, factory, silo, SAM, defense post) of all players stay at least `structureMinDist()` = 15
