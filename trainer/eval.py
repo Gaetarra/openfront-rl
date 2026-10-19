@@ -22,7 +22,7 @@ import torch
 
 from trainer.control import REPLAYS
 from trainer.env import ONION, RANKED_1V1, VecEnv, game_commit, gate_config
-from trainer.model import ATTACK, BOAT, BUILD, RETREAT, SPAWN, ActionDist, RandomPolicy, load_net
+from trainer.model import ACT_NAMES, ATTACK, BOAT, BUILD, RETREAT, SPAWN, ActionDist, RandomPolicy, load_net
 
 SETUPS = {"onion": ONION, "ranked1v1": RANKED_1V1}
 GATES = ("ffa", "hvn")  # Gate 4N's games, from trainer.env.gate_config
@@ -197,7 +197,9 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
          a_two_bins=False, wait=None):
     """Plays the first ceil(episodes / games) episodes of every game slot; returns the summary of policy 0, its meters
     (Cooldown, with `a_cooldown` no-ops after each of its actions; `a_two_bins`: a troop and a gold action per
-    decision; and Gate 3B's invalid actions: of its decisions that act, the share the bridge refuses), and the IDs of
+    decision; and Gate 3B's invalid actions: of its decisions that act, the share the bridge refuses; "types" and
+    "invalid_by_type": the mix of the first actions' types over its decisions that act, and per type the share the
+    bridge refuses, for Gate 7's per-mode action report), and the IDs of
     the games saved with `record` ({"dir", "gitCommit", "games"}). Sampling uses a fixed torch seed, so a given set of
     policies always gives the same result.
     - A later policy may be a list: game slot e plays its entry e % len, and the result adds policy 0's summary against
@@ -222,6 +224,7 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
         per_slot = -(-episodes // E)
         counts, results, seen, obs = np.zeros(E, int), [], [], envs.obs
         a_cpu, acted, refused = a_rows.cpu().numpy(), 0, 0
+        took, refused_of = np.zeros(len(ACT_NAMES), int), np.zeros(len(ACT_NAMES), int)  # by the first action's type
         while counts.min() < per_slot:
             if wait is not None and not wait():
                 return None
@@ -229,7 +232,11 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
             for policy, rows in groups:
                 out = policy({k: v[rows] for k, v in obs.items()})
                 act[rows, :out.shape[1]] = out
-            obs, _, _, infos, invalid = envs.step(act.cpu().numpy())
+            act_cpu = act.cpu().numpy()
+            obs, _, _, infos, invalid = envs.step(act_cpu)
+            first = act_cpu[a_cpu, 0]
+            took += np.bincount(first, minlength=len(ACT_NAMES))
+            refused_of += np.bincount(first, weights=invalid[a_cpu], minlength=len(ACT_NAMES)).astype(int)
             acted += int((act[a_rows, 0::4] != 0).any(1).sum())  # every 4th entry is an action's type
             refused += int(invalid[a_cpu].sum())
             seen += infos
@@ -247,7 +254,10 @@ def play(specs, config, episodes, workers, games_per_worker, device="cuda", seed
         names = {s: label(s) for row in of_slot for s in row}
         for game_id, e in recorded.items():
             name_players(Path(record["dir"]) / f"{game_id}.json", {seats[e][p]: names[of_slot[p][e]] for p in range(S)})
-    meters = {**meter.meters(), "actions": acted, "invalid_share": refused / acted if acted else 0.0}
+    meters = {**meter.meters(), "actions": acted, "invalid_share": refused / acted if acted else 0.0,
+              "types": {ACT_NAMES[t]: int(took[t]) / took[1:].sum() for t in range(1, len(ACT_NAMES)) if took[t]},
+              "invalid_by_type": {ACT_NAMES[t]: int(refused_of[t]) / int(took[t])
+                                  for t in range(1, len(ACT_NAMES)) if took[t]}}
     out = {**summarize(results), "meters": meters, "recorded": sorted(recorded)}
     if S > 1 and isinstance(specs[1], list):
         out["by_b"] = {b: summarize([r for r in results if of_slot[1][r["env"]] == b]) for b in dict.fromkeys(specs[1])}

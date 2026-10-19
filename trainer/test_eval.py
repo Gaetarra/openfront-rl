@@ -11,7 +11,7 @@ import torch
 from trainer.control import REPLAYS
 from trainer.env import HVN, ONION, RANKED_1V1, gate_config
 from trainer.eval import Cooldown, label, main, name_players, play, replay_dir, seats_for, summarize, tag, two_bin_sample
-from trainer.model import SPAWN, ActionDist, new_net
+from trainer.model import ACT_NAMES, SPAWN, ActionDist, new_net
 from trainer.test_model import DIMS, DIMS_V5
 
 ONION2 = {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1}
@@ -127,6 +127,14 @@ class EvalTest(unittest.TestCase):
             r = play(["city"], {**ONION, "timerMinutes": 1}, episodes=1, workers=1, games_per_worker=1, seed="refused")
         self.assertGreater(r["meters"]["actions"], 0)
         self.assertEqual(r["meters"]["invalid_share"], 1.0)  # a city on the corner cell, from the spawn phase on
+
+    def test_the_meters_give_the_action_mix_and_the_refusals_per_type(self):
+        r = play(["random", "random"], ONION2, episodes=2, workers=1, games_per_worker=2, seed="mix")
+        types, refused = r["meters"]["types"], r["meters"]["invalid_by_type"]
+        self.assertAlmostEqual(sum(types.values()), 1.0, places=9)
+        self.assertLessEqual(set(types), set(ACT_NAMES[1:]))
+        self.assertEqual(set(refused), set(types))
+        self.assertTrue(all(0.0 <= v <= 1.0 for v in refused.values()))
 
     def test_a_cooldown_keeps_policy_a_from_acting_twice_in_a_row(self):
         r = play(["random", "random"], ONION2, episodes=2, workers=1, games_per_worker=2, seed="cool", a_cooldown=1)
