@@ -4,7 +4,7 @@
   BC clone: a random network acts on most decisions, which costs more simulation;
 - with --v5, a fresh v5 network (step 6: 20 actions, the same SwiGLU experts) in the same PPO setup, as a share of v4's
   decisions/s with its own peak memory. The budget (design, "Speed and memory"): at least 95% of v4's and no spill;
-- BC rows/s for the v4 network.
+- BC rows/s for a fresh v5 network (new BC runs are v5).
 Gate 3B: v4 keeps at least 75% of the Phase 2 network's decisions/s in the same run. Run it with the PC otherwise idle
 (~15 min, full GPU):
 
@@ -105,7 +105,7 @@ def main(argv=None):
     runs = {"speed-ppo-v1": ("trainer.ppo", ppo + ["--init", str(PHASE2), "--opponent", str(PHASE2)]),
             "speed-ppo-v4": ("trainer.ppo", ppo + ["--init", v4, "--opponent", v4]),
             "speed-ppo-v5": ("trainer.ppo", ppo + ["--init", v5, "--opponent", v5]),
-            "speed-bc-v4": ("trainer.bc", bc + ["--core", "moe-swiglu"])}
+            "speed-bc-v5": ("trainer.bc", bc + ["--core", "moe-swiglu"])}
     if not a.v5:
         del runs["speed-ppo-v5"]
     if a.skip_bc:

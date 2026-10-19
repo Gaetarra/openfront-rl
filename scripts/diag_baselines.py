@@ -11,6 +11,7 @@ import numpy as np
 
 sys.path.insert(0, ".")
 from trainer.env import VecEnv  # noqa: E402
+from trainer.model import V4_ACTS  # noqa: E402
 
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "seats": 1}
 SIZES = [10, 25, 50, 75, 100]
@@ -22,7 +23,7 @@ def act(obs, rng, policy, step):
     rows = []
     for i in range(types.shape[0]):
         if policy == "random":
-            t = rng.choice(np.flatnonzero(types[i]))
+            t = rng.choice(np.flatnonzero(types[i, :V4_ACTS]))  # the types before step 6
             m = {1: 0, 3: 1, 4: 2}.get(t)
             cell = rng.choice(np.flatnonzero(cells[i, m])) if m is not None and cells[i, m].any() else 0
             rows.append([t, cell, rng.choice(np.flatnonzero(attack[i])) if t == 2 else 0, int(rng.choice(SIZES))])
