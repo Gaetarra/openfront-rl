@@ -2101,6 +2101,9 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
                who never attacked, which the game's stats skip.
            - **Method:** a conditional logit (one winner per game) over the sides alive at minutes 1–20 after the
              spawn phase.
+             - The ranked games are short. Minutes after the spawn phase, median (p10–p90), over all records:
+               - ranked 1v1 6.5 (2.5–10.1), ranked 2v2 6.2 (3.8–9.8), Ranked FFA 12.2 (7.9–20.0);
+               - public Team 10.3 (5.4–19.6), public FFA 16.1 (9.8–30.1).
              - Sides are the players, or the teams in team modes. In public FFA only humans can win: no nation won a
                game of the store.
              - Inputs:
@@ -2219,9 +2222,48 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
                  potential keeps the best policy whatever it measures (Ng et al.), but a measure here is no advice to
                  the bot.
                - Every public FFA game in the store was won by a human.
-    3. **Alliance and donation actions**, perhaps warship moves, designed with the user while the crawl runs.
-       - The crawl moves ahead of this item (it was second). Its analysis sizes the actions.
-       - BC still waits for both, which was the reason the actions came first.
+    3. **Diplomacy and warship actions** (designed with the user, 2026-10-18/19).
+       - **Documents:**
+         - design: `docs/superpowers/specs/2026-10-19-diplomacy-and-warship-actions-design.md`;
+         - plan: `docs/superpowers/plans/2026-10-19-step6-diplomacy-and-warships.md`, 13 tasks, executed
+           subagent-driven.
+       - **Order:** the crawl moved ahead of this item (it was second), and its analysis sized the actions. BC still
+         waits for both.
+       - **Scope (the user, 2026-10-19):** five actions, each aimed the way a human aims it:
+         - request an alliance (which also accepts one);
+         - renew an alliance;
+         - break an alliance;
+         - donate troops (a 1–100% share);
+         - move warships: a source cell, alone or with its fleet, and a destination cell.
+         - Left out: gold donations, embargoes, target marks, rejects, chat and MIRVs.
+         - Commands outside the actions fall from 8.7% to 1.0% in public FFA and from 8.2% to 1.2% in public Team.
+       - **Warship moves are in, on the user's evidence:**
+         - piracy on busy routes: a long-route trade ship pays over 100k;
+         - sea control decides the invasions in Team games;
+         - fleets snowball through veteran levels.
+         - Humans move warships rarely (0.06–0.11 a minute) because their attention is limited, and a bot has no such
+           limit.
+         - The win model's warship count at minute 5 doesn't measure how warships are used.
+       - **Alliances by team count** (public Team, `mode_analysis.py` records):
+         - Players who request an alliance: 17% in two-team games, 52% with 3–7 teams, 70–82% in Duos to Quads, and
+           87% in public FFA.
+         - Troop donations a minute: 0.70, 0.48, 0.21–0.30 and 0.002 respectively.
+         - In two-team games an alliance is mostly a trap. SAMs never shoot an ally's nukes, and warships never sink an
+           ally's boats, even when they target teammates.
+       - **The game's rules it relies on** (v0.35.2, checked in the code) are in the design:
+         - a request lasts 20 s, with a 30-s cooldown per recipient;
+         - alliances last 5 minutes, and renewal is offered in the last 30 s;
+         - breaking an alliance brings a 30-s traitor debuff;
+         - a donation is cut to the recipient's room under its troop cap;
+         - when a lobby switches donations off, only donations to humans are refused, so an allied nation still
+           receives them;
+         - tribes accept every request.
+       - **Arch v5:**
+         - four player pointers, a third share kind (donations), and an autoregressive warship-move head;
+         - new inputs, which go after v4's, so older networks play unchanged: diplomacy player features, warships'
+           health, veteran level and patrol points, and trade ships;
+         - speed budget: at least 95% of v4's PPO decisions/s, with no spill.
+       - **Status (2026-10-19):** designed and planned, not built.
     4. **BC on all modes** with the mode as an input (decision 5a), with 3C's MoE routing test.
     5. **RL specialists, one per mode family, all from that clone** (decision 5, 2026-10-18). Each has its own gate.
        - The families:
