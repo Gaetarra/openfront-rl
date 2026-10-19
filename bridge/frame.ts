@@ -5,12 +5,14 @@ import { Game, Unit } from "../OpenFront_Source_Code/openfrontio/packages/engine
 /** Cell record: u32 cell, u16 owner 1, u16 owner 2, u8 tiles of owner 1, u8 tiles of owner 2, u8 fallout tiles. */
 export const CELL_BYTES = 11;
 /**
- * Unit record: u8 type index (UNIT_TYPES), u8 level (0 = under construction), u16 owner, u32 cell, f32 troops,
- * u8 missiles loaded (silos and SAMs), u8 zero, then the unit's zone: u16 x, u16 y and u16 radius in tiles (radius 0:
+ * Unit record: u8 type index (UNIT_TYPES), u8 level (0 = under construction), u16 owner, u32 cell, f32 troops
+ * (warships: health / max health), u8 ready (silos and SAMs: missiles loaded; warships: veteran level), u8 flags
+ * (bit 0: a trade ship safe from pirates), then the unit's zone: u16 x, u16 y and u16 radius in tiles (radius 0:
  * none). A zone is a finished SAM's current range or a finished defense post's range around it, or a nuke's outer
- * blast around its target.
+ * blast around its target; a warship's x and y hold its patrol tile and its radius is 0. Last, u16 bound: a trade
+ * ship's destination port's owner (smallID), else 0.
  */
-export const UNIT_BYTES = 20;
+export const UNIT_BYTES = 22;
 
 /** Missiles a finished silo or SAM holds: its level minus the ones reloading. */
 export const loaded = (u: Unit): number =>
@@ -263,6 +265,18 @@ export function encodeUnits(game: Game, frame: CellFrame): Uint8Array {
       dv.setUint16(off + 14, game.x(z[0]), true);
       dv.setUint16(off + 16, game.y(z[0]), true);
       dv.setUint16(off + 18, Math.min(Math.round(z[1]), 65535), true);
+    }
+    if (u.type() === UnitType.Warship) {
+      const patrol = u.warshipState().patrolTile;
+      dv.setFloat32(off + 8, Number(u.health()) / u.maxHealth(), true);
+      out[off + 12] = Math.min(u.veterancy(), 255);
+      if (patrol !== undefined) {
+        dv.setUint16(off + 14, game.x(patrol), true);
+        dv.setUint16(off + 16, game.y(patrol), true);
+      }
+    } else if (u.type() === UnitType.TradeShip) {
+      out[off + 13] = u.isSafeFromPirates() ? 1 : 0;
+      dv.setUint16(off + 20, u.targetUnit()?.owner().smallID() ?? 0, true);
     }
     off += UNIT_BYTES;
   }

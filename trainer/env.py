@@ -20,8 +20,8 @@ WORKER_TS = ROOT / "bridge" / "worker.ts"
 
 CELL = np.dtype([("idx", "<u4"), ("o1", "<u2"), ("o2", "<u2"), ("n1", "u1"), ("n2", "u1"), ("fo", "u1")])
 UNIT = np.dtype([("type", "u1"), ("level", "u1"), ("owner", "<u2"), ("cell", "<u4"), ("troops", "<f4"),
-                 ("ready", "u1"), ("pad", "u1"), ("zx", "<u2"), ("zy", "<u2"), ("zr", "<u2")])  # bridge/frame.ts
-assert CELL.itemsize == 11 and UNIT.itemsize == 20
+                 ("ready", "u1"), ("flags", "u1"), ("zx", "<u2"), ("zy", "<u2"), ("zr", "<u2"), ("bound", "<u2")])  # bridge/frame.ts
+assert CELL.itemsize == 11 and UNIT.itemsize == 22
 
 
 def game_commit():
