@@ -92,11 +92,11 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.ctl pause|resume|save|stop|throttle half|status
 .venv/Scripts/python -m trainer.crawl --modes ranked1v1 rankedffa ffa=0.25   # records of the pin's simulation into data/v0.35.0/; MODE=SHARE keeps that share of a mode's games, the default is ranked1v1 alone; --limit N per mode (hours: detach)
 .venv/Scripts/python -m trainer.crawl --purge                  # remove deleted players' records from every store (daily while data is kept)
-.venv/Scripts/python -m trainer.crawl --reindex                # refill the index fields step 7 added (playerTeams, modifiers, disabled units) for the entries already in data/v0.35.0; run it with no crawl writing the index, after the crawl ends
-.venv/Scripts/python -m trainer.bc --run bc3-moe --core moe --workers 14 --games-per-worker 6   # behaviour cloning: one pass over data/ (~14 h); same control page. The next three lines ran before step 7, when trainer.bc read the old pin's ranked 1v1 store data/: they are the record of what ran, and today's trainer.bc does not read data/, so don't rerun them expecting it
+.venv/Scripts/python -m trainer.crawl --reindex                # refill the index fields step 7 added (playerTeams, modifiers, disabled units, bots, nations) for the entries already in data/v0.35.0; run it with no crawl writing the index, after the crawl ends
+.venv/Scripts/python -m trainer.bc --run bc3-moe --core moe --workers 14 --games-per-worker 6   # behaviour cloning: one pass over data/ (~14 h); same control page. This line and the next two ran before step 7, when trainer.bc read the old pin's ranked 1v1 store data/: they are the record of what ran, and today's trainer.bc does not read data/, so don't rerun them expecting it
 .venv/Scripts/python -m trainer.bc --run bc3b --core moe --twin moe-swiglu --workers 14 --games-per-worker 6   # (before step 7) two new networks on the same windows (PLAN 3B): checkpoints/bc3b and checkpoints/bc3b-moe-swiglu
 .venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000 --warmup 100   # (before step 7) fine-tune a checkpoint (its network, a fresh optimizer)
-.venv/Scripts/python -m trainer.bc --run bc7 --init checkpoints/bc3b-v4/latest.pt --grow --lr 1e-4 --mix ranked1v1=3 ranked2v2=2 rankedffa=1 ffa=4 team=3 hvn=1 --games-per-worker 6 --updates 24000   # step 7's BC night (PLAN "After 4N" item 4; ~15 h): the 3B clone grown into v5, on the records of every mode in data/v0.35.0, one family per replay worker (after the crawl and --reindex); the user starts it with explorer.exe runs\bc7.cmd, which resumes the run created with --updates 0
+.venv/Scripts/python -m trainer.bc --run bc7 --init checkpoints/bc3b-v4/latest.pt --grow --lr 1e-4 --mix ranked1v1=3 ranked2v2=2 rankedffa=1 ffa=4 team=3 hvn=1 --games-per-worker 6 --updates 0   # step 7's BC night (PLAN "After 4N" item 4; ~15 h): the 3B clone grown into v5, on the records of every mode in data/v0.35.0, one family per replay worker (after the crawl and --reindex); the user starts it with explorer.exe runs\bc7.cmd, which resumes this run (created with --updates 0, so that the grown start's checkpoint exists to be scored first) with --updates 24000
 .venv/Scripts/python -m trainer.bc --score checkpoints/bc3b-v4/latest.pt checkpoints/bc7/latest.pt   # NLL per head, bucket and lobby kind on the fixed v0.35 held-out set (~10 min); table + runs/score/*.json
 .venv/Scripts/python -m trainer.eval --a checkpoints/bc/update0060000.pt --b scripted   # ranked 1v1 match, 256 games
 .venv/Scripts/python -m trainer.eval --setup onion --a random   # Phase 1 setup: one seat vs 3 Easy nations
@@ -145,7 +145,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     `ffa`, `team` (with Clan Wars) and `hvn`. A family's share of the rows is its share of the workers. Without it,
     every worker plays ranked 1v1.
   - `--val-workers N` (N > 0) validates with one worker per family that has held-out records, 2 games each. A new run
-    validates once at update 0: the baseline of the forgetting check.
+    validates once at update 0. The validation is a coarse trend (the 1v1 rows are ~10x too noisy for the forgetting bar); PLAN's operation 5 checks forgetting with a paired `--score` at update 2,500.
 - Networks: new runs record theirs in the checkpoint (`args["arch"]`, `"core"`): v1 is Phase 2, v2 is Phase 3A (5 troop
   sizes), v3 is Phase 3B (100 troop shares), v4 adds every action (15 types, 12 heat maps, a retreat pointer) and the
   3B inputs (57 channels, 26 scalars); `--init` keeps the checkpoint's. A checkpoint without `"arch"` (Phase 2) loads
@@ -250,8 +250,9 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     change only with `scripts/ab_speed.py`.
 - `trainer.bc --score` always scores the same rows: the usable held-out (5% by game ID) records of `data/v0.35.0`
   started before 2026-10-19 12:00 UTC, each family on min(2, its records) workers x 6 games, seed "score", 1,500 steps
-  (`SCORE_CUTOFF`, `SCORE_LAYOUT` in `trainer/bc.py`). Every statistic is also logged per lobby kind. The result JSON
-  adds the records per family. Compare checkpoints within one scoring run (a purge can shift the rows).
+  (`SCORE_CUTOFF`, `SCORE_LAYOUT` in `trainer/bc.py`). Per lobby kind it also logs `bc/nll_<kind>`,
+  `bc/nll_common_<kind>` and `router/<kind>_<i>` (other statistics stay global). The result JSON adds the records per
+  family. Compare checkpoints within one scoring run (a purge can shift the rows).
   - `bc/nll_common*` (and `bc/nll_common_<kind>`) is the NLL over the legal rows labelled with one of v4's 15 types: the
     like-for-like key between a v4 and a v5 network.
   - `labels/illegal/<type>` is the share of the rows labelled with that type that fall outside the masks.

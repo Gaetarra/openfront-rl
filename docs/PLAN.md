@@ -2355,7 +2355,9 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
          - **The real index needs a reindex:** `data/v0.35.0/index.jsonl` has no step 7 fields yet, so `trainer.bc` and
            `--score` stop with "run python -m trainer.crawl --reindex" until it is run after the crawl.
          - **Validation:** `--val-workers N` with N > 0 runs one worker per family that has held-out records, 2 games
-           each (0 turns validation off). A new run validates once at update 0: the forgetting trigger's baseline.
+           each (0 turns validation off). A new run validates once at update 0. The `val/` curves are a coarse trend only: the
+           ranked 1v1 validation reads 400 rows a time from 2-4 records, so a gap between two points carries ~0.2 of
+           noise (the 3B night's scatter of ~0.057 at 2,400 rows, scaled), about 10x the forgetting bar (operation 5).
          - **Player table:** `slots_of` sizes it over every usable record of the store (1 + the most humans + nations
            + bots of any entry; nations "default" count as max(the map's nations, the humans)), also for a run without
            `--mix`. `bridge/obs.ts` throws when a smallID does not fit, so a wrong size fails loudly; the smoke run
@@ -2392,11 +2394,15 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
        - **Operations that remain** (each needs the user's go; in order):
          1. **The crawl ends** (`runs\crawl035b-done.txt`). Then
             `.venv/Scripts/python -m trainer.crawl --reindex`.
-         2. **Counts:** the usable training and held-out records per family, into the line above.
+         2. **Counts:** the usable training and held-out records per family, into the line above (read-only):
+            `.venv/Scripts/python -c "import collections; from trainer import crawl; from trainer.bc import usable, family_of, is_val; from trainer.env import map_table; t, s = map_table(), crawl.store(); print(sorted(collections.Counter((family_of(e), 'val' if is_val(e['id'], 0.05) else 'train') for e in crawl.load_index(s) if crawl.record_path(e['id'], s).exists() and usable(e, t['maps'], t['grid'])).items()))"`.
          3. **Smoke run** (~10 min, PC idle):
             `.venv/Scripts/python -m trainer.bc --run bc7-smoke --init checkpoints/bc3b-v4/latest.pt --grow --lr 1e-4 --mix ranked1v1=3 ranked2v2=2 rankedffa=1 ffa=4 team=3 hvn=1 --games-per-worker 6 --updates 60 --val-every 30`.
             - Check for finite losses, the `perf/samples_per_s`, and the peak GPU memory (Task Manager's dedicated
-              and shared memory).
+              and shared memory), and the system RAM (Task Manager; the night runs 20 Node workers, 14 training and 6
+              validation, on Normal public maps).
+            - Note how long the VecEnv takes to start: each training worker replays up to half a public record per
+              game slot before its first window, possibly minutes on every start and resume.
             - Then delete `checkpoints/bc7-smoke` and `runs/bc7-smoke`.
          4. **The grown start and its score** (~20 min):
             - Create it (it also validates the start):
@@ -2405,12 +2411,26 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
               `.venv/Scripts/python -m trainer.bc --score checkpoints/bc3b-v4/latest.pt checkpoints/bc7/latest.pt`.
             - **Pass:** the two clones' `bc/nll_common_ranked1v1` agree to ~1e-3.
             - **Into PLAN:** each new type's `labels/illegal/<type>`.
-         5. **The night** (~15 h): `explorer.exe runs\bc7.cmd`, with Windows Update paused. It resumes `bc7`, so it
-            keeps the run's learning rate and mix (24,000 updates).
-            - **The forgetting trigger** (the design's risk): in the first 2,500 updates,
-              `val/bc/nll_common_ranked1v1` must stay within +0.02 of its update-0 value.
-            - If it doesn't, stop the run and restart it from the grown start at `--lr 5e-5`, or with more ranked 1v1
-              workers.
+         5. **The night** (~15 h): `explorer.exe runs\bc7.cmd`, with Windows Update paused. It resumes `bc7` (created
+            in operation 4 with `--updates 0`) with `--updates 24000`, so it keeps the run's learning rate and mix.
+            - **The forgetting check** (the design's risk; changed after the final review, 2026-10-19). The 1v1
+              validation cannot resolve the +0.02 bar (400 rows a time, ~0.2 of noise on a gap, about 10x the bar), so
+              the check is a paired score on the fixed scoring set, whose rows are the same for both checkpoints:
+              1. At update 2,500 (~1.5 h in; `checkpoints/bc7/update0002500.pt` is kept), stop the run from the
+                 control page (Save & quit: the exit is 0, so `runs\bc7.cmd` ends).
+              2. Score it against the 3B clone (~20 min, ~36,000 ranked 1v1 rows for both; bc3b-v4 stands for the
+                 grown start, which equals it to ~3e-5 on real rows):
+                 `.venv/Scripts/python -m trainer.bc --score checkpoints/bc3b-v4/latest.pt checkpoints/bc7/update0002500.pt`.
+              3. **Pass:** the update-2,500 network's `bc/nll_common_ranked1v1` is within +0.02 of bc3b-v4's. Rerun
+                 `explorer.exe runs\bc7.cmd`: it resumes.
+              4. **Fail:** restart from the grown start at `--lr 5e-5`, or with more ranked 1v1 workers. The restart
+                 needs a new run: `latest.pt` at update 0 is gone after update 250, and a new run refuses an existing
+                 `checkpoints/bc7`. Either use a new run name (say `bc7b`, and change `runs\bc7.cmd`'s run name to
+                 match), or delete both `checkpoints/bc7` and `runs/bc7` (TensorBoard would merge the two runs'
+                 events otherwise). The grow is deterministic under the run's seed, so the recreated start is the same
+                 network. Create it as in operation 4 with the new rate, e.g.
+                 `.venv/Scripts/python -m trainer.bc --run bc7b --init checkpoints/bc3b-v4/latest.pt --grow --lr 5e-5 --mix ranked1v1=3 ranked2v2=2 rankedffa=1 ffa=4 team=3 hvn=1 --games-per-worker 6 --updates 0`,
+                 then resume it through `runs\bc7.cmd`.
          6. **Gate 7** (~3 h): `explorer.exe runs\gate7.cmd`, then the results go into PLAN against the design's bars.
     5. **RL specialists, one per mode family, all from that clone** (decision 5, 2026-10-18). Each has its own gate.
        - The families:

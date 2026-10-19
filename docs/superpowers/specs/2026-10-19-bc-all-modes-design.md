@@ -244,8 +244,11 @@ This move follows from the user's choice of the grown start (2026-10-19).
 
 ### Risks, and what to do if they show
 
-- **1v1 forgets:** in the first 2,500 updates the ranked 1v1 validation NLL rises more than 0.02 above the grown
-  start's. Then stop, and lower the learning rate (5e-5) or give ranked 1v1 more workers.
+- **1v1 forgets** (changed after the final review, 2026-10-19): at update 2,500 the kept checkpoint's
+  `bc/nll_common_ranked1v1` on the fixed scoring set (a paired `--score` against the 3B clone, which the grown start
+  equals to ~3e-5) is more than 0.02 above the 3B clone's. Then stop, and restart from the grown start with a lower
+  learning rate (5e-5) or more ranked 1v1 workers. The ranked 1v1 validation cannot serve as the trigger: it reads 400
+  rows from 2-4 records a time, ~0.2 of noise on a gap, about 10x the bar. Its `val/` curve stays as a coarse trend.
 - **A small family overfits** (Humans vs Nations, ~3 passes): its validation NLL turns up while training's falls. Then
   move its worker to public FFA.
 - **Memory:** public records have a larger player table (up to ~590 rows against 403), and that grows the land-feature
