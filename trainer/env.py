@@ -44,6 +44,7 @@ ZONES = READY + 1  # 51..56: ZONES + 2 * kind + side (0 ours: self and friends; 
 ZONE_KINDS = {"SAM Launcher": 0, "Defense Post": 1, "Atom Bomb": 2, "Hydrogen Bomb": 2, "MIRV Warhead": 2}
 N_CHANNELS = ZONES + 2 * 3  # a SAM's zone counts its loaded interceptors / 16, a post's or a nuke's 1
 DENSITY_FEATURE = 16  # player feature: log troops per tile
+WORKER_V4_FEATURES = 17  # the worker's player features before step 6; the buildings follow them, then its later ones
 # The action type of each heat map (bridge/actions.ts Act): spawn, boat, the nine builds (city, defense post, silo,
 # factory, port, SAM, warship, atom bomb, hydrogen bomb) and upgrade. Networks before 3B step 3 have the first three.
 MAP_TYPES = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
@@ -334,8 +335,9 @@ class VecEnv:
     def _observe(self, players, rel, scalars, types, attack, retreat, units):
         """The model's inputs, one row per seat:
         - "spatial": uint8 [N, N_CHANNELS, H, W], in 64ths;
-        - "players": [N, P, F + len(BUILDING_TYPES)], the worker's features, then the player's buildings by type
-          (log1p of their summed values, / 3);
+        - "players": [N, P, F + len(BUILDING_TYPES)], the worker's first WORKER_V4_FEATURES features, the player's
+          buildings by type (log1p of their summed values, / 3), then the worker's later features, so the networks
+          that read only a prefix keep their inputs;
         - "owners" (int16) and "owner_land" (uint8) [N, 2, H * W]: each cell's two largest owners and their shares of
           it in 64ths, for the model's per-player map features;
         - the scalars and the masks: 15 action types, 12 heat maps (MAP_TYPES), the attack and retreat pointers."""
@@ -379,7 +381,8 @@ class VecEnv:
         return {
             "spatial": quantize_(x).view(N, N_CHANNELS, self.H, self.W),
             "scalars": torch.from_numpy(scalars.reshape(N, self.K)).to(dev),
-            "players": torch.cat([pl, torch.log1p(buildings[row_env]) / 3], 2),
+            "players": torch.cat([pl[..., :WORKER_V4_FEATURES], torch.log1p(buildings[row_env]) / 3,
+                                  pl[..., WORKER_V4_FEATURES:]], 2),
             "owners": torch.stack(owners, 1).to(torch.int16),
             "owner_land": quantize_(torch.stack(shares, 1)),
             "type_mask": type_mask,
