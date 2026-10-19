@@ -6,6 +6,7 @@ Phase 4 "After 4N").
                                                         several modes; MODE=SHARE keeps that share of a mode's games
   .venv/Scripts/python -m trainer.crawl --limit 50      a small sample of each mode
   .venv/Scripts/python -m trainer.crawl --purge         only remove deleted players' records (run daily while data is kept)
+  .venv/Scripts/python -m trainer.crawl --reindex       refill the index fields of the entries already there (crawl stopped)
 
 Records desync at a pin with another simulation (PLAN decision 14), so each simulation's records have their own store:
 data/ holds v0.34.17-v0.34.22's (the old pin's, pins/v0.34.23), and data/<the simulation's first tag>/ each later
@@ -135,13 +136,24 @@ def blank(record, public_ids=False):
     return record
 
 
+# What behaviour cloning filters records on, from the lobby's config (step 7): `teams` is playerTeams (a team count or a
+# name such as "Duos" or "Humans Vs Nations"), `modifiers` the sorted names of the public game modifiers that are on,
+# `bots` and `nations` "default", "disabled" or a number.
+INDEX_FIELDS = ("teams", "modifiers", "disabled", "bots", "nations")
+
+
 def entry_of(record, mode="ranked1v1"):
     info = record["info"]
     winner = info["winner"]
+    config = info["config"]
     return {"id": info["gameID"], "start": info["start"], "commit": record.get("gitCommit"),
             "map": info["config"]["gameMap"], "size": info["config"]["gameMapSize"], "turns": info["num_turns"],
             "players": [{"clientID": p["clientID"], "publicID": p.get("publicID")} for p in info["players"]],
-            "winner": winner[1] if winner and winner[0] == "player" else None, "mode": mode}
+            "winner": winner[1] if winner and winner[0] == "player" else None, "mode": mode,
+            "teams": config.get("playerTeams"),
+            "modifiers": sorted(k for k, v in (config.get("publicGameModifiers") or {}).items() if v),
+            "disabled": config.get("disabledUnits") or [], "bots": config.get("bots"),
+            "nations": config.get("nations")}
 
 
 def store(sim=SIM):
@@ -176,6 +188,11 @@ def load_index(root=None):
         return []
     with open(index, encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def load_record(game_id, root=None):
+    with gzip.open(record_path(game_id, root), "rt", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def append_index(entry, root=None):
@@ -215,15 +232,40 @@ def purge(api, now=None):
     return removed
 
 
+def reindex(root=None):
+    """Refills the INDEX_FIELDS of every entry of a store's index (default: the old pin's) from its record, for the
+    entries written before the fields existed; entries without a record file stay as they are. Returns how many
+    entries changed. A crawl appends to the index while it runs, so the file is replaced only if its bytes are what
+    this read: otherwise nothing is replaced and the rerun waits for the crawl."""
+    index = (root or DATA) / "index.jsonl"
+    before = index.read_bytes()
+    entries = [json.loads(line) for line in before.decode("utf-8").splitlines() if line.strip()]
+    changed = 0
+    for e in entries:
+        if not record_path(e["id"], root).exists():
+            continue
+        fresh = entry_of(load_record(e["id"], root), e["mode"])
+        update = {k: fresh[k] for k in INDEX_FIELDS}
+        if any(e.get(k) != v for k, v in update.items()) or any(k not in e for k in update):
+            e.update(update)
+            changed += 1
+    if index.read_bytes() != before:
+        raise SystemExit(f"{index} changed while reindexing: a crawl is writing it. Rerun when the crawl is done")
+    tmp = index.with_suffix(".tmp")
+    tmp.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+    tmp.replace(index)
+    return changed
+
+
 def sampled(game_id, share):
     """Whether a mode's share keeps a game: a stable hash of its ID, salted apart from BC's held-out split."""
     return share >= 1 or zlib.crc32(f"crawl:{game_id}".encode()) % 10_000 < share * 10_000
 
 
 def elo(entries, k=32.0, base=1500.0):
-    """Each player's Elo before each game, from the games in start order: {game ID: {clientID: rating}}."""
+    """Each player's Elo before each game, from the ranked 1v1 games in start order: {game ID: {clientID: rating}}."""
     rating, out = {}, {}
-    for e in sorted(entries, key=lambda e: e["start"]):
+    for e in sorted((e for e in entries if e.get("mode", "ranked1v1") == "ranked1v1"), key=lambda e: e["start"]):
         a, b = e["players"]
         ra, rb = rating.get(a["publicID"], base), rating.get(b["publicID"], base)
         out[e["id"]] = {a["clientID"]: ra, b["clientID"]: rb}
@@ -253,8 +295,7 @@ def crawl(api, since, until, modes=(("ranked1v1", 1.0),), root=None, limit=None,
                 continue
             done.add(gid)
             if record_path(gid, root).exists():  # saved, but the index line was lost (killed in between)
-                with gzip.open(record_path(gid, root), "rt", encoding="utf-8") as f:
-                    record = json.load(f)
+                record = load_record(gid, root)
             else:
                 record = api.get(f"/game/{gid}")
                 if record is None:
@@ -301,7 +342,12 @@ def main(argv=None):
     p.add_argument("--until", help="last game start (default: now)")
     p.add_argument("--limit", type=int, help="stop each mode after saving this many records")
     p.add_argument("--purge", action="store_true", help="only remove deleted players' records")
+    p.add_argument("--reindex", action="store_true",
+                   help="only refill the index fields of the entries already there (not while a crawl runs)")
     a = p.parse_args(argv)
+    if a.reindex:
+        print(f"reindexed {reindex(store())} entries in {store()}")
+        return
     api = Api()
     if a.purge:
         print(f"removed {purge(api)} records")

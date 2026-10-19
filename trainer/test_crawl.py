@@ -10,6 +10,9 @@ from pathlib import Path
 from unittest import mock
 
 from trainer import crawl
+from trainer.env import ROOT
+
+TEAM = ROOT / "bridge" / "testdata" / "team.json.gz"
 
 
 def record(game_id, a="A1", b="B1", winner="ca", spawned=("ca", "cb"), start=0, commit="x" * 40):
@@ -121,6 +124,59 @@ class CrawlTest(unittest.TestCase):
         self.assertGreater(r["g1"]["ca"], 1500.0)
         self.assertAlmostEqual(r["g1"]["ca"] + r["g1"]["cb"], 3000.0)
         self.assertGreater(r["g2"]["ca"], r["g1"]["ca"])
+
+    def test_an_entry_holds_what_bc_filters_on(self):
+        team = json.loads(gzip.decompress(TEAM.read_bytes()))
+        e = crawl.entry_of(team, "team")
+        self.assertEqual((e["teams"], e["modifiers"], e["disabled"], e["bots"], e["nations"]),
+                         (6, ["isCompact", "isWaterNukes"], [], team["info"]["config"]["bots"], "disabled"))
+        plain = crawl.entry_of(record("g1"))
+        self.assertEqual((plain["teams"], plain["modifiers"], plain["disabled"]), (None, [], []))
+
+    def team_store(self):
+        """A temp store holding the Team fixture, its index line without the INDEX_FIELDS."""
+        root = Path(tempfile.mkdtemp())
+        team = json.loads(gzip.decompress(TEAM.read_bytes()))
+        crawl.save(team, root)
+        old = {k: v for k, v in crawl.entry_of(team, "team").items() if k not in crawl.INDEX_FIELDS}
+        gone = {**old, "id": "nofile", "mode": "ffa"}  # an entry whose record is not there
+        (root / "index.jsonl").write_text("".join(json.dumps(e) + "\n" for e in (old, gone)), encoding="utf-8")
+        return root, team, old, gone
+
+    def test_reindex_fills_old_entries_and_keeps_the_rest(self):
+        root, team, old, gone = self.team_store()
+        self.assertEqual(crawl.reindex(root), 1)
+        full, untouched = crawl.load_index(root)
+        self.assertEqual({k: v for k, v in full.items() if k not in crawl.INDEX_FIELDS}, old)
+        self.assertEqual({k: full[k] for k in crawl.INDEX_FIELDS},
+                         {k: crawl.entry_of(team, "team")[k] for k in crawl.INDEX_FIELDS})
+        self.assertEqual(untouched, gone, "an entry without a record file stays as it was")
+        self.assertEqual(crawl.reindex(root), 0)
+
+    def test_reindex_refuses_an_index_that_changed_while_it_ran(self):
+        root, _, _, _ = self.team_store()
+        index = root / "index.jsonl"
+        real = crawl.load_record
+
+        def crawling(game_id, root):  # a crawl appends a line while the first record is read
+            with open(index, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"id": "new"}) + "\n")
+            return real(game_id, root)
+
+        with mock.patch.object(crawl, "load_record", crawling):
+            with self.assertRaises(SystemExit) as cm:
+                crawl.reindex(root)
+        self.assertIn("crawl", str(cm.exception))
+        self.assertIn('"new"', index.read_text(encoding="utf-8"))
+        self.assertEqual(len(crawl.load_index(root)), 3)
+
+    def test_elo_rates_ranked_1v1_entries_only(self):
+        team = crawl.entry_of(json.loads(gzip.decompress(TEAM.read_bytes())), "team")
+        self.assertEqual(len(team["players"]), 18)
+        entries = [crawl.entry_of(record("g0", start=0)), team, crawl.entry_of(record("g1", start=2))]
+        r = crawl.elo(entries)
+        self.assertEqual(sorted(r), ["g0", "g1"], "the team entry is not rated")
+        self.assertGreater(r["g1"]["ca"], 1500.0)
 
     def test_api_spaces_requests_and_retries_rate_limits(self):
         clock, slept, calls = [0.0], [], []
