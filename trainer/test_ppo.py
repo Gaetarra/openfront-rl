@@ -9,7 +9,7 @@ import psutil
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from trainer.env import FFA, HVN, N_CHANNELS, ONION, ROOT
+from trainer.env import FFA, HVN, N_CHANNELS, N_SCALARS, ONION, ROOT
 from trainer.model import ActionDist, PolicyV1, _kl, new_net
 from trainer.ppo import (MAY_CHANGE, HostRows, Outcomes, cap_binds, gae, main, mix_of, network_args, pack_bits,
                          parse_args, parser, resume_args, run_info, seat_rows, unpack_bits)
@@ -340,7 +340,7 @@ class SmokeTest(unittest.TestCase):
         init = ROOT / "checkpoints" / self.RUN / "init.pt"
         init.parent.mkdir(parents=True, exist_ok=True)
         args = {"arch": "v5", "core": "moe", "widths": "64,128,192"}
-        dims = {"channels": N_CHANNELS, "playerFeatures": 31, "scalars": 26}
+        dims = {"channels": N_CHANNELS, "playerFeatures": 31, "scalars": N_SCALARS}
         torch.manual_seed(0)
         net = new_net(dims, args)
         for layer in (net.type_head, net.shuffle, net.skip, net.query, net.diplomacy_query, net.dst_film, net.dst_shuffle,
@@ -382,7 +382,7 @@ class SmokeTest(unittest.TestCase):
         init.parent.mkdir(parents=True, exist_ok=True)
         args = {"arch": "v5", "core": "moe", "widths": "64,128,192"}
         torch.manual_seed(0)
-        net = new_net({"channels": N_CHANNELS, "playerFeatures": 31, "scalars": 26}, args)
+        net = new_net({"channels": N_CHANNELS, "playerFeatures": 31, "scalars": N_SCALARS}, args)
         torch.save({"model": net.state_dict(), "args": args, "update": 0}, init)
         playlists = {"ranked1v1": {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1},
                      "ffa": {**FFA, "timerMinutes": 1}, "hvn": {**HVN, "timerMinutes": 1}}

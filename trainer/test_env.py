@@ -9,9 +9,9 @@ import torch
 
 from trainer import env as env_module
 from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, DST, FFA, HEALTH, HVN, LAND, LEVEL, MAP_TYPES, MOVE,
-                         N_CHANNELS, OWN, OWNER, OWNER_FEATURES, PATROL, RANKED_1V1, ROOT, TRADE, UNIT, UPGRADABLE,
-                         VALID, VETERAN, WORKER_V4_FEATURES, ZONE_KINDS, VecEnv, disk_cells, frozen_eval_config,
-                         gate_config, quantize_)
+                         N_CHANNELS, N_SCALARS, OWN, OWNER, OWNER_FEATURES, PATROL, RANKED_1V1, ROOT, TRADE, UNIT,
+                         UPGRADABLE, VALID, VETERAN, WORKER_V4_FEATURES, ZONE_KINDS, VecEnv, disk_cells,
+                         frozen_eval_config, gate_config, quantize_)
 from scripts.coverage import label_kinds
 from trainer.eval import Scripted
 from trainer.model import ACT_NAMES, DIPLOMACY, DONATE, MAP_OF, REQUEST, ActionDist, RandomPolicy, v1_spatial
@@ -141,6 +141,8 @@ class VecEnvTest(unittest.TestCase):
             self.assertEqual(obs["spatial"].shape, (2, N_CHANNELS, 64, 64))
             self.assertEqual(obs["spatial"].dtype, torch.uint8)
             self.assertEqual(obs["players"].shape, (2, 5, 31))
+            self.assertEqual(env.dims["scalars"], N_SCALARS)
+            self.assertEqual(obs["scalars"].shape, (2, N_SCALARS))
             self.assertEqual((obs["owners"].shape, obs["owners"].dtype), ((2, 2, 64 * 64), torch.int16))
             self.assertEqual(obs["owner_land"].dtype, torch.uint8)
             self.assertEqual(obs["cell_mask"].shape, (2, DST + 1, 64 * 64))

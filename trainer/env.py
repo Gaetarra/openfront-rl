@@ -49,6 +49,11 @@ VETERAN = HEALTH + 2
 PATROL = VETERAN + 2  # 61: the seat's warships whose patrol tile lies in the cell / 16
 TRADE = PATROL + 1  # 62: trade ships that pay the seat or its friends / 16; 63: the ones the seat could capture / 16
 N_CHANNELS = TRADE + 2
+# The mode input (bridge/obs.ts): scalars MODE.. hold the lobby kind one-hot in KINDS order, then log2(non-bot players) / 8,
+# log2(teams) / 6 and the nations' difficulty.
+MODE = 26
+KINDS = ("ranked1v1", "ranked2v2", "rankedffa", "clanwars", "ffa", "team", "hvn")
+N_SCALARS = MODE + len(KINDS) + 3
 DENSITY_FEATURE = 16  # player feature: log troops per tile
 WORKER_V4_FEATURES = 17  # the worker's player features before step 6; the buildings follow them, then its later ones
 # The action type of each heat map (bridge/actions.ts Act): spawn, boat, the nine builds (city, defense post, silo,
@@ -219,6 +224,8 @@ class VecEnv:
         self.H, self.W = d["grid"]  # padded by the worker to multiples of 16 (the CNN downsamples by 16)
         self.P = d["slots"]
         self.F, self.K, self.T = d["playerFeatures"], d["scalars"], d["acts"]
+        if self.K != N_SCALARS:
+            raise ValueError(f"the workers send {self.K} scalars, the trainer expects {N_SCALARS} (bridge/obs.ts SCALARS)")
         self.seats = np.repeat([r[0]["dims"]["seats"] for r in replies], self.G)  # [E]
         self.first = np.cumsum(self.seats) - self.seats  # each game's first row
         self.N = int(self.seats.sum())

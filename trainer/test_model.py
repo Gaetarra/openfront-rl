@@ -8,14 +8,14 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from trainer.env import BUILDINGS, DST, N_CHANNELS, ROOT
+from trainer.env import BUILDINGS, DST, KINDS, N_CHANNELS, N_SCALARS, ROOT
 from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, DIPLOMACY, DONATE, MAP_OF, MASK_VALUE, MOVE, MOVE_MAP,
                            OLD_CHANNELS, OLD_SCALARS, REQUEST, RETREAT, SHARES, SIZE_OF, SIZES, SPAWN, V4_CHANNELS,
                            V4_FEATURES, V4_SCALARS, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, describe,
                            load_net, new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 26, "acts": 5}
-DIMS_V5 = {"channels": N_CHANNELS, "playerFeatures": 31, "scalars": 26}
+DIMS_V5 = {"channels": N_CHANNELS, "playerFeatures": 31, "scalars": N_SCALARS}
 N, P, H, W = 6, 5, 32, 32
 
 
@@ -55,6 +55,9 @@ def fake_obs(device="cuda", seed=0):
     obs["cell_mask"] = torch.cat([obs["cell_mask"], torch.rand(N, 2, H * W, generator=g) < 0.1], 1)
     obs["cell_mask"][0] = False
     obs["diplomacy_mask"] = (torch.rand(N, 4, P, generator=g) < 0.5) & (obs["players"][:, None, :, 0] > 0)
+    # step 7's mode input: the lobby kind (one-hot, row % len(KINDS)), then 3 values in [0, 1]
+    kind = F.one_hot(torch.arange(N) % len(KINDS), len(KINDS)).float()
+    obs["scalars"] = torch.cat([obs["scalars"], kind, torch.rand(N, 3, generator=g)], 1)
     return {k: v.to(device) for k, v in obs.items()}
 
 

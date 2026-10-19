@@ -1,10 +1,46 @@
-import { PlayerType, UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import {
+  Difficulty,
+  GameMode,
+  HumansVsNations,
+  PlayerType,
+  RankedType,
+  UnitType,
+} from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { GameConfig } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
 import { Game, Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 import { BUILDS } from "./actions";
 import { loaded } from "./frame";
 
 export const PLAYER_FEATURES = 23;
-export const SCALARS = 26;
+/** The lobby kinds of the mode input (scalars MODE..MODE + 6, one-hot); trainer/env.py KINDS lists the same ones. */
+export const KINDS = ["ranked1v1", "ranked2v2", "rankedffa", "clanwars", "ffa", "team", "hvn"] as const;
+export const MODE = 26; // the first mode scalar: the lobby kind, then the non-bot players, the teams, the difficulty
+export const SCALARS = MODE + KINDS.length + 3;
+
+const RANKED_KINDS: Record<RankedType, (typeof KINDS)[number]> = {
+  [RankedType.OneVOne]: "ranked1v1",
+  [RankedType.TwoVTwo]: "ranked2v2",
+  [RankedType.FreeForAll]: "rankedffa",
+  [RankedType.ClanWars]: "clanwars",
+};
+const DIFFICULTY: Record<Difficulty, number> = {
+  [Difficulty.Easy]: 0.25,
+  [Difficulty.Medium]: 0.5,
+  [Difficulty.Hard]: 0.75,
+  [Difficulty.Impossible]: 1,
+};
+
+/** The index into KINDS of a game's lobby: its ranked type, else its mode (private and singleplayer FFA are "ffa"), else its teams. */
+export function lobbyKind(gc: GameConfig): number {
+  const kind = gc.rankedType
+    ? RANKED_KINDS[gc.rankedType]
+    : gc.gameMode === GameMode.FFA
+      ? "ffa"
+      : gc.playerTeams === HumansVsNations
+        ? "hvn"
+        : "team";
+  return KINDS.indexOf(kind);
+}
 
 /** How a player-table row relates to the seat; the trainer maps cells and units through it. */
 export enum Rel {
@@ -31,6 +67,10 @@ const logScale = (v: number, div: number) => Math.log1p(Math.max(0, v)) / div;
  * 13 spawn immunity, 14 tiles per cell / 64, 15 share of players ahead in tiles, 16-24 gold / the current cost of
  * each build in BUILDS order (city, defense post, silo, factory, port, SAM, warship, atom bomb, hydrogen bomb; at
  * most 4, / 4), 25 missiles loaded in the seat's silos / 16 (at most 1).
+ * The mode input, constant over a game and the same for a replayed record and a training game of one lobby: 26-32 the
+ * lobby kind, one-hot in KINDS order (lobbyKind), 33 log2(non-bot players) / 8 (humans and nations, alive or not; at
+ * most 1), 34 log2(distinct teams of those players) / 6 (at most 1; 0 without teams), 35 the nations' difficulty
+ * (Easy .25, Medium .5, Hard .75, Impossible 1; 0 without a nation).
  */
 export function encodeSeat(
   game: Game,
@@ -129,4 +169,9 @@ export function encodeSeat(
   }
   const silos = seat.units(UnitType.MissileSilo).reduce((n, u) => n + loaded(u), 0);
   scalars[25] = Math.min(silos, 16) / 16;
+  const gc = config.gameConfig();
+  scalars[MODE + lobbyKind(gc)] = 1;
+  scalars[MODE + KINDS.length] = Math.min(Math.log2(Math.max(nonBot.length, 1)) / 8, 1);
+  scalars[MODE + KINDS.length + 1] = Math.min(Math.log2(Math.max(new Set(nonBot.map((p) => p.team())).size, 1)) / 6, 1);
+  scalars[MODE + KINDS.length + 2] = nonBot.some((p) => p.type() === PlayerType.Nation) ? DIFFICULTY[gc.difficulty] : 0;
 }
