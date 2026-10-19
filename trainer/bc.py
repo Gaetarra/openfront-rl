@@ -24,15 +24,15 @@ from torch.utils.tensorboard import SummaryWriter
 
 from trainer import crawl
 from trainer.control import Control, serve
-from trainer.env import DST, MAP_TYPES, MOVE, RANKED_1V1, ROOT, VecEnv, game_commit, map_table
+from trainer.env import DST, KINDS, MAP_TYPES, MODE, MOVE, RANKED_1V1, ROOT, VecEnv, game_commit, map_table
 from trainer.eval import tag
 from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, DIPLOMACY, DONATE, MAP_NAMES, MAP_OF, REQUEST, RETREAT,
-                           SHARES, SIZE_OF, ActionDist, _on, describe, grow, load_net, new_net)
+                           SHARES, SIZE_OF, V4_ACTS, ActionDist, _on, describe, grow, load_net, new_net)
 from trainer.ppo import network_args, resume_args, save_checkpoint
 
 PHASES = ("spawn", "early", "mid", "late")
-SCORE_CUTOFF = 1790812800000  # 2026-10-01 00:00 UTC, in ms: the scoring set comes from the Phase 2 crawl's games
-SCORE_LAYOUT = {"workers": 12, "games_per_worker": 6, "steps": 2000}  # fixed, so every scoring run sees the same rows
+SCORE_CUTOFF = 1792411200000  # 2026-10-19 12:00 UTC, in ms: the scoring set is the v0.35 games started before it
+SCORE_LAYOUT = {"workers_per_family": 2, "games_per_worker": 6, "steps": 1500}  # fixed, so every run sees the same rows
 FAMILIES = ("ranked1v1", "ranked2v2", "rankedffa", "ffa", "team", "hvn")  # what --mix takes: the modes a worker replays
 SHARE_SMOOTH = 0.1  # a troop-share label's weight on its two neighbouring percents (PLAN 3B: soft labels)
 NEAR_TILES = 16  # a cell head's choice counts as near the human's within this many tiles (bc/*_cell_near)
@@ -257,7 +257,10 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     - for the cell heads, also how close the bot's cell lands to the human's, since a near miss is almost as good as a
       hit: the chance it falls within NEAR_TILES (bc/*_cell_near) and its expected distance in tiles (bc/*_cell_dist),
       and both for a uniform pick over the legal cells, their baseline (bc/*_uniform);
-    - NLL per bucket (game phase and map size);
+    - NLL per bucket (game phase, map size and lobby kind, KINDS in the observation's mode input);
+    - bc/nll_common, and per lobby kind bc/nll_common_<kind>: the NLL over the rows labelled with one of v4's 15 types,
+      which every network from v4 on can express, so the networks compare like for like;
+    - labels outside the masks per action type (labels/illegal/<type>);
     - the router's mean weight per expert and bucket, for MoE networks."""
     t, n = labels[:, 0], len(labels)
     m.add("labels/out_of_set", (t == -1).sum(), n)
@@ -265,6 +268,7 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     m.add("labels/illegal", ((t >= 0) & ~legal).sum(), n)
     for k, name in enumerate(ACT_NAMES[1:], 1):  # the label mix; labels/noop stays the share of the legal rows
         m.add(f"labels/{name}", (t == k).sum(), n)
+        m.add(f"labels/illegal/{name}", ((t == k) & ~legal).sum(), (t == k).sum())  # of the rows labelled with the type
     m.add("labels/out_of_set_commands", (t == -1).sum(), (t != 0).sum())  # Gate 3B: under 0.5% of the commands
     n_types = dist.type.logits.shape[-1]
     m.add("labels/beyond_net", (legal & (t >= n_types)).sum(), n)
@@ -276,6 +280,8 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     logp = dist.log_prob(safe, sizes=True)
     m.add("labels/noop", ((t == 0) & legal).sum(), nl)
     m.add("bc/nll", -(logp * legal).sum(), nl)
+    common = legal & (t < V4_ACTS)
+    m.add("bc/nll_common", -(logp * common).sum(), common.sum())
     if dist.shares:
         m.add("bc/nll_shares", -(dist.log_prob(safe) * legal).sum(), nl)
     m.add("bc/nll_type", -(dist.type.log_prob(torch.where(legal, t, 0)) * legal).sum(), nl)
@@ -304,6 +310,8 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
         hit = dist.cells.logits[:, k].argmax(1) == cell
         m.add(f"bc/{name}_cell_acc", (hit & rows).sum(), rows.sum())
         m.add(f"bc/nll_{name}_cell", -(lc[:, k] * rows).sum(), rows.sum())
+        n_legal = obs["cell_mask"][:, k].sum(1).clamp(min=1)
+        m.add(f"bc/nll_{name}_cell_uniform", (n_legal.log() * rows).sum(), rows.sum())  # the baseline: a uniform pick
         p = dist.cells.probs[:, k]  # [N, cells]
         m.add(f"bc/{name}_cell_near", ((p * (tiles <= NEAR_TILES)).sum(1) * rows).sum(), rows.sum())
         m.add(f"bc/{name}_cell_dist", ((p * tiles).sum(1) * rows).sum(), rows.sum())
@@ -317,12 +325,16 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
             m.add(f"bc/{name}_target_acc", ((dist.diplo.logits[:, k].argmax(1) == tgt) & rows).sum(), rows.sum())
             lp = dist.diplo.log_prob(tgt[:, None].expand(-1, len(DIPLOMACY)))[:, k]
             m.add(f"bc/nll_{name}_target", -(lp * rows).sum(), rows.sum())
+            n_legal = obs["diplomacy_mask"][:, k].sum(1).clamp(min=1)
+            m.add(f"bc/nll_{name}_target_uniform", (n_legal.log() * rows).sum(), rows.sum())
         rows = legal & (t == DONATE)
         m.add("bc/nll_donate_share", -(lt[:, 2] * rows).sum(), rows.sum())
     if dist.has_move:
         rows = legal & (t == MOVE)
         dst, fleet = dist._move_at(cell)  # the stored source, as the loss reads it
         m.add("bc/nll_warship_dst", -(dst.log_prob(torch.where(rows, dst_cell, 0)) * rows).sum(), rows.sum())
+        n_legal = obs["cell_mask"][:, DST].sum(1).clamp(min=1)
+        m.add("bc/nll_warship_dst_uniform", (n_legal.log() * rows).sum(), rows.sum())
         m.add("bc/warship_fleet_acc", ((fleet.logits.argmax(1) == b) & rows).sum(), rows.sum())
     if dist.retreat is not None:
         rows = legal & (t == RETREAT)
@@ -332,6 +344,11 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     buckets = {name: phase == i for i, name in enumerate(PHASES)}
     normal = obs["scalars"][:, 14] > 0.5  # tiles per cell / 64: Normal maps 1, Compact 0.25
     buckets.update(compact=~normal, normal=normal)
+    lobby = obs["scalars"][:, MODE:MODE + len(KINDS)] > 0.5  # the lobby kind one-hot
+    for i, kind in enumerate(KINDS):
+        buckets[kind] = lobby[:, i]
+        rows = common & lobby[:, i]
+        m.add(f"bc/nll_common_{kind}", -(logp * rows).sum(), rows.sum())
     for name, inside in buckets.items():
         rows = legal & inside
         m.add(f"bc/nll_{name}", -(logp * rows).sum(), rows.sum())
@@ -366,18 +383,21 @@ def backward_windows(models, windows, a, meters):
             measure(meter, obs, labels, legal, dist, value, target, gates)
 
 
-def score_records():
-    """The fixed scoring set: the held-out records (5%, by game ID) of games started before SCORE_CUTOFF, by game ID.
-    Later crawls do not change it; a purge can drop a record (the result counts them)."""
-    entries = [e for e in crawl.load_index() if e["start"] < SCORE_CUTOFF and is_val(e["id"], 0.05)]
-    paths = [crawl.record_path(e["id"]) for e in sorted(entries, key=lambda e: e["id"])]
-    return [p for p in paths if p.exists()]
+def score_records(entries, maps, grid):
+    """The fixed scoring set, per family in FAMILIES order: the held-out records (5%, by game ID) of the usable games
+    started before SCORE_CUTOFF that have a record, sorted by game ID. A family without any is left out. Later crawls do
+    not change it; a purge can drop a record (the result counts them)."""
+    held = [e for e in entries if e["start"] < SCORE_CUTOFF and is_val(e["id"], 0.05) and usable(e, maps, grid)
+            and crawl.record_path(e["id"], crawl.store()).exists()]
+    sets = {family: sorted(e["id"] for e in held if family_of(e) == family) for family in FAMILIES}
+    return {family: [crawl.record_path(i, crawl.store()) for i in ids] for family, ids in sets.items() if ids}
 
 
-def score(paths, records, workers, games_per_worker, steps, device="cuda"):
-    """Every checkpoint's statistics (measure, plus the value/outcome correlation) on the same replayed rows. The rows
-    depend only on the records, the layout and the seed "score", so every comparison is paired."""
-    envs = VecEnv(RANKED_1V1, workers, games_per_worker, seed="score", device=device, records=records)
+def score(paths, records, games_per_worker, steps, slots, device="cuda"):
+    """Every checkpoint's statistics (measure, plus the value/outcome correlation) on the same replayed rows. `records`
+    holds one list of record paths per worker. The rows depend only on the records, the layout and the seed "score", so
+    every comparison is paired."""
+    envs = VecEnv(RANKED_1V1, len(records), games_per_worker, seed="score", device=device, records=records, slots=slots)
     try:
         nets = [load_net(p, envs.dims, device) for p in paths]
         meters, values, outcomes, games = [Meter() for _ in nets], [[] for _ in nets], [], set()
@@ -401,21 +421,23 @@ def score(paths, records, workers, games_per_worker, steps, device="cuda"):
         stats, v = m.means(), np.concatenate(v)
         stats["value/outcome_corr"] = float(np.corrcoef(v, o)[0, 1]) if v.std() > 0 and o.std() > 0 else float("nan")
         metrics.append(stats)
-    return {"checkpoints": [str(p) for p in paths], "records": len(records), "games": len(games), "rows": len(o),
-            "metrics": metrics}
+    return {"checkpoints": [str(p) for p in paths], "records": sum(len(r) for r in records), "games": len(games),
+            "rows": len(o), "metrics": metrics}
 
 
 def table(result):
     """The scores as text: one row per statistic and one column per checkpoint (its run and update), then the
-    routers' mean expert weights per bucket."""
+    routers' mean expert weights per bucket (game phase, map size and lobby kind)."""
     names = [tag(p) for p in result["checkpoints"]]
     keys = sorted({k for s in result["metrics"] for k in s if not k.startswith("router/")})
     w = max(len(k) for k in keys)
     lines = [f"{result['games']} games, {result['rows']:,} rows ({result['records']} held-out records before "
-             f"2026-10-01)", " " * w + "".join(f"{n:>18}" for n in names)]
+             f"2026-10-19 12:00 UTC)", " " * w + "".join(f"{n:>18}" for n in names)]
+    if result.get("families"):
+        lines.insert(1, "records: " + ", ".join(f"{family} {n}" for family, n in result["families"].items()))
     lines += [k.ljust(w) + "".join(f"{s.get(k, float('nan')):18.4f}" for s in result["metrics"]) for k in keys]
     for name, s in zip(names, result["metrics"]):
-        for bucket in (*PHASES, "compact", "normal"):
+        for bucket in (*PHASES, "compact", "normal", *KINDS):
             weights = [s[k] for k in sorted(s) if k.startswith(f"router/{bucket}_")]
             if weights:
                 lines.append(f"router {name} {bucket:>7}: " + " ".join(f"{x:.2f}" for x in weights))
@@ -423,10 +445,22 @@ def table(result):
 
 
 def score_main(paths):
-    records = score_records()
-    if not records:
-        raise SystemExit("no held-out records of games before 2026-10-01 in data/: run trainer.crawl first")
-    result = score(paths, records, **SCORE_LAYOUT)
+    maps, store = map_table(), crawl.store()
+    entries = crawl.load_index(store)
+    by_family = score_records(entries, maps["maps"], maps["grid"])
+    if not by_family:
+        raise SystemExit(f"no held-out records of games before 2026-10-19 12:00 UTC in {store}: run trainer.crawl first")
+    left_out = [f for f in FAMILIES if f not in by_family]
+    if left_out:
+        print(f"no held-out records of {', '.join(left_out)}: not scored")
+    records = []
+    for family_paths in by_family.values():  # each family on min(2, its records) workers
+        workers = min(SCORE_LAYOUT["workers_per_family"], len(family_paths))
+        records += [family_paths[w::workers] for w in range(workers)]
+    scored = {p for family_paths in by_family.values() for p in family_paths}
+    slots = slots_of([e for e in entries if crawl.record_path(e["id"], store) in scored], maps["maps"])
+    result = score(paths, records, SCORE_LAYOUT["games_per_worker"], SCORE_LAYOUT["steps"], slots)
+    result["families"] = {family: len(family_paths) for family, family_paths in by_family.items()}
     out = ROOT / "runs" / "score" / f"{datetime.datetime.now():%Y%m%d-%H%M%S}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=1), encoding="utf-8")

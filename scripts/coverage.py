@@ -45,9 +45,12 @@ def label_kinds(record):
 
 def main():
     sys.path.insert(0, str(ROOT))
-    from trainer.bc import score_records
+    from trainer import crawl
+    from trainer.bc import is_val
 
-    paths = score_records()
+    # Gate 3B's set, as score_records() was then: the old pin's held-out ranked 1v1 records of games before 2026-10-01
+    entries = [e for e in crawl.load_index() if e["start"] < 1790812800000 and is_val(e["id"], 0.05)]
+    paths = [p for p in (crawl.record_path(e["id"]) for e in sorted(entries, key=lambda e: e["id"])) if p.exists()]
     count = collections.Counter()
     for p in paths:
         count.update(label_kinds(json.loads(gzip.decompress(p.read_bytes()))))

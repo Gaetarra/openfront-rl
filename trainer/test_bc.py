@@ -13,11 +13,12 @@ import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from trainer import bc, crawl
-from trainer.bc import (Meter, backward_windows, bc_loss, family_of, is_val, label_legal, lr_at, main, measure, mix_of,
-                        one_pass, score, slots_of, table, usable, val_records, worker_records)
-from trainer.env import DST, MOVE, RANKED_1V1, ROOT, VecEnv, map_table
-from trainer.model import (ACT_NAMES, ATTACK, BREAK, BUILD, DIPLOMACY, DONATE, MAP_OF, RENEW, REQUEST, RETREAT, SHARES,
-                           NEW_TYPE_BIAS, V4_ACTS, ActionDist, Policy, PolicyV1, new_net)
+from trainer.bc import (SCORE_CUTOFF, Meter, backward_windows, bc_loss, family_of, is_val, label_legal, lr_at, main,
+                        measure, mix_of, one_pass, score, score_records, slots_of, table, usable, val_records,
+                        worker_records)
+from trainer.env import DST, KINDS, MODE, MOVE, RANKED_1V1, ROOT, VecEnv, map_table
+from trainer.model import (ACT_NAMES, ATTACK, BREAK, BUILD, DIPLOMACY, DONATE, MAP_NAMES, MAP_OF, RENEW, REQUEST,
+                           RETREAT, SHARES, NEW_TYPE_BIAS, V4_ACTS, ActionDist, Policy, PolicyV1, RandomPolicy, new_net)
 from trainer.test_model import DIMS, DIMS_V5, N as ROWS, exact_fp32, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
@@ -394,6 +395,95 @@ class MeasureTest(unittest.TestCase):
         self.assertAlmostEqual(s["bc/city_cell_dist_uniform"], 32 / 3, places=4)  # (0 + 8 + 24) / 3
 
 
+class KindMeasureTest(unittest.TestCase):
+    def test_illegal_labels_are_counted_per_type(self):
+        obs = fake_obs()  # rows 3-5: an attack is legal on player 2 only
+        obs["type_mask"][:] = True
+        labels = torch.tensor([[0, 0, 0, 0]] * 3 + [[ATTACK, 0, 2, 20], [ATTACK, 0, 3, 20], [0, 0, 0, 0]], device="cuda")
+        legal = label_legal(obs, labels)
+        m, zero = Meter(), torch.zeros(ROWS, device="cuda")
+        measure(m, obs, labels, legal, ActionDist(RandomPolicy5()(obs), obs), zero, zero)
+        s = m.means()
+        self.assertEqual(s["labels/illegal/attack"], 0.5, "one of the two attack labels aims outside its mask")
+        self.assertNotIn("labels/illegal/boat", s, "no rows labelled with a boat")
+
+    def test_scores_per_lobby_kind_on_every_networks_rows(self):
+        obs = fake_obs()
+        obs["type_mask"][:] = True
+        obs["diplomacy_mask"][:] = False
+        obs["diplomacy_mask"][:, :, 2] = True
+        kinds = [KINDS.index(k) for k in ("ranked1v1", "ranked1v1", "rankedffa", "rankedffa", "clanwars", "clanwars")]
+        obs["scalars"][:, MODE:MODE + len(KINDS)] = torch.nn.functional.one_hot(
+            torch.tensor(kinds, device="cuda"), len(KINDS)).float()
+        noop, request = [0, 0, 0, 0], [REQUEST, 0, 2, 0]
+        labels = torch.tensor([noop, request, noop, noop, request, request], device="cuda")
+        legal, zero = label_legal(obs, labels), torch.zeros(ROWS, device="cuda")
+        self.assertTrue(bool(legal.all()))
+        torch.manual_seed(0)
+        stats = {}
+        for name, net in (("v4", randomized(Policy(DIMS, shares=True, full=True))),
+                          ("v5", randomized(Policy(DIMS_V5, v5=True)))):
+            m = Meter()
+            with torch.no_grad():
+                _, dist, value, gates = bc_loss(net.cuda().eval(), obs, labels, legal, zero, 0.0)
+                measure(m, obs, labels, legal, dist, value, zero, gates)
+            stats[name] = m.means()
+        for name, s in stats.items():  # the rows of v4's 15 types, which every network from v4 on can express
+            for kind in ("ranked1v1", "rankedffa"):
+                self.assertIn(f"bc/nll_common_{kind}", s, name)
+            for kind in ("ranked2v2", "clanwars", "hvn"):  # no such rows, or only rows of the new types
+                self.assertNotIn(f"bc/nll_common_{kind}", s, name)
+            self.assertIn("bc/nll_common", s)
+        v4, v5 = stats["v4"], stats["v5"]
+        self.assertNotIn("bc/nll_clanwars", v4, "a v4 network cannot express alliance requests")
+        self.assertIn("bc/nll_clanwars", v5)
+        self.assertAlmostEqual(v4["bc/nll_ranked1v1"], v4["bc/nll_common_ranked1v1"], places=6)
+        self.assertNotAlmostEqual(v5["bc/nll_ranked1v1"], v5["bc/nll_common_ranked1v1"], places=6)
+
+    def test_a_uniform_pick_scores_its_baseline(self):
+        obs = fake_obs()
+        obs["type_mask"][:] = True
+        obs["cell_mask"][:] = False
+        obs["cell_mask"][:, MAP_OF[BUILD], [3, 5, 9]] = True  # three legal cities
+        obs["cell_mask"][:, MAP_OF[MOVE], [7, 8]] = True  # two warships
+        obs["cell_mask"][:, DST, [10, 11, 12, 13]] = True  # four water cells
+        obs["diplomacy_mask"][:] = False
+        obs["diplomacy_mask"][:, 0, [2, 3]] = True  # a request can go to players 2 and 3
+        obs["diplomacy_mask"][:, DONATE - REQUEST, [1, 2, 3]] = True
+        labels = torch.tensor([[BUILD, 3, 0, 0], [BUILD, 5, 0, 0], [REQUEST, 0, 2, 0], [DONATE, 0, 3, 40],
+                               [MOVE, 7, 10, 0], [MOVE, 8, 11, 1]], device="cuda")
+        legal = label_legal(obs, labels)
+        self.assertTrue(bool(legal.all()))
+        m, zero = Meter(), torch.zeros(ROWS, device="cuda")
+        measure(m, obs, labels, legal, ActionDist(RandomPolicy(DIMS_V5)(obs), obs), zero, zero)
+        s = m.means()
+        pairs = [("city_cell", 3), ("alliance_request_target", 2), ("donate_troops_target", 3), ("warship_dst", 4)]
+        for name, legal_choices in pairs:
+            self.assertAlmostEqual(s[f"bc/nll_{name}_uniform"], math.log(legal_choices), places=5)
+            self.assertAlmostEqual(s[f"bc/nll_{name}"], s[f"bc/nll_{name}_uniform"], places=5)
+        self.assertNotIn("bc/nll_silo_cell_uniform", s, "no silo rows")
+
+
+class ScoringSetTest(unittest.TestCase):
+    def test_the_scoring_set_ignores_later_and_training_games(self):
+        ids = (f"g{n:05d}" for n in range(5000))
+        held = [i for i in ids if is_val(i, 0.05)][:5]
+        train = next(i for i in (f"g{n:05d}" for n in range(5000)) if not is_val(i, 0.05))
+        t = map_table()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crawl, "DATA", Path(d)):
+            entries = [entry(held[0], start=SCORE_CUTOFF - 1),
+                       entry(held[1], start=SCORE_CUTOFF + 1),  # started after the cutoff
+                       entry(train, start=SCORE_CUTOFF - 1),  # a training game
+                       entry(held[2], start=SCORE_CUTOFF - 1, modifiers=["isWaterNukes"]),  # unusable
+                       entry(held[3], "team", teams=6, start=SCORE_CUTOFF - 1),
+                       entry(held[4], start=SCORE_CUTOFF - 1)]  # no record file
+            for e in entries[:-1]:
+                crawl.record_path(e["id"], crawl.store()).parent.mkdir(parents=True, exist_ok=True)
+                crawl.record_path(e["id"], crawl.store()).touch()
+            self.assertEqual(score_records(entries, t["maps"], t["grid"]),
+                             {"ranked1v1": paths(held[0]), "team": paths(held[3])})
+
+
 class ScoreTest(unittest.TestCase):
     def test_scores_are_repeatable_and_per_head(self):
         with tempfile.TemporaryDirectory() as d:
@@ -408,8 +498,8 @@ class ScoreTest(unittest.TestCase):
                 torch.save({"model": new_net(DIMS, args).state_dict(), "args": {**args, "run": name}, "update": 1},
                            path)
                 paths.append(path)
-            first = score(paths, [FIXTURE], workers=1, games_per_worker=1, steps=30)
-            second = score(paths, [FIXTURE], workers=1, games_per_worker=1, steps=30)
+            first = score(paths, [[FIXTURE]], games_per_worker=1, steps=30, slots=403)
+            second = score(paths, [[FIXTURE]], games_per_worker=1, steps=30, slots=403)
             text = table(first)
         self.assertEqual((first["rows"], first["games"], first["records"]), (60, 1, 1))
         for a, b in zip(first["metrics"], second["metrics"]):
@@ -422,10 +512,36 @@ class ScoreTest(unittest.TestCase):
             self.assertIn(k, old)
         self.assertFalse(any(k.startswith("router/") for k in old), "the Phase 2 network has no router")
         self.assertAlmostEqual(sum(moe[f"router/{FIXTURE_SIZE}_{i}"] for i in range(8)), 1.0, places=4)
+        self.assertAlmostEqual(sum(moe[f"router/ranked1v1_{i}"] for i in range(8)), 1.0, places=4)  # the fixture's kind
+        self.assertIn("bc/nll_common_ranked1v1", full)
         self.assertIn("bc/nll_shares", shares)
         self.assertNotIn("bc/nll_shares", moe)
         self.assertIn("old 1", text)
+        self.assertIn("ranked1v1:", text, "the routers are also listed per lobby kind")
         self.assertIn("bc/nll_type", text)
+
+
+    def test_the_score_command_puts_each_family_on_its_own_workers(self):
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(crawl, "DATA", Path(d) / "data"))
+            stack.enter_context(mock.patch.object(bc, "ROOT", Path(d)))  # where the result is saved
+            stack.enter_context(mock.patch.dict(bc.SCORE_LAYOUT, games_per_worker=1, steps=3))
+            store = crawl.store()
+            (store / "records").mkdir(parents=True)
+            shutil.copy(FIXTURE, store / "records" / "sample.json.gz")  # held out (is_val), as "fixture" is
+            shutil.copy(TEAM, store / "records" / "fixture.json.gz")
+            entries = [entry("sample", start=1), entry("fixture", "team", teams=6, map="Between Two Seas", start=1)]
+            (store / "index.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+            args = {"arch": "v4", "core": "moe", "widths": "64,128,192"}
+            path = Path(d) / "net" / "update0000001.pt"
+            path.parent.mkdir()
+            torch.save({"model": new_net(DIMS, args).state_dict(), "args": {**args, "run": "net"}, "update": 1}, path)
+            bc.score_main([str(path)])
+            (saved,) = (Path(d) / "runs" / "score").glob("*.json")
+            result = json.loads(saved.read_text())
+        self.assertEqual(result["families"], {"ranked1v1": 1, "team": 1})
+        self.assertEqual((result["records"], result["games"], result["rows"]), (2, 2, 3 * 2 + 3 * 2))
+        self.assertIn("bc/nll_team", result["metrics"][0])
 
 
 class MainTest(unittest.TestCase):
