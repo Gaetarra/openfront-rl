@@ -17,8 +17,8 @@ from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, l
                         table)
 from trainer.env import DST, MOVE, RANKED_1V1, ROOT, VecEnv
 from trainer.model import (ACT_NAMES, ATTACK, BREAK, BUILD, DIPLOMACY, DONATE, MAP_OF, RENEW, REQUEST, RETREAT, SHARES,
-                           ActionDist, Policy, PolicyV1, new_net)
-from trainer.test_model import DIMS, N as ROWS, exact_fp32, fake_obs, randomized
+                           NEW_TYPE_BIAS, V4_ACTS, ActionDist, Policy, PolicyV1, new_net)
+from trainer.test_model import DIMS, DIMS_V5, N as ROWS, exact_fp32, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
 TEAM = ROOT / "bridge" / "testdata" / "team.json.gz"
@@ -453,6 +453,26 @@ class MainTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "drop --init"):
             self.run_main(self.common + ["--init", str(ROOT / "checkpoints" / self.RUN / "latest.pt"), "--twin", "moe",
                                          "--updates", "1"])
+
+    def test_a_grown_run_starts_from_the_v4_checkpoint_and_resumes_without_growing(self):
+        init = ROOT / "checkpoints" / self.RUN / "init.pt"
+        init.parent.mkdir(parents=True, exist_ok=True)
+        args = {"arch": "v4", "core": "moe", "widths": "64,128,192"}
+        v4 = randomized(Policy(DIMS, shares=True, full=True))
+        torch.save({"model": v4.state_dict(), "args": args}, init)
+        self.run_main(self.common + ["--init", str(init), "--grow", "--updates", "0"])
+        grown = self.latest()
+        self.assertEqual((grown["args"]["arch"], grown["args"]["core"], grown["args"]["grow"]), ("v5", "moe", True))
+        self.assertTrue((grown["model"]["type_head.bias"][V4_ACTS:] == NEW_TYPE_BIAS).all())
+        self.assertTrue(torch.equal(grown["model"]["trunk.0.weight"].cpu(), v4.state_dict()["trunk.0.weight"]))
+        self.run_main(self.common + ["--updates", "1", "--resume"])
+        self.assertEqual(self.latest()["update"], 1)
+        with self.assertRaisesRegex(SystemExit, "grows the --init"):
+            self.run_main(self.common + ["--grow", "--updates", "1"])
+        v5 = {**args, "arch": "v5"}
+        torch.save({"model": new_net(DIMS_V5, v5).state_dict(), "args": v5}, init)
+        with self.assertRaisesRegex(SystemExit, "arch v4"):
+            self.run_main(self.common + ["--run", f"{self.RUN}-v5", "--init", str(init), "--grow", "--updates", "1"])
 
     def test_old_bc_checkpoints_cannot_resume(self):
         path = ROOT / "checkpoints" / self.RUN / "latest.pt"

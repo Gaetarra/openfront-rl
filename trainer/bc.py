@@ -26,7 +26,7 @@ from trainer.control import Control, serve
 from trainer.env import DST, MAP_TYPES, MOVE, RANKED_1V1, ROOT, VecEnv, game_commit
 from trainer.eval import tag
 from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, DIPLOMACY, DONATE, MAP_NAMES, MAP_OF, REQUEST, RETREAT,
-                           SHARES, SIZE_OF, ActionDist, _on, describe, load_net, new_net)
+                           SHARES, SIZE_OF, ActionDist, _on, describe, grow, load_net, new_net)
 from trainer.ppo import network_args, resume_args, save_checkpoint
 
 PHASES = ("spawn", "early", "mid", "late")
@@ -41,6 +41,9 @@ def parser():
     p.add_argument("--run", default="bc", help="name for checkpoints/<run> and runs/<run>")
     p.add_argument("--resume", action="store_true", help="continue from checkpoints/<run>/latest.pt")
     p.add_argument("--init", help="start from this checkpoint's weights and network, with a fresh optimizer")
+    p.add_argument("--grow", action="store_true",
+                   help="with --init of an arch v4 checkpoint: train its network grown into v5, which starts as it "
+                        "computed (step 7); a resume loads the v5 checkpoint")
     p.add_argument("--score", nargs="+", metavar="CHECKPOINT",
                    help="score these checkpoints on the fixed held-out set (~10 min) instead of training")
     p.add_argument("--core", choices=CORES, default="moe", help="the core of a new network (not with --init)")
@@ -367,7 +370,13 @@ def main(argv=None):
                 raise SystemExit(f"the twin's checkpoint is at update {twin_state['update']} and the run's at "
                                  f"{state['update']}: both must resume from the same update")
     else:
+        if a.grow and not a.init:
+            raise SystemExit("--grow grows the --init checkpoint: add --init <arch v4 checkpoint>")
         a = network_args(parser(), argv, a)
+        if a.grow:
+            if a.arch != "v4":
+                raise SystemExit(f"--grow takes an arch v4 checkpoint: {a.init} holds {a.arch}")
+            a.arch = "v5"
     random.seed(a.seed)
     np.random.seed(a.seed)
     torch.manual_seed(a.seed)
@@ -419,7 +428,11 @@ def main(argv=None):
         torch.set_rng_state(state["rng"]["torch"])
         torch.cuda.set_rng_state_all(state["rng"]["cuda"])
     elif a.init:
-        model.load_state_dict(torch.load(a.init, map_location="cpu", weights_only=False)["model"])
+        init = torch.load(a.init, map_location="cpu", weights_only=False)["model"]
+        if a.grow:
+            grow(init, model)
+        else:
+            model.load_state_dict(init)
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
     control.update(run=run_info(a, train, val))
     server = serve(control, a.port, log_dir=run_dir)

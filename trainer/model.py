@@ -18,6 +18,7 @@ REQUEST, RENEW, BREAK, DONATE = 15, 16, 17, 18  # and MOVE (19), from trainer/en
 DIPLOMACY = (REQUEST, RENEW, BREAK, DONATE)  # the types aimed at a player; obs "diplomacy_mask" has a row for each
 OLD_ACTS, OLD_MAPS = 5, 3  # the action types and heat maps of the networks before 3B step 3 (v1-v3)
 V4_ACTS, V4_MAPS = 15, 12  # v4's: step 6 appends types and heat maps after these
+NEW_TYPE_BIAS = -8.0  # a grown network's bias on the types v4 lacks: they start about never chosen (step 7)
 OLD_CHANNELS, OLD_SCALARS = BUILDINGS + 4 * len(BUILDING_TYPES), 16  # the inputs before 3B step 3, part 2 (v1-v3)
 MAP_NAMES = ("spawn", "boat", "city", "defense_post", "silo", "factory", "port", "sam", "warship", "atom", "hydrogen",
              "upgrade", "warship_src")  # one per MAP_TYPES entry
@@ -666,3 +667,46 @@ def load_net(path, dims, device="cuda"):
     net = new_net(dims, ckpt["args"])
     net.load_state_dict(ckpt["model"])
     return net.to(device).to(memory_format=torch.channels_last).eval().requires_grad_(False)
+
+
+# What grow() does with the v4 tensors whose shape v5 changes: 0 = the tensor's v5 init is zeroed first (a new input
+# reads zero weights), 1 = the rest keeps v5's init. All are copied into the corner the v4 shape covers.
+GROWN = {"stem.weight": 0, "skip.weight": 1, "skip.bias": 1, "scalars.0.weight": 0, "shuffle.weight": 1,
+         "shuffle.bias": 1, "type_head.weight": 1, "type_head.bias": 1, "share_h.weight": 1, "share_h.bias": 1,
+         "share_t.weight": 1, "share_t.bias": 1}
+
+
+def grow(v4_state, net):
+    """Fills a fresh v5 `net` in place from a v4 network's state_dict, and returns it. It computes what the v4 network
+    computed (step 7): every v4 tensor is kept, and v5's own parts start silent.
+    - A tensor of the same shape is copied; one that v5 enlarges (GROWN) is copied into its corner.
+    - New inputs read zero weights: stem's channels, scalars' mode columns, and embed's player features, which sit
+      between v4's features and the land features that follow them.
+    - The new types get zero weights and a bias of NEW_TYPE_BIAS.
+    - share_out.2 and the v5-only modules keep v5's init.
+    A v4 tensor with no place in `net` raises ValueError: no trained weight is dropped."""
+    if not net.v5:
+        raise ValueError("grow fills a v5 network: Policy(..., v5=True)")
+    if v4_state["type_head.weight"].shape[0] != V4_ACTS:
+        raise ValueError(f"grow takes a v4 network's state: type_head has {v4_state['type_head.weight'].shape[0]} "
+                         f"rows, v4's has {V4_ACTS}")
+    new = net.state_dict()
+    with torch.no_grad():
+        for k, v in v4_state.items():
+            t = new.get(k)
+            if t is None:
+                raise ValueError(f"{k} of the v4 network has no place in the v5 network")
+            if t.shape == v.shape:
+                t.copy_(v)
+            elif k == "embed.weight":  # [D, features + c2]: v4's features, the 6 new ones, then the land features
+                t.zero_()
+                t[:, :V4_FEATURES] = v[:, :V4_FEATURES]
+                t[:, net.n_feat:] = v[:, V4_FEATURES:]
+            elif k in GROWN and all(a <= b for a, b in zip(v.shape, t.shape)):
+                if not GROWN[k]:
+                    t.zero_()
+                t[tuple(slice(n) for n in v.shape)] = v
+            else:
+                raise ValueError(f"{k} of the v4 network is {tuple(v.shape)}, the v5 network's {tuple(t.shape)}")
+        new["type_head.bias"][V4_ACTS:] = NEW_TYPE_BIAS
+    return net

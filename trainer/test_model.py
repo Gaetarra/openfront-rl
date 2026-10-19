@@ -10,9 +10,9 @@ from torch.distributions import Categorical
 
 from trainer.env import BUILDINGS, DST, KINDS, N_CHANNELS, N_SCALARS, ROOT
 from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, DIPLOMACY, DONATE, MAP_OF, MASK_VALUE, MOVE, MOVE_MAP,
-                           OLD_CHANNELS, OLD_SCALARS, REQUEST, RETREAT, SHARES, SIZE_OF, SIZES, SPAWN, V4_CHANNELS,
-                           V4_FEATURES, V4_SCALARS, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, describe,
-                           load_net, new_net, relevance, v1_spatial)
+                           NEW_TYPE_BIAS, OLD_CHANNELS, OLD_SCALARS, REQUEST, RETREAT, SHARES, SIZE_OF, SIZES, SPAWN,
+                           V4_ACTS, V4_CHANNELS, V4_FEATURES, V4_MAPS, V4_SCALARS, ActionDist, Policy, PolicyV1,
+                           RandomPolicy, SoftMoE, describe, grow, load_net, new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 26, "acts": 5}
 DIMS_V5 = {"channels": N_CHANNELS, "playerFeatures": 31, "scalars": N_SCALARS}
@@ -890,6 +890,40 @@ class LoadTest(unittest.TestCase):
                 self.assertEqual(getattr(net, "v5", False), args.get("arch") == "v5")
                 with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                     self.assertEqual(tuple(net(obs)["value"].shape), (N,))
+
+
+class GrowTest(unittest.TestCase):
+    """Step 7: the 3B clone (v4) grows into v5 and computes what it computed."""
+
+    def test_a_grown_network_starts_as_the_v4_network(self):
+        exact_fp32(self)
+        obs = fake_obs()
+        torch.manual_seed(0)
+        v4 = randomized(Policy(DIMS, core="moe-swiglu", shares=True, full=True)).cuda().eval()
+        v5 = grow(v4.state_dict(), Policy(DIMS_V5, core="moe-swiglu", v5=True).cuda().eval())
+        with torch.no_grad():
+            a, b = v4(obs), v5(obs)
+        close = lambda x, y: torch.allclose(x, y, atol=1e-5)
+        self.assertTrue(close(a["type"], b["type"][:, :V4_ACTS]))
+        self.assertTrue((b["type"][:, V4_ACTS:] == NEW_TYPE_BIAS).all())
+        self.assertTrue(close(a["maps"], b["maps"][:, :V4_MAPS]))
+        for k in ("ptr", "retreat", "value", "gates"):
+            self.assertTrue(close(a[k], b[k]), k)
+        self.assertTrue(close(a["shares"], b["shares"][:, :2]))
+
+    def test_grow_takes_only_a_v4_state_into_a_v5_network(self):
+        v3 = Policy(DIMS, shares=True)
+        with self.assertRaisesRegex(ValueError, "v4"):
+            grow(v3.state_dict(), Policy(DIMS_V5, v5=True))
+        v4 = Policy(DIMS, shares=True, full=True)
+        with self.assertRaisesRegex(ValueError, "v5"):
+            grow(v4.state_dict(), Policy(DIMS, shares=True, full=True))
+
+    def test_every_v4_tensor_finds_its_place(self):
+        v4 = Policy(DIMS, core="moe-swiglu", shares=True, full=True)
+        state = {**v4.state_dict(), "extra.weight": torch.zeros(1)}
+        with self.assertRaisesRegex(ValueError, "extra.weight"):
+            grow(state, Policy(DIMS_V5, core="moe-swiglu", v5=True))
 
 
 if __name__ == "__main__":
