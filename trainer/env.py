@@ -4,6 +4,7 @@ Node workers (bridge/worker.ts, protocol described there) run K games each and s
 observation tensors are assembled on the GPU from the state kept here. In replay mode the workers replay game records
 instead, and every step also brings each seat's label (the command its human player issued) for behaviour cloning.
 """
+import functools
 import json
 import shutil
 import struct
@@ -27,6 +28,16 @@ assert CELL.itemsize == 11 and UNIT.itemsize == 22
 def game_commit():
     return subprocess.run(["git", "-C", str(GAME_DIR), "rev-parse", "HEAD"], capture_output=True,
                           text=True).stdout.strip()
+
+
+@functools.cache
+def map_table():
+    """The specialists' cell grid and each map's grid at Normal size and nation count, from the game's own manifests
+    (bridge/maptable.ts): {"grid": [rows, cols], "maps": {name: {"h", "w", "nations"}}}."""
+    out = subprocess.run([shutil.which("node"), "--import", "tsx", str(ROOT / "bridge" / "maptable.ts")], cwd=GAME_DIR,
+                         capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
 
 # Spatial channels. They reach the model as uint8 in 64ths of a unit (quantize_; trainer/model.py divides by 64): tile
 # shares stay exact, other values move by at most 1/128, and PPO stores its rollouts as 8 bits. Tile counts are divided

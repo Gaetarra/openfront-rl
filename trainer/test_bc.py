@@ -13,9 +13,9 @@ import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from trainer import bc, crawl
-from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, lr_at, main, measure, one_pass, score,
-                        table)
-from trainer.env import DST, MOVE, RANKED_1V1, ROOT, VecEnv
+from trainer.bc import (Meter, backward_windows, bc_loss, family_of, is_val, label_legal, lr_at, main, measure, mix_of,
+                        one_pass, score, slots_of, table, usable, val_records, worker_records)
+from trainer.env import DST, MOVE, RANKED_1V1, ROOT, VecEnv, map_table
 from trainer.model import (ACT_NAMES, ATTACK, BREAK, BUILD, DIPLOMACY, DONATE, MAP_OF, RENEW, REQUEST, RETREAT, SHARES,
                            NEW_TYPE_BIAS, V4_ACTS, ActionDist, Policy, PolicyV1, new_net)
 from trainer.test_model import DIMS, DIMS_V5, N as ROWS, exact_fp32, fake_obs, randomized
@@ -46,11 +46,11 @@ class LabelTest(unittest.TestCase):
     def test_the_control_page_says_what_is_training(self):
         a = bc.parse_args(["--workers", "14", "--games-per-worker", "6", "--updates", "10"])
         a.arch = "v3"
-        info = bc.run_info(a, ["r"] * 3, ["v"])
+        info = bc.run_info(a, [entry("a"), entry("b"), entry("c", "team", teams=6)], [entry("v")])
         self.assertEqual(info["Method"], "behaviour cloning (imitating humans)")
         self.assertEqual(info["Network"], "player transformer, Soft-MoE core (8 experts), 100 troop shares")
         self.assertEqual(info["Starts from"], "random weights")
-        self.assertEqual(info["Data"], "3 ranked 1v1 replays, 1 held out")
+        self.assertEqual(info["Data"], "3 replays (ranked1v1 2, team 1), 1 held out")
         self.assertEqual(info["Games at once"], "84 (14 workers x 6)")
         self.assertEqual(info["Updates"], "10 of 8 windows each")
 
@@ -60,6 +60,79 @@ class LabelTest(unittest.TestCase):
         m.add("a", torch.tensor(1.0), 2)
         self.assertEqual(m.means(), {"a": 1.0})
         self.assertEqual(m.means(), {})
+
+
+def entry(game_id, mode="ranked1v1", **fields):
+    """An index entry as the crawler writes it (trainer/crawl.py entry_of), on a map that fits the grid."""
+    return {"id": game_id, "start": 0, "commit": None, "map": "Australia", "size": "Normal", "turns": 1,
+            "players": [{"clientID": "a", "publicID": None}, {"clientID": "b", "publicID": None}], "winner": "a",
+            "mode": mode, "teams": None, "modifiers": [], "disabled": [], "bots": 400, "nations": "disabled", **fields}
+
+
+def paths(*ids):
+    return [crawl.record_path(i, crawl.store()) for i in ids]
+
+
+def paths_in(root, *ids):
+    return [crawl.record_path(i, root) for i in ids]
+
+
+class RecordsTest(unittest.TestCase):
+    def test_the_family_of_an_entry(self):
+        self.assertEqual(family_of(entry("a", "ranked2v2")), "ranked2v2")
+        self.assertEqual(family_of(entry("a", "clanwars")), "team")
+        self.assertEqual(family_of(entry("a", "team", teams="Humans Vs Nations")), "hvn")
+        self.assertEqual(family_of(entry("a", "team", teams=6)), "team")
+
+    def test_usable_records_fit_the_grid_and_set_no_modifier(self):
+        t = map_table()
+        ok = lambda **fields: usable(entry("a", **fields), t["maps"], t["grid"])
+        self.assertTrue(ok(modifiers=[]))
+        self.assertTrue(ok(modifiers=["isCompact"]))
+        self.assertFalse(ok(modifiers=["isCompact", "isWaterNukes"]))
+        self.assertFalse(ok(modifiers=["isWaterNukes"]))
+        self.assertFalse(ok(disabled=["SAM Launcher"]))
+        self.assertFalse(ok(map="Brain Rot"), "294 x 375 cells do not fit the 192 x 256 grid")
+        self.assertFalse(ok(map="A map the game does not have"))
+
+    def test_an_index_from_the_older_crawler_asks_for_a_reindex(self):
+        t = map_table()
+        old = {k: v for k, v in entry("a").items() if k != "teams"}
+        with self.assertRaisesRegex(SystemExit, "--reindex"):
+            usable(old, t["maps"], t["grid"])
+
+    def test_mix_of_reads_families_in_the_order_given(self):
+        a = bc.parse_args(["--workers", "9", "--mix", "team=2", "ranked1v1=3"])
+        self.assertEqual(list(mix_of(a).items()), [("team", 2), ("ranked1v1", 3)])
+        self.assertEqual(a.workers, 5, "the mix decides the workers")
+        self.assertEqual(mix_of(bc.parse_args(["--workers", "9"])), {"ranked1v1": 9})
+        for bad in (["nope=1"], ["team=1", "team=2"], ["team=0"], ["team"]):
+            with self.assertRaisesRegex(SystemExit, "--mix"):
+                mix_of(bc.parse_args(["--mix", *bad]))
+
+    def test_each_family_is_dealt_to_its_workers(self):
+        entries = [entry("c"), entry("a"), entry("t", "team", teams=6), entry("b")]
+        self.assertEqual(worker_records(entries, {"ranked1v1": 2, "team": 1}),
+                         [paths("a", "c"), paths("b"), paths("t")])
+
+    def test_a_family_short_of_records_stops_the_run(self):
+        with self.assertRaisesRegex(SystemExit, "hvn.*1|1.*hvn"):
+            worker_records([entry("h", "team", teams="Humans Vs Nations"), entry("a")], {"hvn": 2})
+
+    def test_validation_leaves_out_a_family_without_held_out_records(self):
+        held = [entry("b"), entry("a")]
+        self.assertEqual(val_records(held, {"ranked1v1": 2, "team": 1}), ([paths("a", "b")], ["team"]))
+
+    def test_the_player_table_fits_the_largest_game(self):
+        t = map_table()["maps"]
+        players = lambda n: [{"clientID": str(i), "publicID": None} for i in range(n)]
+        small = entry("a", players=players(2), bots=400, nations="disabled")
+        big = entry("b", players=players(50), bots=400, nations="default", map="Alps")
+        self.assertLess(t["Alps"]["nations"], 50)
+        self.assertEqual(slots_of([small, big], t), 1 + 50 + 50 + 400, "as many nations as humans in a Humans vs Nations game")
+        big["map"] = "World"
+        self.assertEqual(slots_of([small, big], t), 1 + 50 + t["World"]["nations"] + 400)
+        self.assertEqual(slots_of([entry("c", nations=8, bots=0)], t), 1 + 2 + 8)
 
 
 class ScheduleTest(unittest.TestCase):
@@ -360,15 +433,23 @@ class MainTest(unittest.TestCase):
 
     def setUp(self):
         self.data = Path(tempfile.mkdtemp())
-        (self.data / "records").mkdir()
-        shutil.copy(FIXTURE, self.data / "records" / "fixture.json.gz")
-        entry = {"id": "fixture", "start": 0, "commit": None, "map": "x", "size": "Compact", "turns": 1,
-                 "players": [{"clientID": "a", "publicID": None}, {"clientID": "b", "publicID": None}], "winner": "a"}
-        (self.data / "index.jsonl").write_text(json.dumps(entry) + "\n")
+        self.store = self.data / "v0.35.0"  # crawl.store() under the patched crawl.DATA
+        (self.store / "records").mkdir(parents=True)
+        shutil.copy(FIXTURE, self.store / "records" / "fixture.json.gz")
+        self.entries = [entry("fixture", bots=400)]
+        self.write_index()
         self.common = ["--run", self.RUN, "--workers", "1", "--games-per-worker", "1", "--val-workers", "0",
                        "--val-share", "0", "--port", "0", "--log-every", "1", "--save-every", "2", "--accum", "2",
                        "--warmup", "1"]
-        self.seeds = []
+        self.seeds, self.calls = [], []
+
+    def write_index(self):
+        (self.store / "index.jsonl").write_text("".join(json.dumps(e) + "\n" for e in self.entries))
+
+    def add_record(self, source, game_id, mode, **fields):
+        shutil.copy(source, self.store / "records" / f"{game_id}.json.gz")
+        self.entries.append(entry(game_id, mode, **fields))
+        self.write_index()
 
     def tearDown(self):
         for d in ("checkpoints", "runs"):
@@ -381,6 +462,7 @@ class MainTest(unittest.TestCase):
 
         def spy(*args, **kwargs):
             self.seeds.append(kwargs["seed"])
+            self.calls.append(kwargs)
             return real(*args, **kwargs)
 
         with mock.patch.object(crawl, "DATA", self.data), mock.patch.object(bc, "VecEnv", spy):
@@ -400,6 +482,42 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.latest()["update"], 4)
         self.assertTrue((ROOT / "runs" / self.RUN).is_dir())
         self.assertNotEqual(self.seeds[0], self.seeds[1], "a resumed run replays the records in a new order")
+
+    def test_each_family_trains_on_its_own_records(self):
+        info = json.loads(gzip.decompress(TEAM.read_bytes()))["info"]
+        self.add_record(TEAM, "team", "team", map="Between Two Seas", teams=6, bots=info["config"]["bots"],
+                        players=[{"clientID": p["clientID"], "publicID": None} for p in info["players"]])
+        self.run_main(self.common + ["--mix", "ranked1v1=1", "team=1", "--updates", "1"])
+        train = self.calls[0]
+        self.assertEqual(train["records"], [paths_in(self.store, "fixture"), paths_in(self.store, "team")])
+        self.assertGreaterEqual(train["slots"], 1 + 18 + info["config"]["bots"])
+        self.assertEqual(self.latest()["global_step"], 1 * 2 * 4)  # 1 update of 2 windows, 2 workers x 1 game x 2 players
+        self.assertEqual(self.latest()["args"]["mix"], ["ranked1v1=1", "team=1"])
+        self.run_main(["--run", self.RUN, "--resume", "--updates", "2"])
+        self.assertEqual(self.latest()["update"], 2, "a resume keeps the mix")
+        self.assertEqual(self.calls[-1]["records"], train["records"])
+
+    def test_unusable_records_stay_out_of_the_run(self):
+        self.add_record(FIXTURE, "modified", "ranked1v1", modifiers=["isWaterNukes"])
+        self.add_record(FIXTURE, "huge", "ranked1v1", map="Brain Rot")
+        self.run_main(self.common + ["--updates", "1"])
+        self.assertEqual(self.calls[0]["records"], [paths_in(self.store, "fixture")])
+
+    def test_validation_has_a_worker_per_family_and_runs_once_before_the_first_update(self):
+        # 0.05 of the games are held out: "sample" is, "train" and "ttrain" are not (zlib.crc32 of the ID)
+        self.entries = [entry("train")]
+        for game_id in ("train", "sample"):
+            shutil.copy(FIXTURE, self.store / "records" / f"{game_id}.json.gz")
+        self.entries.append(entry("sample"))
+        self.add_record(TEAM, "ttrain", "team", teams=6, map="Between Two Seas")
+        self.run_main(self.common + ["--val-share", "0.05", "--val-workers", "1", "--val-steps", "2", "--mix",
+                                     "ranked1v1=1", "team=1", "--updates", "1"])
+        val = self.calls[1]
+        self.assertEqual((val["seed"], val["records"]), ("val", [paths_in(self.store, "sample")]),
+                         "no held-out team record: that family is left out")
+        curves = EventAccumulator(str(ROOT / "runs" / self.RUN))
+        curves.Reload()
+        self.assertEqual([e.step for e in curves.Scalars("val/bc/nll")], [0], "the baseline, before any update")
 
     def test_fine_tuning_keeps_the_checkpoints_network(self):
         init = ROOT / "checkpoints" / self.RUN / "init.pt"

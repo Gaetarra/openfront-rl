@@ -11,7 +11,7 @@ from trainer import env as env_module
 from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, DST, FFA, HEALTH, HVN, LAND, LEVEL, MAP_TYPES, MOVE,
                          N_CHANNELS, N_SCALARS, OWN, OWNER, OWNER_FEATURES, PATROL, RANKED_1V1, ROOT, TRADE, UNIT,
                          UPGRADABLE, VALID, VETERAN, WORKER_V4_FEATURES, ZONE_KINDS, VecEnv, disk_cells,
-                         frozen_eval_config, gate_config, quantize_)
+                         frozen_eval_config, gate_config, map_table, quantize_)
 from scripts.coverage import label_kinds
 from trainer.eval import Scripted
 from trainer.model import ACT_NAMES, DIPLOMACY, DONATE, MAP_OF, REQUEST, ActionDist, RandomPolicy, v1_spatial
@@ -406,6 +406,16 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNot(frozen_eval_config("hvn"), env_module.PLAYLISTS["hvn"], "a copy, not the playlist itself")
         with unittest.mock.patch.dict(env_module.PLAYLISTS, {"hvn": {**HVN, "seats": 2}}):
             self.assertEqual(gate_config("hvn", "seen")["seats"], 2)
+
+    def test_the_map_table_has_the_specialists_grid(self):
+        t = map_table()
+        self.assertEqual(t["grid"], [192, 256])
+        australia, brain_rot = t["maps"]["Australia"], t["maps"]["Brain Rot"]
+        self.assertTrue(australia["h"] <= 192 and australia["w"] <= 256, "Australia fits the grid")
+        self.assertEqual((brain_rot["h"], brain_rot["w"]), (294, 375))
+        self.assertTrue(brain_rot["h"] > 192 and brain_rot["w"] > 256, "Brain Rot does not")
+        self.assertGreater(t["maps"]["World"]["nations"], 0)
+        self.assertIs(map_table(), t, "cached: node runs once")
 
 
 class QuantizeTest(unittest.TestCase):

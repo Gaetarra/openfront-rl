@@ -1,7 +1,8 @@
-"""Behaviour cloning on ranked 1v1 replays (PLAN Phases 2-3): the policy learns to issue the command a human issued in
+"""Behaviour cloning on human replays (PLAN Phases 2-3, step 7): the policy learns to issue the command a human issued in
 the same situation, and the value head learns who won.
 
-  Train:   .venv/Scripts/python -m trainer.bc --run bc3-moe --core moe   (one pass over data/ from trainer.crawl)
+  Train:   .venv/Scripts/python -m trainer.bc --run bc3-moe --core moe   (one pass over data/v0.35.0 from trainer.crawl)
+  Modes:   --mix ranked1v1=8 team=4 ...   (each replay worker plays the records of one family of modes)
   Tune:    .venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000
   Resume:  .venv/Scripts/python -m trainer.bc --run bc3-moe --resume
   Score:   .venv/Scripts/python -m trainer.bc --score checkpoints/bc/update0060000.pt checkpoints/bc3-moe/latest.pt
@@ -23,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from trainer import crawl
 from trainer.control import Control, serve
-from trainer.env import DST, MAP_TYPES, MOVE, RANKED_1V1, ROOT, VecEnv, game_commit
+from trainer.env import DST, MAP_TYPES, MOVE, RANKED_1V1, ROOT, VecEnv, game_commit, map_table
 from trainer.eval import tag
 from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, DIPLOMACY, DONATE, MAP_NAMES, MAP_OF, REQUEST, RETREAT,
                            SHARES, SIZE_OF, ActionDist, _on, describe, grow, load_net, new_net)
@@ -32,6 +33,7 @@ from trainer.ppo import network_args, resume_args, save_checkpoint
 PHASES = ("spawn", "early", "mid", "late")
 SCORE_CUTOFF = 1790812800000  # 2026-10-01 00:00 UTC, in ms: the scoring set comes from the Phase 2 crawl's games
 SCORE_LAYOUT = {"workers": 12, "games_per_worker": 6, "steps": 2000}  # fixed, so every scoring run sees the same rows
+FAMILIES = ("ranked1v1", "ranked2v2", "rankedffa", "ffa", "team", "hvn")  # what --mix takes: the modes a worker replays
 SHARE_SMOOTH = 0.1  # a troop-share label's weight on its two neighbouring percents (PLAN 3B: soft labels)
 NEAR_TILES = 16  # a cell head's choice counts as near the human's within this many tiles (bc/*_cell_near)
 
@@ -51,8 +53,13 @@ def parser():
                    help="also train a second new network with this core on the same windows, row by row, from the same "
                         "weights outside the core (PLAN 3B); it saves to checkpoints/<run>-<twin>")
     p.add_argument("--workers", type=int, default=10)
+    p.add_argument("--mix", nargs="+", metavar="FAMILY=WORKERS",
+                   help=f"workers on the records of several families ({', '.join(FAMILIES)}), in the order given, e.g. "
+                        f"ranked1v1=8 team=4: each replay worker plays one family's records. --workers becomes their "
+                        f"sum. Without it, every worker plays ranked 1v1")
     p.add_argument("--games-per-worker", type=int, default=8)
-    p.add_argument("--val-workers", type=int, default=2, help="0 = no validation")
+    p.add_argument("--val-workers", type=int, default=2,
+                   help="0 = no validation; otherwise one worker per family that has held-out records")
     p.add_argument("--val-share", type=float, default=0.05, help="share of the games held out")
     p.add_argument("--val-every", type=int, default=250, help="updates between validations")
     p.add_argument("--val-steps", type=int, default=100, help="replay steps per validation")
@@ -76,7 +83,87 @@ def parser():
 
 
 def parse_args(argv=None):
-    return parser().parse_args(argv)
+    a = parser().parse_args(argv)
+    if a.mix:
+        a.workers = sum(mix_of(a).values())  # the mix decides the workers
+    return a
+
+
+def mix_of(a):
+    """--mix as {family: workers}, in the order given; without it, every worker plays ranked 1v1."""
+    if not a.mix:
+        return {"ranked1v1": a.workers}
+    mix = {}
+    for item in a.mix:
+        family, _, count = item.partition("=")
+        if family not in FAMILIES or family in mix or not count.isdigit() or int(count) < 1:
+            raise SystemExit(f"--mix takes FAMILY=WORKERS, each family once, one of {', '.join(FAMILIES)} and at least "
+                             f"1 worker: {item!r}")
+        mix[family] = int(count)
+    return mix
+
+
+def family_of(entry):
+    """The family of modes whose records one replay worker plays: the crawl mode, except that Clan Wars are Team games and
+    a Team lobby of Humans vs Nations is a family of its own."""
+    if entry["mode"] == "clanwars":
+        return "team"
+    if entry["mode"] == "team" and entry.get("teams") == "Humans Vs Nations":
+        return "hvn"
+    return entry["mode"]
+
+
+def usable(entry, maps, grid):
+    """Whether behaviour cloning can replay an index entry: its map fits the specialists' cell grid (`maps` and `grid`
+    are map_table()'s), no public modifier but Compact is on and no unit is disabled."""
+    missing = [k for k in crawl.INDEX_FIELDS if k not in entry]
+    if missing:
+        raise SystemExit(f"data/v0.35.0's index predates step 7 (entry {entry['id']} lacks {', '.join(missing)}): run "
+                         f"python -m trainer.crawl --reindex")
+    size = maps.get(entry["map"])
+    return (size is not None and size["h"] <= grid[0] and size["w"] <= grid[1]
+            and set(entry["modifiers"]) <= {"isCompact"} and not entry["disabled"])
+
+
+def worker_records(entries, mix):
+    """For each family of the mix, in order, its entries' record paths sorted by game ID and dealt round-robin to its
+    workers: one list per worker."""
+    out = []
+    for family, workers in mix.items():
+        ids = sorted(e["id"] for e in entries if family_of(e) == family)
+        if len(ids) < workers:
+            raise SystemExit(f"{len(ids)} training records of the {family} family for {workers} workers: run "
+                             f"trainer.crawl first, or give --mix fewer workers for it")
+        out += [[crawl.record_path(i, crawl.store()) for i in ids[w::workers]] for w in range(workers)]
+    return out
+
+
+def val_records(entries, mix):
+    """The held-out records of each family of the mix that has any, in order: one list (one validation worker) per
+    family. Also returns the families left out because they have none."""
+    lists, left_out = [], []
+    for family in mix:
+        ids = sorted(e["id"] for e in entries if family_of(e) == family)
+        if ids:
+            lists.append([crawl.record_path(i, crawl.store()) for i in ids])
+        else:
+            left_out.append(family)
+    return lists, left_out
+
+
+def slots_of(entries, maps):
+    """The player table's rows: 1 + the most humans, nations and bots any entry's game has. A game's nations are 0 when
+    disabled, the number when it is one, else the map's own (at least as many as the humans: a Humans vs Nations game
+    has a nation for each human)."""
+    def players(e):
+        humans, nations = len(e["players"]), e["nations"]
+        if nations == "disabled":
+            nations = 0
+        elif not isinstance(nations, int):
+            nations = max(maps[e["map"]]["nations"], humans)
+        return humans + nations + int(e["bots"] or 0)
+
+    return 1 + max(players(e) for e in entries)
 
 
 def is_val(game_id, share):
@@ -85,11 +172,12 @@ def is_val(game_id, share):
 
 
 def run_info(a, train, val):
-    """What the control page says about the run."""
+    """What the control page says about the run; `train` and `val` are the index entries of its records."""
+    families = ", ".join(f"{family} {n:,}" for family in FAMILIES if (n := sum(family_of(e) == family for e in train)))
     network = describe(vars(a)) + (f"; twin: {describe({**vars(a), 'core': a.twin})}" if a.twin else "")
     return {"Name": a.run, "Method": "behaviour cloning (imitating humans)", "Network": network,
             "Starts from": a.init or "random weights",
-            "Data": f"{len(train):,} ranked 1v1 replays, {len(val):,} held out",
+            "Data": f"{len(train):,} replays ({families}), {len(val):,} held out",
             "Games at once": f"{a.workers * a.games_per_worker} ({a.workers} workers x {a.games_per_worker})",
             "Updates": f"{a.updates:,} of {a.accum} windows each"}
 
@@ -384,24 +472,43 @@ def main(argv=None):
     device = torch.device("cuda")
     run_dir = ROOT / "runs" / a.run
 
-    entries = [e for e in crawl.load_index() if crawl.record_path(e["id"]).exists()]
+    # The records of the pin's simulation (data/v0.35.0) that the run can use. The player table fits the largest game of
+    # all of them, so that every record the run can load fits it (bridge/obs.ts throws for a player it has no row for).
+    maps = map_table()
+    store = crawl.store()
+    entries = [e for e in crawl.load_index(store) if crawl.record_path(e["id"], store).exists()
+               and usable(e, maps["maps"], maps["grid"])]
+    if not entries:
+        raise SystemExit(f"no usable records in {store}: run trainer.crawl first")
+    slots = slots_of(entries, maps["maps"])
     ratings = crawl.elo(entries)
+    mix = mix_of(a)
+    entries = [e for e in entries if family_of(e) in mix]
     train_entries = [e for e in entries if not is_val(e["id"], a.val_share)]
-    train = [crawl.record_path(e["id"]) for e in train_entries]
-    val = [crawl.record_path(e["id"]) for e in entries if is_val(e["id"], a.val_share)]
-    if len(train) < a.workers or len(val) < a.val_workers:
-        raise SystemExit(f"{len(train)} training and {len(val)} held-out records: run trainer.crawl first")
+    val_entries = [e for e in entries if is_val(e["id"], a.val_share)]
+    train = worker_records(train_entries, mix)
     if a.updates is None:
         a.updates = one_pass(train_entries, a)
     # Runs with one --seed replay the same records in the same order (the dense/MoE A/B), and a resumed run draws a new
     # order: with the old one, every stop and resume would replay the same records.
     start = state["update"] if state else 0
+    # RANKED_1V1's two seats are the two players picked from each record; its grid is the specialists' (bridge/setups.ts)
     envs = VecEnv(RANKED_1V1, a.workers, a.games_per_worker, seed=f"bc-{a.seed}-u{start}", device=device,
-                  records=train, log_dir=run_dir / "workers")
-    val_envs = None
-    if a.val_workers:
-        val_envs = VecEnv(RANKED_1V1, a.val_workers, a.games_per_worker, seed="val", device=device, records=val,
-                          log_dir=run_dir / "val_workers")
+                  records=train, slots=slots, log_dir=run_dir / "workers")
+    if (envs.H, envs.W) != tuple(maps["grid"]):
+        envs.close()
+        raise SystemExit(f"the replay grid is {envs.H} x {envs.W}, not the specialists' {maps['grid'][0]} x "
+                         f"{maps['grid'][1]}: the networks would see another shape")
+    val_envs, notes = None, []
+    if a.val_workers:  # one worker per family that has held-out records, 2 games each
+        val_lists, left_out = val_records(val_entries, mix)
+        if left_out:
+            notes.append(f"no held-out records of {', '.join(left_out)}: not validated")
+        if val_lists:
+            val_envs = VecEnv(RANKED_1V1, len(val_lists), 2, seed="val", device=device, records=val_lists, slots=slots,
+                              log_dir=run_dir / "val_workers")
+        else:
+            notes.append("no held-out records: no validation")
     torch.manual_seed(a.seed)  # again before each network: a twin starts from the same weights outside its core
     nets = [new_net(envs.dims, vars(a)).to(device).to(memory_format=torch.channels_last)]
     # A resume hides what a crashed sitting logged after its last checkpoint (TensorBoard's purge_step).
@@ -434,9 +541,11 @@ def main(argv=None):
         else:
             model.load_state_dict(init)
     control = Control(duty=a.duty, gpu_temp_limit=a.gpu_temp_limit)
-    control.update(run=run_info(a, train, val))
+    control.update(run=run_info(a, train_entries, val_entries))
     server = serve(control, a.port, log_dir=run_dir)
     control.note(f"control page on http://127.0.0.1:{server.server_address[1]}")
+    for note in notes:
+        control.note(note)
     commit = game_commit()
     done = {"records": 0, "desync": 0, "errors": 0}
 
@@ -493,6 +602,16 @@ def main(argv=None):
             results.append(out)
         return results
 
+    def log_validation():
+        results = validate()
+        for w, metrics in zip(writers, results):
+            for k, v in metrics.items():
+                w.add_scalar(k, v, global_step)
+        if a.twin and "val/bc/nll" in results[1]:
+            writer.add_scalar("twin/val/bc/nll", results[1]["val/bc/nll"], global_step)
+
+    if val_envs is not None and not state:  # the baseline for the forgetting trigger: the start's own validation NLL
+        log_validation()
     control.set_state("running")
     t_log = time.perf_counter()
     try:
@@ -527,12 +646,7 @@ def main(argv=None):
                         writer.add_scalar("twin/bc/nll", twin["bc/nll"], global_step)  # the control page's loss chart
                 control.update(update=update, global_step=global_step, metrics=metrics)
             if val_envs is not None and update % a.val_every == 0:
-                results = validate()
-                for w, metrics in zip(writers, results):
-                    for k, v in metrics.items():
-                        w.add_scalar(k, v, global_step)
-                if a.twin and "val/bc/nll" in results[1]:
-                    writer.add_scalar("twin/val/bc/nll", results[1]["val/bc/nll"], global_step)
+                log_validation()
             if update % a.save_every == 0 or control.take_save():
                 checkpoint()
     except KeyboardInterrupt:
