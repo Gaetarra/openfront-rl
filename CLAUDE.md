@@ -66,11 +66,11 @@ node node_modules/typescript/bin/tsc -p ../../tsconfig.json    # typecheck bridg
 npx tsx ../../scripts/bench_env.ts <record.json> [--pipe]   # env-step cost on a real record (run from the game dir)
 npx tsx ../../scripts/troop_shares.ts 60                    # share of their troops humans send per attack/boat, 60 replayed records (~10 min, game dir)
 .venv/Scripts/python scripts/bench_gpu.py                   # GPU encoder throughput (run from the repo root)
-.venv/Scripts/python scripts/coverage.py                    # Gate 3B's coverage: commands outside the 15 actions over all held-out records (seconds)
+.venv/Scripts/python scripts/coverage.py                    # Gate 3B's coverage: commands outside the 20 actions over all held-out records (seconds)
 .venv/Scripts/python scripts/mode_analysis.py play          # how humans play each mode, per player-minute, over every record of data/v0.35.0/ (~2 min; PLAN "After 4N" item 2)
 .venv/Scripts/python scripts/mode_analysis.py traces        # replays a stable sample of 600 records per mode (scripts/mode_traces.ts; ~2 h on 12 workers, resumable: detach, runs\modes035.cmd)
 .venv/Scripts/python scripts/mode_analysis.py win           # what predicts winning, per mode and minute, from the traces (seconds; runs/modes/win.json); `selftest` checks its fit
-.venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s, time split and peak VRAM of the Phase 2 network and a v4 network, BC rows/s of the v4 network (~15 min, PC idle); --v4 <checkpoint> times a trained one (Gate 3B)
+.venv/Scripts/python scripts/speed_check.py --ppo-minibatches 12   # PPO decisions/s, time split and peak VRAM of the Phase 2 network and a v4 network, BC rows/s of a v5 network (~15 min, PC idle); --v4 <checkpoint> times a trained one (Gate 3B); --v5 also times a fresh v5 network in the same PPO setup, as a share of v4's decisions/s (step 6's budget: at least 95%, no spill)
 .venv/Scripts/python scripts/profile_ppo.py                     # where PPO's time goes: one update of the real loop with the 3B clone under torch.profiler, per part: CPU, idle GPU, syncs, GPU time (~2 min, PC idle; runs/profile/*.json)
 .venv/Scripts/python scripts/ab_speed.py --old pins/ab-base --label <change>   # code A/B of PPO speed: old, new, new, old probes and the rule's verdict (~15 min, PC idle; runs/ab/)
 ```
@@ -139,11 +139,20 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   sizes), v3 is Phase 3B (100 troop shares), v4 adds every action (15 types, 12 heat maps, a retreat pointer) and the
   3B inputs (57 channels, 26 scalars); `--init` keeps the checkpoint's. A checkpoint without `"arch"` (Phase 2) loads
   as `PolicyV1`, which rebuilds its 22 input channels from the first 49 of today's 57 (`v1_spatial`), so the Phase 2
-  bots still play. v1–v3 see only their 5 types and 3 heat maps of the 15 (`ActionDist`), and only the 49 channels and
+  bots still play. v1–v3 see only their 5 types and 3 heat maps of the 20 (`ActionDist`), and only the 49 channels and
   16 scalars they were trained on; BC scores each network on the rows its types can express.
+  - v5 (step 6) adds the diplomacy and warship actions: 20 types, 13 heat maps, four diplomacy pointers, a donate kind
+    of the share head, and an autoregressive warship-move head (a source heat map, a destination map conditioned on the
+    chosen source, alone or fleet). It also reads their inputs: 64 channels and 31 player features. New PPO and BC
+    runs are v5.
+  - v2–v4 read only their own inputs and heads (`V4_CHANNELS`, `V4_FEATURES`, `V4_SCALARS`, `V4_ACTS`, `V4_MAPS` in
+    `trainer/model.py`), so their checkpoints play unchanged. Later steps append inputs after v5's in the same way.
+  - A v5 learner needs a v5 `--kl-ref`: there is no KL across architectures.
+  - `RandomPolicy` plays v5's heads since step 6 (20 types, 1–100% shares), so results against `random` from before
+    step 6 don't compare.
 - Troops are a whole percent of current troops (1–100) in actions and labels. v1 and v2 networks send
   10/25/50/75/100%, exactly what their five bins sent. v3 and v4 networks read the share with a player's token: the attack's
-  target, or the main owner of the boat's landing cell.
+  target, or the main owner of the boat's landing cell. v5 adds a donate kind, read with the recipient's token.
   - BC labels the human's share, rounded and clamped to 1–100. The loss puts 0.05 on each neighbouring percent
     (`SHARE_SMOOTH`).
   - In `--score`, `bc/nll` is like for like (a share network's shares summed into the five sizes' ranges, 1–15, 16–35,
@@ -155,11 +164,23 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     `checkpoints/<run>-<core>`, and the run resumes both together.
 - Actions (bridge/actions.ts `Act`): no-op, spawn, attack, boat, build city / defense post / silo / factory / port /
   SAM / warship, atom bomb, hydrogen bomb, upgrade (the seat's structure in the chosen cell) and retreat (cancels
-  the largest attack on the chosen target).
+  the largest attack on the chosen target). Step 6 adds types 15–19:
+  - an alliance request (which also accepts a pending one), renew and break, encoded as `[type, 0, smallID, 0]`;
+  - donate troops, `[18, 0, smallID, share]`;
+  - move warships, `[19, source cell, destination cell, fleet]`. The anchor is the seat's warship nearest the
+    source cell's centre; fleet 1 adds every warship sharing its patrol point in its water body. The destination is
+    the water tile of that body nearest the destination cell's centre.
   - The bridge masks types by gold, a ready silo outside spawn immunity, a finished port, an upgradable structure and
     an attack to cancel; the GPU masks the cells, the upgrade map exactly (own, finished, gold for its type).
-  - The game's `canBuild` / `canUpgradeUnit` decide in the worker, and a failed action is a counted no-op.
-  - Outside the set: diplomacy, chat, warship moves and MIRVs.
+  - Diplomacy has exact per-player masks from the game's own checks (the worker's "diplomacy" blob, all zero in the
+    spawn phase and for a dead seat):
+    - `canSendAllianceRequest`, `allianceInfo().canExtend` and `isAlliedWith`;
+    - `canDonateTroops`, plus room under the recipient's troop cap.
+    - A donation that would truncate to 0 troops drops.
+  - The game's `canBuild` / `canUpgradeUnit` decide in the worker, and a failed action is a counted no-op. PPO logs
+    each type's drop share as `actions/invalid_rate/<type>`.
+  - Outside the set: gold donations, rejects, embargoes, target marks, chat and emoji, MIRVs, cancelling boats and
+    deleting units.
 - Observations (3B step 3, part 2):
   - Unit records carry the missiles loaded in silos and SAMs, and each unit's zone in tiles from the game's Config:
     a finished SAM's current range, a finished defense post's range, a nuke's outer blast around its target.
@@ -167,6 +188,19 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     while under construction), and the SAM, defense-post and nuke zones of each side. Ours is self and friends;
     theirs is enemies and bots.
   - Scalars 16–25: the gold against each build's current cost, and the seat's loaded silo missiles.
+- Observations (step 6, v5):
+  - Unit records are 22 bytes.
+    - A warship's troops field holds its health ÷ max health, `ready` its veteran level, and its zone its patrol tile.
+    - A trade ship carries its safe-from-pirates flag and the smallID of its destination port's owner.
+  - Channels 57–63:
+    - warship health and veteran levels, ours and theirs;
+    - our patrol points;
+    - trade ships that pay us or our friends;
+    - trade ships we could capture.
+  - Player features 25–30, after the 8 building features: ally, the two pending requests, the alliance's time left,
+    and who asked to renew.
+  - `cell_mask` is [N, 14, H·W]: the 13 heat maps, then the warship destination (`DST`, ocean cells).
+    `diplomacy_mask` is [N, 4, P].
 - GPU memory (12 GB card):
   - PPO keeps its rollout rows in pinned system RAM (`HostRows`), with the cell masks as bits (`pack_bits`). A worker
     thread copies each minibatch to the GPU on its own stream while the previous one trains.
@@ -281,3 +315,10 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - Structures (city, port, factory, silo, SAM, defense post) of all players stay at least `structureMinDist()` = 15
   tiles apart (`PlayerImpl.validStructureSpawnTiles`), so a cell (at most 8 × 8 tiles) holds at most one structure.
   The trainer's building channels and `v1_spatial` rely on it: recheck it on upgrades.
+- Every map has one ocean water body: the map generator marks only the largest as ocean, and the others are lakes. The
+  warship destination mask is ocean-only, so a lake warship's moves drop. The bot builds warships on ocean cells only.
+- Tribes (bots) accept every alliance request, renewals too. When a public lobby switches donations off, only
+  donations to humans are refused, so an allied nation still receives them.
+- A replay window's masks are read at its first tick, and the game checks a command when it executes, a few ticks
+  later. So a human command sent right as a cooldown ends can label illegal: one donation of 21 in the Team fixture
+  did.

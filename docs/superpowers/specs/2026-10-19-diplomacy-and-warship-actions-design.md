@@ -1,7 +1,8 @@
 # Step 6: diplomacy and warship actions (design)
 
 Approved by the user on 2026-10-19; the implementation plan is
-`docs/superpowers/plans/2026-10-19-step6-diplomacy-and-warships.md`. This is step 6 of the after-4N plan
+`docs/superpowers/plans/2026-10-19-step6-diplomacy-and-warships.md`. Built on 2026-10-19 in commits d741a5a..c68fd8f
+on phase3; the results are in PLAN "After 4N" item 3. This is step 6 of the after-4N plan
 (`docs/superpowers/plans/2026-10-18-after-4n-v035.md`) and PLAN "After 4N" item 3. It was designed with the user on
 2026-10-18/19, and the game facts below were checked in the code of the pinned game (v0.35.2) and in the human
 records of `data/v0.35.0/`.

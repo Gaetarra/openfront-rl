@@ -421,8 +421,8 @@ all modifiers, win-threshold progress, time left, tiles-per-cell.
 | upgrade | unit type, cell, amount bin | `upgrade_structure` on the own unit of that type nearest the cell |
 | nuke | cell, arc bit, amount bin | `build_unit` Atom/Hydrogen; amount ≤ ready silo slots; blocked in immunity / near teammates |
 | MIRV | cell | `build_unit` MIRV on an owned target tile |
-| move warships | source cell, target cell | `move_warship` for own warships near source; target in the same water body |
-| diplomacy | player ptr × {request/accept, reject, break, extend, donate gold, donate troops, embargo on/off, target} | alliance* / donate* / embargo / targetPlayer |
+| move warships | source cell, destination cell, alone or fleet (v5, step 6) | `move_warship` for the own warship nearest the source cell's centre, alone or with every warship sharing its patrol point; the destination is the water tile of its body nearest the cell's centre |
+| diplomacy | player ptr × {request/accept, renew, break, donate troops (then a 1–100% share read with the recipient)} (v5, step 6) | `allianceRequest` / `allianceExtension` / `breakAlliance` / `donate_troops`, exact masks from the game's own checks; left out: reject, gold donations, embargoes, target marks |
 Dropped in v1: emoji, quick_chat, delete_unit, cancel_boat, embargo_all. Masks: cheap approximate grid masks (mostly
 derived on the GPU from observation channels); exact check only on the sampled action; failures = logged no-ops.
 **Amounts and the arc are deferred (2026-10-06).** 3B sends one missile on the default arc and upgrades by one level.
@@ -2263,7 +2263,48 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
          - new inputs, which go after v4's, so older networks play unchanged: diplomacy player features, warships'
            health, veteran level and patrol points, and trade ships;
          - speed budget: at least 95% of v4's PPO decisions/s, with no spill.
-       - **Status (2026-10-19):** designed and planned, not built.
+       - **Status (2026-10-19): built**, commits d741a5a..c68fd8f on phase3 (Tasks 1–12, then the final review's
+         fixes). New PPO and BC runs are v5. Executed subagent-driven; an Opus review of the whole branch found nothing
+         critical, and its fixes added the checks below.
+         - **Coverage:** commands outside the 20 actions are 1.00% of public FFA's, 1.22% of Team's, 0.88% of Humans
+           vs Nations', 0.82% of ranked 2v2's, 0.62% of Ranked FFA's, 1.31% of Clan Wars' and 0.17% of ranked 1v1's.
+         - **The masks hold at game level:** random mask-legal diplomacy in FFA and Humans vs Nations games; the game
+           refused only intents whose sender died before they executed.
+         - **Labels** (Team fixture `cy6fkbw55W`): 20 requests, 1 renewal, 4 breaks, 21 donations and 1 warship move.
+           - All are legal but one donation, and the legal ones decode back to the human's commands.
+           - That donation is the cooldown read at the window's first tick: the game checked 5 ticks later and
+             accepted it. The mask is never looser than the game for the bot, whose intents execute after its
+             observation.
+         - **One ocean per map:** the map generator marks only the largest water body as ocean, and the others are
+           lakes.
+           - The bot builds warships on ocean cells only, so its moves never drop for their destination.
+           - A human's move of a lake warship labels illegal.
+         - **v4 is unchanged.** v2–v4 read only their own inputs and heads: 57 channels, 25 player features,
+           26 scalars, 15 types and 12 heat maps. A plan defect would have resized them; it was caught before Task 7
+           ran.
+           - `league4a2/avg004000.pt` loads strictly.
+           - A v4 network acts bit-identically on v5 observations.
+         - **Speed** (`speed_check.py --v5`: ranked 1v1, `--minibatches 12`, untrained networks): v5 ran at 88% of
+           v4's PPO decisions/s, 91.9 against 103.9. That is below the 95% budget. Nothing spilled: the allocator peaked
+           at 8.9 of the card's 12 GB, 256 MiB above v4.
+           - **Where the gap is:** v5 took 1.26 ms more per decision.
+             - The simulation took 0.94 ms of it (+24%). An untrained v5 picks uniformly among 20 types, so in 1v1 it
+               allies with tribes (they accept everything), donates to them and breaks alliances. The surviving
+               tribes make a heavier game.
+             - The network's own work took 0.32 ms (+5.5%: +9% in the rollouts, +3% in learning). That is about
+               94.7% of v4.
+           - **User decision (2026-10-19): accept v5 as it is.**
+             - The plan's fallback, a cheaper destination head, would give up part of the move design for a few
+               percent at most, and it can't touch the simulation.
+             - Step 7's first PPO run checks v5's real speed, from a clone that plays like humans, against the 4A runs
+               (113–137 decisions/s).
+         - **For the next steps:**
+           - A v5 learner needs a v5 KL reference: there is no KL across architectures. If v5 ever starts from v4
+             weights, its reference needs a plan.
+           - The random baseline now plays v5's heads: 20 types and 1–100% shares. Results against `random` from
+             before step 6 don't compare.
+           - Before step 7's BC: count the illegal labels per new type on many Team records (the window-start timing,
+             lake warships).
     4. **BC on all modes** with the mode as an input (decision 5a), with 3C's MoE routing test.
     5. **RL specialists, one per mode family, all from that clone** (decision 5, 2026-10-18). Each has its own gate.
        - The families:
