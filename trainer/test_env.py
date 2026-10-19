@@ -14,7 +14,7 @@ from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, DST, FFA, HEALTH, 
                          gate_config, quantize_)
 from scripts.coverage import label_kinds
 from trainer.eval import Scripted
-from trainer.model import ACT_NAMES, v1_spatial
+from trainer.model import ACT_NAMES, DIPLOMACY, DONATE, MAP_OF, REQUEST, ActionDist, RandomPolicy, v1_spatial
 
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
@@ -23,15 +23,25 @@ UNIT_GROUP_V1 = {"City": 0, "Port": 1, "Factory": 2, "Missile Silo": 2, "SAM Lau
 
 
 def random_legal(obs, rng):
-    """Uniformly random legal actions from the masks, as padded-grid [type, cell, target, bin] rows."""
+    """Uniformly random legal actions from the masks, as padded-grid [type, cell, target, bin] rows: a diplomatic
+    action aims at a player of its row of diplomacy_mask (a donation sends 1-100% of the troops), a warship move
+    goes from a cell of its source map to a cell of the destination map, alone or with its fleet."""
     rows = []
-    types, attack, cells = (obs[k].cpu().numpy() for k in ("type_mask", "attack_mask", "cell_mask"))
+    types, attack, cells, diplomacy = (obs[k].cpu().numpy() for k in ("type_mask", "attack_mask", "cell_mask",
+                                                                      "diplomacy_mask"))
     for i in range(types.shape[0]):
         t = rng.choice(np.flatnonzero(types[i]))
-        m = {1: 0, 3: 1, 4: 2}.get(t)
-        cell = rng.choice(np.flatnonzero(cells[i, m])) if m is not None and cells[i, m].any() else 0
-        target = rng.choice(np.flatnonzero(attack[i])) if t == 2 else 0
-        rows.append([t, cell, target, rng.integers(5)])
+        m = int(MAP_OF[t])
+        cell = rng.choice(np.flatnonzero(cells[i, m])) if m >= 0 and cells[i, m].any() else 0
+        target, troops = 0, rng.integers(5)
+        if t == 2:
+            target = rng.choice(np.flatnonzero(attack[i]))
+        elif t in DIPLOMACY:
+            target = rng.choice(np.flatnonzero(diplomacy[i, t - DIPLOMACY[0]]))
+            troops = rng.integers(1, 101) if t == DONATE else 0
+        elif t == MOVE:
+            target, troops = rng.choice(np.flatnonzero(cells[i, DST])), rng.integers(2)
+        rows.append([t, cell, target, troops])
     return np.array(rows, np.int64)
 
 
@@ -176,6 +186,28 @@ class VecEnvTest(unittest.TestCase):
             self.assertEqual(obs["type_mask"].shape, (1, 20))
         finally:
             env.close()
+
+    def test_random_v5_play_drops_no_diplomatic_action(self):
+        """The spec's smoke games: a random v5 policy plays 300 decisions on each setup through real workers."""
+        for config in (RANKED_1V1, FFA, HVN):
+            env = VecEnv(config, workers=1, games_per_worker=1, seed="v5-random")
+            try:
+                policy, sent, dropped = RandomPolicy(env.dims).cuda(), collections.Counter(), collections.Counter()
+                for _ in range(300):
+                    obs = env.obs
+                    act = ActionDist(policy(obs), obs).sample()
+                    invalid = env.step(act.cpu().numpy())[4]
+                    for t, bad in zip(act[:, 0].tolist(), invalid):
+                        sent[t] += 1
+                        dropped[t] += int(bad)
+                for t in DIPLOMACY:
+                    self.assertEqual(dropped[t], 0, (config["playlist"], t))
+                self.assertGreater(sent[REQUEST], 0, config["playlist"])
+                if config is HVN:
+                    self.assertGreater(sent[DONATE], 0)
+                self.assertLessEqual(dropped[MOVE], 0.1 * max(sent[MOVE], 1))
+            finally:
+                env.close()
 
     def test_deltas_match_full_frames(self):
         a = VecEnv(ONION, 1, 2, seed="same")

@@ -9,10 +9,10 @@ from unittest import mock
 import torch
 
 from trainer.control import REPLAYS
-from trainer.env import HVN, ONION, gate_config
+from trainer.env import HVN, ONION, RANKED_1V1, gate_config
 from trainer.eval import Cooldown, label, main, name_players, play, replay_dir, seats_for, summarize, tag, two_bin_sample
 from trainer.model import SPAWN, ActionDist, new_net
-from trainer.test_model import DIMS
+from trainer.test_model import DIMS, DIMS_V5
 
 ONION2 = {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1}
 
@@ -90,6 +90,14 @@ class EvalTest(unittest.TestCase):
                 torch.save({"model": new_net(DIMS, args).state_dict(), "args": args, "update": 1}, path)
                 paths.append(str(path))
             r = play(paths, ONION2, episodes=2, workers=1, games_per_worker=2, seed="mix")
+        self.assertEqual(r["episodes"], 2)
+
+    def test_a_v5_checkpoint_plays_a_match(self):
+        args = {"arch": "v5", "core": "moe", "widths": "64,128,192"}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "v5.pt"
+            torch.save({"model": new_net(DIMS_V5, args).state_dict(), "args": args, "update": 1}, path)
+            r = play([str(path), "random"], RANKED_1V1, episodes=2, workers=1, games_per_worker=2, seed="v5-match")
         self.assertEqual(r["episodes"], 2)
 
     def test_policy_b_can_change_from_one_game_slot_to_the_next(self):
