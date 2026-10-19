@@ -1,6 +1,8 @@
 # Step 7: behaviour cloning on all modes (design)
 
-Designed with the user on 2026-10-19 and approved by them the same day. This is step 7 of the after-4N plan
+Designed with the user and approved by them on 2026-10-19. Planned in
+`docs/superpowers/plans/2026-10-19-step7-bc-all-modes.md` and built in ee3b615, 83d1be9, 889c5c4, c15b765, d4d3a71,
+b996187 and d3e2b41 (Tasks 1-7). This is step 7 of the after-4N plan
 (`docs/superpowers/plans/2026-10-18-after-4n-v035.md`) and PLAN "After 4N" item 4. The numbers below were measured on
 2026-10-19 in `data/v0.35.0/` and in the code of the pinned game (v0.35.2).
 

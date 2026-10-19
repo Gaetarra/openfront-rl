@@ -236,7 +236,7 @@ ingredients (human BC, self-play league, PPO, careful obs/action engineering). R
 13. **Curriculum: Ranked 1v1 → Ranked 2v2 → public FFA/Team with nations + modifiers → augmented/procedural maps.**
     **Changed 2026-10-15 (the user's call):** Ranked 1v1 → FFA and Humans vs Nations against the nations (4N) →
     alliance and donation actions → human data of every mode (public FFA/Team, ranked 2v2) with the MoE routing test
-    → modifiers → bigger and augmented/procedural maps. Public lobbies are where the bot will play (Phase 4, "4N").
+    (**moved to Phase 6's model growth on 2026-10-19**, see "After 4N" item 4) → modifiers → bigger and augmented/procedural maps. Public lobbies are where the bot will play (Phase 4, "4N").
     **Changed 2026-10-18 (after 4N; the user's calls):** v0.35.2 → human games of every mode and their analyses →
     alliance and donation actions → BC on all modes → RL specialists per mode family (ranked 1v1, Ranked FFA, public FFA
     against the nations, Team) → distillation → modifiers → bigger maps (Phase 4, "After 4N").
@@ -1307,7 +1307,8 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
   - a 2v2 setup (a copy of `get2v2Config`), the team relation, and troop and gold donations;
   - a crawl of ranked 2v2 (~670 games/day), then BC on 1v1 + 2v2 with the mode as an input;
   - Compact FFA against Easy and Medium nations, as an evaluation only.
-  - **The routing test** (the brief's idea G):
+  - **The routing test** (the brief's idea G; **moved to Phase 6's model growth, 2026-10-19**: the grown clone of step 7
+    inherits the 3B clone's core, see "After 4N" item 4):
     - the MoE core against a dense core with the same parameters and compute, e.g. 8 SwiGLU experts of 512 → 1024 →
       512 against one dense SwiGLU layer of 512 → 8192 → 512, so that only the router's gates differ;
     - 1v1 + 2v2 is the first place where the router can blend by mode. In 1v1 alone, a tie keeps the MoE by rule;
@@ -2305,7 +2306,112 @@ data, the environment and the Phase 2 bots; Phase 4A needs only 3A and 3B.
              before step 6 don't compare.
            - Before step 7's BC: count the illegal labels per new type on many Team records (the window-start timing,
              lake warships).
-    4. **BC on all modes** with the mode as an input (decision 5a), with 3C's MoE routing test.
+    4. **BC on all modes** with the mode as an input (decision 5a). Designed with the user and approved 2026-10-19;
+       3C's MoE routing test moved to Phase 6 (below).
+       - **Documents:**
+         - design: `docs/superpowers/specs/2026-10-19-bc-all-modes-design.md`;
+         - plan: `docs/superpowers/plans/2026-10-19-step7-bc-all-modes.md`, 8 tasks, executed subagent-driven.
+       - **Built** (all on `phase3`; typecheck clean, bridge tests 83/83 as of Task 3, trainer suite 211 OK at b996187):
+         - ee3b615, Task 1: the index fields the filters need (`playerTeams`, modifiers, disabled units),
+           `trainer.crawl --reindex` to fill them in for the records already there, and the Elo on ranked 1v1 entries
+           only;
+         - 83d1be9, Task 2: the mode input, scalars 26–35 (lobby kind one-hot, players, teams, the nations'
+           difficulty); v5 reads 36 scalars, v2–v4 keep their 26;
+         - 889c5c4, Task 3: the replay imitates two players a game and counts team wins;
+         - c15b765, Task 4: `grow()` and `trainer.bc --grow`: the 3B clone becomes a v5 network;
+         - d4d3a71, Task 5: `trainer.bc` trains on the records of every family in `data/v0.35.0`, with
+           `--mix FAMILY=WORKERS` and the map table `bridge/maptable.ts`;
+         - b996187, Task 6: every statistic per lobby kind, `labels/illegal/<type>`, uniform baselines and the v0.35
+           scoring set;
+         - d3e2b41, Task 7: `trainer.eval`'s meters report policy A's action mix (`types`) and the bridge's refusals
+           per type (`invalid_by_type`), for Gate 7's per-mode action report.
+       - **Decisions taken while building:**
+         - **Disconnected seats:** a window where the seat's player `isDisconnected()` labels UNMAPPED, so it is out of
+           the policy loss (it would teach "do nothing"). The value loss keeps those rows, since the position's target
+           is still the game's true outcome. The 1v1 fixture's seat 0 is disconnected at window 516 only (the pinned
+           test).
+         - **Seat choice:** the best-placed human of each of the two best-placed sides (sides: players in the FFA
+           modes, teams in the team modes, the humans as one side in Humans vs Nations), the winning side first.
+           Placement is alive at the end, then a later `killedAt`, then more peak tiles (`stats.tiles[0]`); eligible
+           means present in the game with peak tiles above 0. A record with fewer than two eligible humans is skipped
+           by its worker. A replay with seats 0 (the scripts) still observes every player. The winning side of
+           `["team", name, ...]` is the team name, written by the game with the string `team()` returns (checked on
+           real Humans vs Nations records: `["team", "Humans", ...]`).
+         - **Value targets:** +1 for a seat on the winning side, −1 otherwise. A nations' win (`["nation", ...]` or
+           `["team", "Nations"]`) is −1 for both players. Team wins used to give every player −1.
+         - **Per lobby kind**, `measure` logs `bc/nll_<kind>`, `bc/nll_common_<kind>` and `router/<kind>_<i>`, plus
+           `bc/nll_common` over all kinds. `bc/nll_common*` is the NLL over the legal rows labelled with one of v4's 15
+           types: the like-for-like key between the 3B clone and a v5 network, which Gate 7's score bars read. Other
+           statistics stay global.
+         - **Uniform baselines:** `bc/nll_<map>_cell_uniform`, `bc/nll_<type>_target_uniform` (the four diplomatic
+           types) and `bc/nll_warship_dst_uniform` (the log of the legal choices). The donation share's baseline is
+           the constant log 100 = 4.605 (100 unmasked bins), so it has no key: Gate 7's "share" bar compares
+           `bc/nll_donate_share` with 4.605.
+         - **`labels/illegal/<type>`:** the share of the rows labelled with that type that fall outside the masks
+           (step 6's leftover check). Each new type's value goes into PLAN after the grown start's score.
+         - **`scripts/coverage.py`** keeps the old pin's held-out set (the old `data/` store, games before
+           2026-10-01): it is Gate 3B's coverage measure and reads only the records' intents. The v0.35 coverage per
+           mode is `mode_analysis`'s out-of-set row.
+         - **The real index needs a reindex:** `data/v0.35.0/index.jsonl` has no step 7 fields yet, so `trainer.bc` and
+           `--score` stop with "run python -m trainer.crawl --reindex" until it is run after the crawl.
+         - **Validation:** `--val-workers N` with N > 0 runs one worker per family that has held-out records, 2 games
+           each (0 turns validation off). A new run validates once at update 0: the forgetting trigger's baseline.
+         - **Player table:** `slots_of` sizes it over every usable record of the store (1 + the most humans + nations
+           + bots of any entry; nations "default" count as max(the map's nations, the humans)), also for a run without
+           `--mix`. `bridge/obs.ts` throws when a smallID does not fit, so a wrong size fails loudly; the smoke run
+           checks it on real records.
+         - **Growing:** besides the design's rules, `skip.bias` copies v4's 12 values into v5's 13 (the 13th, the
+           warship source map, keeps v5's init). `grow` refuses a v4 tensor it would drop.
+         - **The map table** (`bridge/maptable.ts`, `trainer.env.map_table()`): 135 maps, the specialists' grid
+           [192, 256]. Of the first crawl's 8,386 entries, 3,404 are on maps too big for the grid (Brain Rot 284,
+           Europe 164, Africa 162, and others).
+         - **The scoring set:** `SCORE_CUTOFF` = 2026-10-19 12:00 UTC; held-out (5% by game ID) usable records; each
+           family on min(2, its records) workers × 6 games × 1,500 steps (`SCORE_LAYOUT`); the result JSON adds
+           `"families"` {family: record count}. The old set (games before 2026-10-01 in `data/`) can be scored only
+           from the pin (`pins/v0.34.23`).
+       - **Expected records per family** (the design, from the first crawl and the top-up's expectation; fitting the
+         grid and without modifiers) and the night's mix (14 workers × 6 games, ~32M rows):
+
+         | Family | Records | Workers | Rows | Passes |
+         |---|---|---|---|---|
+         | Ranked 1v1 | ~5,800 | 3 | ~6.9M | ~0.7 |
+         | Ranked 2v2 | ~1,470 | 2 | ~4.6M | ~1.9 |
+         | Ranked FFA | ~420 | 1 | ~2.3M | ~2 |
+         | Public FFA | ~4,400 | 4 | ~9.2M | ~0.5 |
+         | Team and Clan Wars | ~1,560 | 3 | ~6.9M | ~1.2 |
+         | Humans vs Nations | ~280 | 1 | ~2.3M | ~3 |
+
+         - **Counted (usable training and held-out records per family): to be filled in after the reindex** (operation 2
+           below). The mix changes if a family is far from the expectation.
+       - **The routing test moved to Phase 6's model growth** (2026-10-19, the user's choice of the grown start): the
+         grown clone inherits the 3B clone's core (8 SwiGLU experts). Only a run from scratch could pick another core,
+         and it would lose what ~21,000 older 1v1 records taught. The next time the core is chosen is Phase 6's model
+         growth. Step 7 still answers 3C's other question, whether the modes crowd into the same experts: it logs
+         `router/<kind>_<i>`. If they crowd into the experts the 3B clone already favours (one took 54–77% of the
+         weight), Phase 6's growth starts with upcycling, a load-balancing term or router noise.
+       - **Operations that remain** (each needs the user's go; in order):
+         1. **The crawl ends** (`runs\crawl035b-done.txt`). Then
+            `.venv/Scripts/python -m trainer.crawl --reindex`.
+         2. **Counts:** the usable training and held-out records per family, into the line above.
+         3. **Smoke run** (~10 min, PC idle):
+            `.venv/Scripts/python -m trainer.bc --run bc7-smoke --init checkpoints/bc3b-v4/latest.pt --grow --lr 1e-4 --mix ranked1v1=3 ranked2v2=2 rankedffa=1 ffa=4 team=3 hvn=1 --games-per-worker 6 --updates 60 --val-every 30`.
+            - Check for finite losses, the `perf/samples_per_s`, and the peak GPU memory (Task Manager's dedicated
+              and shared memory).
+            - Then delete `checkpoints/bc7-smoke` and `runs/bc7-smoke`.
+         4. **The grown start and its score** (~20 min):
+            - Create it (it also validates the start):
+              `.venv/Scripts/python -m trainer.bc --run bc7 --init checkpoints/bc3b-v4/latest.pt --grow --lr 1e-4 --mix ranked1v1=3 ranked2v2=2 rankedffa=1 ffa=4 team=3 hvn=1 --games-per-worker 6 --updates 0`.
+            - Score it:
+              `.venv/Scripts/python -m trainer.bc --score checkpoints/bc3b-v4/latest.pt checkpoints/bc7/latest.pt`.
+            - **Pass:** the two clones' `bc/nll_common_ranked1v1` agree to ~1e-3.
+            - **Into PLAN:** each new type's `labels/illegal/<type>`.
+         5. **The night** (~15 h): `explorer.exe runs\bc7.cmd`, with Windows Update paused. It resumes `bc7`, so it
+            keeps the run's learning rate and mix (24,000 updates).
+            - **The forgetting trigger** (the design's risk): in the first 2,500 updates,
+              `val/bc/nll_common_ranked1v1` must stay within +0.02 of its update-0 value.
+            - If it doesn't, stop the run and restart it from the grown start at `--lr 5e-5`, or with more ranked 1v1
+              workers.
+         6. **Gate 7** (~3 h): `explorer.exe runs\gate7.cmd`, then the results go into PLAN against the design's bars.
     5. **RL specialists, one per mode family, all from that clone** (decision 5, 2026-10-18). Each has its own gate.
        - The families:
          - ranked 1v1 (the league);
@@ -2338,6 +2444,10 @@ stagger). Gate A: frozen-world harness matches 100% per nuke. Gate B (metric): i
 - nations join the league as opponents;
 - per-mode specialist fine-tunes if they win;
 - a bigger model: the S/M/L CNN picked from BC scaling curves, and more MoE experts by upcycling;
+- 3C's MoE routing test (moved here 2026-10-19, "After 4N" item 4): the MoE core against a dense core of equal
+  parameters and compute, run when the core is chosen again with this model growth. If step 7's `router/<kind>_<i>`
+  shows the modes crowding into the experts the 3B clone favours, the growth starts with upcycling, a load-balancing
+  term or router noise;
 - the player transformer's attention cap (64 players, Phase 3A) revisited for FFA and Team:
   - Casual lobbies often hold more than 64 real players (the user, 2026-10-03).
   - Tribes are fillers: harmless, and usually extinct before the end, so they never need a slot. The relevance rule

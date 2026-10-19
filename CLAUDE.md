@@ -92,10 +92,12 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 .venv/Scripts/python -m trainer.ctl pause|resume|save|stop|throttle half|status
 .venv/Scripts/python -m trainer.crawl --modes ranked1v1 rankedffa ffa=0.25   # records of the pin's simulation into data/v0.35.0/; MODE=SHARE keeps that share of a mode's games, the default is ranked1v1 alone; --limit N per mode (hours: detach)
 .venv/Scripts/python -m trainer.crawl --purge                  # remove deleted players' records from every store (daily while data is kept)
-.venv/Scripts/python -m trainer.bc --run bc3-moe --core moe --workers 14 --games-per-worker 6   # behaviour cloning: one pass over data/ (~14 h); same control page
-.venv/Scripts/python -m trainer.bc --run bc3b --core moe --twin moe-swiglu --workers 14 --games-per-worker 6   # two new networks on the same windows (PLAN 3B): checkpoints/bc3b and checkpoints/bc3b-moe-swiglu
-.venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000 --warmup 100   # fine-tune a checkpoint (its network, a fresh optimizer)
-.venv/Scripts/python -m trainer.bc --score checkpoints/bc/update0060000.pt checkpoints/bc3-moe/latest.pt   # NLL per head and bucket on the fixed held-out set (~10 min); table + runs/score/*.json
+.venv/Scripts/python -m trainer.crawl --reindex                # refill the index fields step 7 added (playerTeams, modifiers, disabled units) for the entries already in data/v0.35.0; run it with no crawl writing the index, after the crawl ends
+.venv/Scripts/python -m trainer.bc --run bc3-moe --core moe --workers 14 --games-per-worker 6   # behaviour cloning: one pass over data/ (~14 h); same control page. The next three lines ran before step 7, when trainer.bc read the old pin's ranked 1v1 store data/: they are the record of what ran, and today's trainer.bc does not read data/, so don't rerun them expecting it
+.venv/Scripts/python -m trainer.bc --run bc3b --core moe --twin moe-swiglu --workers 14 --games-per-worker 6   # (before step 7) two new networks on the same windows (PLAN 3B): checkpoints/bc3b and checkpoints/bc3b-moe-swiglu
+.venv/Scripts/python -m trainer.bc --run probe --init checkpoints/bc/update0060000.pt --updates 2000 --warmup 100   # (before step 7) fine-tune a checkpoint (its network, a fresh optimizer)
+.venv/Scripts/python -m trainer.bc --run bc7 --init checkpoints/bc3b-v4/latest.pt --grow --lr 1e-4 --mix ranked1v1=3 ranked2v2=2 rankedffa=1 ffa=4 team=3 hvn=1 --games-per-worker 6 --updates 24000   # step 7's BC night (PLAN "After 4N" item 4; ~15 h): the 3B clone grown into v5, on the records of every mode in data/v0.35.0, one family per replay worker (after the crawl and --reindex); the user starts it with explorer.exe runs\bc7.cmd, which resumes the run created with --updates 0
+.venv/Scripts/python -m trainer.bc --score checkpoints/bc3b-v4/latest.pt checkpoints/bc7/latest.pt   # NLL per head, bucket and lobby kind on the fixed v0.35 held-out set (~10 min); table + runs/score/*.json
 .venv/Scripts/python -m trainer.eval --a checkpoints/bc/update0060000.pt --b scripted   # ranked 1v1 match, 256 games
 .venv/Scripts/python -m trainer.eval --setup onion --a random   # Phase 1 setup: one seat vs 3 Easy nations
 .venv/Scripts/python -m trainer.ppo --run ppo-bc2 --setup ranked1v1 --init checkpoints/bc/update0060000.pt --opponent checkpoints/bc/update0060000.pt --kl-coef 0.2 --lr 1e-4 --ent-coef 0 --workers 16 --games-per-worker 2 --updates 5000   # PPO from the Gate A clone (settings: docs/PLAN.md, Phase 2 results)
@@ -135,6 +137,15 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
 - BC: an update averages `--accum` replay windows (default 8), and the learning rate warms up, then decays (cosine)
   over `--updates` (default: one pass over the training records). BC checkpoints from before Phase 3 cannot resume;
   start from them with `--init`. Runs with the same `--seed` replay the same records in the same order.
+  - `--init <v4 checkpoint> --grow` trains that network grown into v5 (`grow()` in `trainer/model.py`): every trained
+    v4 weight is kept, the new inputs get zero weights and the 5 new types a bias of -8, so the grown network starts as
+    the v4 one (its logits for v4's 15 types and 12 maps, pointers, shares, value and router gates match). A resume
+    loads the v5 checkpoint, without `--grow`.
+  - `--mix FAMILY=WORKERS ...` gives each replay worker one family's records: `ranked1v1`, `ranked2v2`, `rankedffa`,
+    `ffa`, `team` (with Clan Wars) and `hvn`. A family's share of the rows is its share of the workers. Without it,
+    every worker plays ranked 1v1.
+  - `--val-workers N` (N > 0) validates with one worker per family that has held-out records, 2 games each. A new run
+    validates once at update 0: the baseline of the forgetting check.
 - Networks: new runs record theirs in the checkpoint (`args["arch"]`, `"core"`): v1 is Phase 2, v2 is Phase 3A (5 troop
   sizes), v3 is Phase 3B (100 troop shares), v4 adds every action (15 types, 12 heat maps, a retreat pointer) and the
   3B inputs (57 channels, 26 scalars); `--init` keeps the checkpoint's. A checkpoint without `"arch"` (Phase 2) loads
@@ -144,7 +155,7 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
   - v5 (step 6) adds the diplomacy and warship actions: 20 types, 13 heat maps, four diplomacy pointers, a donate kind
     of the share head, and an autoregressive warship-move head (a source heat map, a destination map conditioned on the
     chosen source, alone or fleet). It also reads their inputs: 64 channels and 31 player features. New PPO and BC
-    runs are v5.
+    runs are v5. Step 7 adds the mode input: v5 reads 36 scalars, and v2–v4 keep reading their 26.
   - v2–v4 read only their own inputs and heads (`V4_CHANNELS`, `V4_FEATURES`, `V4_SCALARS`, `V4_ACTS`, `V4_MAPS` in
     `trainer/model.py`), so their checkpoints play unchanged. Later steps append inputs after v5's in the same way.
   - A v5 learner needs a v5 `--kl-ref`: there is no KL across architectures.
@@ -201,6 +212,13 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     and who asked to renew.
   - `cell_mask` is [N, 14, H·W]: the 13 heat maps, then the warship destination (`DST`, ocean cells).
     `diplomacy_mask` is [N, 4, P].
+- Observations (step 7, the mode input; scalars 26–35):
+  - The lobby kind, one-hot (26–32: ranked 1v1, ranked 2v2, Ranked FFA, Clan Wars, FFA, Team, Humans vs Nations), from
+    the config's ranked type, mode and teams; then log2(non-bot players) / 8, log2(teams) / 6 (0 in the FFA modes) and
+    the nations' difficulty (Easy 0.25 to Impossible 1, 0 without nations).
+  - A replayed record and a training game of the same mode give the same values; the training setups are `ranked1v1`,
+    `ffa` and `hvn`. Item 5 has to know one mismatch: the FFA training setup has 4 seats, where public lobbies have
+    ~25 humans (the players input tells them apart).
 - GPU memory (12 GB card):
   - PPO keeps its rollout rows in pinned system RAM (`HostRows`), with the cell masks as bits (`pack_bits`). A worker
     thread copies each minibatch to the GPU on its own stream while the previous one trains.
@@ -230,16 +248,42 @@ Python: `.venv` at the repo root, `pip install -r requirements.txt` (PyTorch CUD
     parallel op and takes the cores from the workers' simulation (lever 2 lost 14% that way).
   - Absolute speeds swing ±15% with the PC's state (a PC cold after hours idle runs fast at first): credit a speed
     change only with `scripts/ab_speed.py`.
-- `trainer.bc --score` always scores the same rows: the held-out records of games started before 2026-10-01, 12 workers
-  x 6 games, seed "score", 2,000 steps. Compare checkpoints within one scoring run (a purge can shift the rows).
+- `trainer.bc --score` always scores the same rows: the usable held-out (5% by game ID) records of `data/v0.35.0`
+  started before 2026-10-19 12:00 UTC, each family on min(2, its records) workers x 6 games, seed "score", 1,500 steps
+  (`SCORE_CUTOFF`, `SCORE_LAYOUT` in `trainer/bc.py`). Every statistic is also logged per lobby kind. The result JSON
+  adds the records per family. Compare checkpoints within one scoring run (a purge can shift the rows).
+  - `bc/nll_common*` (and `bc/nll_common_<kind>`) is the NLL over the legal rows labelled with one of v4's 15 types: the
+    like-for-like key between a v4 and a v5 network.
+  - `labels/illegal/<type>` is the share of the rows labelled with that type that fall outside the masks.
+  - The cell, target and destination heads come with uniform baselines (`bc/nll_<map>_cell_uniform`,
+    `bc/nll_<type>_target_uniform`, `bc/nll_warship_dst_uniform`). The donation share's baseline is log 100 = 4.605.
+  - The old set (games before 2026-10-01 in `data/`, 12 workers x 6 games, 2,000 steps) can be scored only from
+    `pins/v0.34.23`.
 - Records live in one store per simulation (`trainer/crawl.py`), since they desync at a pin with another one. Each
   store holds `records/`, `index.jsonl` (one entry per record, with its mode) and `skipped.txt`.
   - `data/` holds the old pin's records, v0.34.17-v0.34.22. They replay in full only in `pins/v0.34.23` ("Game
     version"), where Step 4's BC night and its scoring ran (user decision 2026-10-10, PLAN 3B).
-  - `trainer.bc` reads only `data/` (ranked 1v1), and `--score` stays valid from the pin (its records predate
-    2026-10-01).
+  - Until step 7, `trainer.bc` read only `data/` (ranked 1v1); the old score set is valid only from the pin.
   - `data/v0.35.0/` holds v0.35.0-v0.35.2 records of every mode, which replay in this checkout. The crawler fills it
-    and skips records of other game commits (`SIM_COMMITS`). BC on all modes will read it (PLAN "After 4N" item 4).
+    and skips records of other game commits (`SIM_COMMITS`). `trainer.bc` reads it by family (step 7, PLAN "After 4N"
+    item 4) and keeps the records whose map fits the specialists' grid (`bridge/maptable.ts`,
+    `trainer.env.map_table()`, [192, 256]) and that set no modifier but Compact and disable no unit.
+    - Its `index.jsonl` needs `python -m trainer.crawl --reindex` once, for the fields the filters read; `trainer.bc`
+      and `--score` stop with that message until then.
+    - `scripts/coverage.py` keeps the old store's held-out set (games before 2026-10-01): it is Gate 3B's coverage
+      measure. The v0.35 coverage per mode is `mode_analysis`'s out-of-set row.
+- Replays in BC (step 7): a record imitates two players a game, not every human.
+  - The best-placed human of each of the two best-placed sides (players in the FFA modes, teams in the team modes, the
+    humans as one side in Humans vs Nations), the winning side first. Placement: alive at the end, then a later
+    `killedAt`, then more peak tiles (`stats.tiles[0]`); a human is eligible with peak tiles above 0. A record with
+    fewer than two eligible humans is skipped by its worker.
+  - Team wins count: a seat on the winning side (`["team", name, ...]`, with `name` as `team()` returns it) is +1, every
+    other seat -1; a nations' win (`["nation", ...]` or `["team", "Nations"]`) is -1 for both players.
+  - A window where the seat's player is disconnected (`isDisconnected()`) labels UNMAPPED, so the policy loss skips it
+    (it would teach "do nothing"); the value loss keeps the row.
+  - Elo (`--min-elo`, `crawl.elo`) is computed over the ranked 1v1 entries only.
+  - The player table fits the run's largest game (`slots_of`, over every usable record of the store); `bridge/obs.ts`
+    throws when a smallID does not fit.
   - On an upgrade that changes the simulation, give the crawler the new `SIM`, `SIM_COMMITS` and `SINCE`; one that
     does not only adds its commit to `SIM_COMMITS`.
 - Mixed runs (`--mix SETUP=WORKERS ...`, PLAN 4N): workers play the setups in the order given; rows are game-major
