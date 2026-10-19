@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { TileRef } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameMap";
-import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { GameMapSize, UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { GameMapType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/Maps.gen";
 import { Intent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
-import { Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
+import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
+import { Player, Unit } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 import { Act, attackMask, decodeAction, N_ACTS, seatMasks, typeMask } from "./actions";
 import { EnvGame, seatClientID } from "./game";
-import { ONION, script, spawnCell } from "./testkit";
+import { FFA, LONE, ONION, publicGame, script, spawnCell, spawnSeats } from "./testkit";
 
 const ticks = (env: EnvGame, n: number) => {
   for (let i = 0; i < n; i++) env.tickWith([]);
@@ -230,4 +232,61 @@ test("a move drops without a warship in the source cell or water of its sea in t
     [Act.MoveWarships, home[0], far[0], 2], [Act.MoveWarships, home[0], 1e9, 0]]) {
     assert.equal(decode(env, seat, a).valid, false, `${a}`);
   }
+});
+
+test("a move drops only for a warship in a lake: the ocean is one water body on every map", async () => {
+  // The map generator marks only the largest water body Ocean, so the trainer's destination mask (every cell with an
+  // ocean tile) holds water of an ocean warship's body always; a warship in a lake (a port on a lake shore builds one)
+  // is the one source whose every destination is in another body.
+  const env = await publicGame({ ...FFA, seats: 1 }, GameMapType.BetweenTwoSeas, GameMapSize.Compact, LONE);
+  spawnSeats(env);
+  const g = env.game;
+  const seat = env.seats[0];
+  const bodies = new Map<number, TileRef>(); // water body -> one water tile of it
+  const oceanOf = new Map<number, number[]>(); // cell -> its ocean tiles
+  g.forEachTile((t) => {
+    if (!g.isWater(t)) return;
+    const body = g.getWaterComponent(t);
+    if (body !== null && !bodies.has(body)) bodies.set(body, t);
+    if (!g.isOcean(t)) return;
+    const cell = env.frame.cellOf(t);
+    oceanOf.set(cell, [...(oceanOf.get(cell) ?? []), t]);
+  });
+  const oceans = [...bodies.values()].filter((t) => g.isOcean(t)).length;
+  assert.equal(oceans, 1, "one ocean body");
+  assert.ok(bodies.size >= 2, "and some lakes");
+  const sources = new Map<number, Unit>(); // cell -> the warship in it, one in each water body
+  for (const tile of bodies.values()) {
+    const cell = env.frame.cellOf(tile);
+    assert.ok(!sources.has(cell), "one warship per source cell");
+    sources.set(cell, seat.buildUnit(UnitType.Warship, tile, { patrolTile: tile }));
+  }
+  const masks = masksOf(env, seat);
+  assert.equal(masks.types[Act.MoveWarships], 1);
+  const [srcCells, dstCells] = [[...sources.keys()], [...oceanOf.keys()]];
+  const rng = new PseudoRandom(5);
+  const pairs = 2000;
+  const count = { valid: 0, otherSea: 0, other: 0, lakeValid: 0, oceanDropped: 0 };
+  for (let i = 0; i < pairs; i++) {
+    const [src, dst, fleet] = [rng.randElement(srcCells), rng.randElement(dstCells), rng.nextInt(0, 2)];
+    const ship = sources.get(src)!;
+    const sea = g.getWaterComponent(ship.tile())!;
+    const { intent, valid } = decodeAction(g, seat, env.frame, masks, [Act.MoveWarships, src, dst, fleet]);
+    if (valid) {
+      assert.ok(intent?.type === "move_warship");
+      assert.ok(g.isOcean(intent.tile) && g.hasWaterComponent(intent.tile, sea) && env.frame.cellOf(intent.tile) === dst);
+      count.valid++;
+      if (!g.isOcean(ship.tile())) count.lakeValid++;
+    } else if (!oceanOf.get(dst)!.some((t) => g.hasWaterComponent(t, sea))) {
+      count.otherSea++;
+      if (g.isOcean(ship.tile())) count.oceanDropped++;
+    } else {
+      count.other++;
+    }
+  }
+  console.log(`warship moves on Between Two Seas (${bodies.size} water bodies, ${oceans} ocean): ${pairs} pairs, ${count.valid} valid, ` +
+    `${count.otherSea} other-sea drops (${((100 * count.otherSea) / pairs).toFixed(1)}%), ${count.other} other drops`);
+  assert.equal(count.other, 0);
+  assert.deepEqual([count.lakeValid, count.oceanDropped], [0, 0], "ocean ships never drop, lake ships always");
+  assert.ok(count.valid > 0 && count.otherSea > 0);
 });

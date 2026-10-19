@@ -99,6 +99,8 @@ export class RecordGame {
   desync = false;
   /** Commands dropped because the seat already had MAX_PENDING queued. */
   dropped = 0;
+  /** The command behind each seat's label of the last labels() call (undefined for a no-op). */
+  chosen: (StampedIntent | undefined)[] = [];
   private readonly pending: StampedIntent[][];
   private readonly seatOf: Map<string, number>;
 
@@ -142,8 +144,9 @@ export class RecordGame {
         else this.pending[s].push(intent);
       }
     }
+    this.chosen = this.env.seats.map((_, s) => this.pending[s].shift());
     return this.env.seats.map((seat, s) => {
-      const intent = this.pending[s].shift();
+      const intent = this.chosen[s];
       return intent === undefined ? [Act.Noop, 0, 0, 0] : labelOf(this.env, seat, intent);
     });
   }

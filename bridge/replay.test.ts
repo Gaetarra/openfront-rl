@@ -9,7 +9,7 @@ import { StampedIntent, Turn } from "../OpenFront_Source_Code/openfrontio/packag
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
 import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/SharedUtil";
 import { GameRecord, GameRecordSchema } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/WireSchemas";
-import { Act, BUILDS, DIPLOMACY, seatMasks } from "./actions";
+import { Act, BUILDS, decodeAction, DIPLOMACY, seatMasks } from "./actions";
 import { EnvGame, seatClientID } from "./game";
 import { labelOf, OUT_OF_SET, readRecord, RecordGame, shareOf, UNMAPPED } from "./replay";
 import { gameConfigOf } from "./setups";
@@ -173,28 +173,52 @@ test("every command maps to an action, except gold donations, rejects, embargoes
   }
 });
 
-test("a blanked Team record replays in sync, and its diplomacy and warship labels are legal", async () => {
+test("a blanked Team record replays in sync, and its diplomacy and warship labels are legal and decode back to the command", async () => {
   const rg = await RecordGame.create(readRecord(TEAM), 256, 160);
+  const { game, frame, slots } = rg.env;
   const seen = new Map<number, number>();
   const legal = new Map<number, number>();
+  let mismatches = 0;
   while (!rg.done) {
     rg.env.observe(rg.window === 0);
-    const masks = rg.env.seats.map((s) => seatMasks(rg.env.game, s, rg.env.slots));
-    rg.labels().forEach(([t, cell, target, troops], i) => {
+    const masks = rg.env.seats.map((s) => seatMasks(game, s, slots));
+    rg.labels().forEach((label, i) => {
+      const [t, cell, target, troops] = label;
       if (t < Act.AllianceRequest) return;
       seen.set(t, (seen.get(t) ?? 0) + 1);
+      const seat = rg.env.seats[i];
       const k = DIPLOMACY.indexOf(t);
       const ok = k >= 0
-        ? masks[i].diplomacy[k * rg.env.slots + target] === 1
-        : rg.env.seats[i].units(UnitType.Warship).some((u) => rg.env.frame.cellOf(u.tile()) === cell)
-          && rg.env.frame.tilesOf(target).some((tile) => rg.env.game.isWater(tile)) && troops <= 1;
-      if (ok) legal.set(t, (legal.get(t) ?? 0) + 1);
+        ? masks[i].diplomacy[k * slots + target] === 1
+        : seat.units(UnitType.Warship).some((u) => frame.cellOf(u.tile()) === cell)
+          && frame.tilesOf(target).some((tile) => game.isOcean(tile)) && troops <= 1;
+      if (!ok) return;
+      legal.set(t, (legal.get(t) ?? 0) + 1);
+      // The label decoded under its window's masks is the human's command, where the mapping is exact.
+      const human = rg.chosen[i]!;
+      const { intent } = decodeAction(game, seat, frame, masks[i], label);
+      const same = (() => {
+        if (intent === null) return false;
+        if (intent.type === "donate_troops" && human.type === "donate_troops") {
+          const sent = human.troops ?? game.config().defaultDonationAmount(seat);
+          return intent.recipient === human.recipient && Math.abs(intent.troops! - sent) <= 0.01 * seat.troops();
+        }
+        if ("recipient" in intent && "recipient" in human) return intent.recipient === human.recipient;
+        if (intent.type === "move_warship" && human.type === "move_warship") return frame.cellOf(intent.tile) === frame.cellOf(human.tile);
+        return false;
+      })();
+      if (!same) mismatches++;
     });
     rg.advance();
   }
   assert.equal(rg.desync, false);
-  // The record's 20 requests, 1 renewal, 4 breaks, 21 donations and 1 move; one donation label is not legal under the masks.
+  // The record's 20 requests, 1 renewal, 4 breaks, 21 donations and 1 move. One donation label is not legal under the
+  // masks: the window's masks are read at its first tick, 97 ticks after the seat's previous donation to that
+  // recipient, so the donation cooldown still blocks it, while the game checks at execution, a few ticks later, and
+  // accepts it. So a mask is the game's own check read up to one step early: never looser than the game for the bot,
+  // whose intents execute after its observation.
   const sorted = (m: Map<number, number>) => [...m].sort((a, b) => a[0] - b[0]);
   assert.deepEqual(sorted(seen), [[Act.AllianceRequest, 20], [Act.RenewAlliance, 1], [Act.BreakAlliance, 4], [Act.DonateTroops, 21], [Act.MoveWarships, 1]]);
   assert.deepEqual(sorted(legal), [[Act.AllianceRequest, 20], [Act.RenewAlliance, 1], [Act.BreakAlliance, 4], [Act.DonateTroops, 20], [Act.MoveWarships, 1]]);
+  assert.equal(mismatches, 0, "legal labels that do not decode back to the human's command");
 });

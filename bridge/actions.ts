@@ -1,6 +1,7 @@
 import { TileRef } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameMap";
 import { TerraNullius, UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
 import { Intent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
+import { toInt } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/Util";
 import { Attack, Game, Player, Unit } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 import { canBuildTransportShip } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/TransportShipUtils";
 import { CellFrame } from "./frame";
@@ -194,7 +195,9 @@ export function decodeAction(game: Game, seat: Player, frame: CellFrame, masks: 
     if (type === Act.RenewAlliance) return { intent: { type: "allianceExtension", recipient }, valid: true };
     if (type === Act.BreakAlliance) return { intent: { type: "breakAlliance", recipient }, valid: true };
     if (!isShare(share)) return DROP;
-    return { intent: { type: "donate_troops", recipient, troops: (share / 100) * seat.troops() }, valid: true };
+    // The game removes toInt(troops) from the sender and refuses a donation that removes none.
+    const troops = (share / 100) * seat.troops();
+    return toInt(troops) < 1n ? DROP : { intent: { type: "donate_troops", recipient, troops }, valid: true };
   }
   if (!Number.isInteger(cell) || cell < 0 || cell >= frame.n) return DROP;
   if (type === Act.MoveWarships) {
