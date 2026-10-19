@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from coverage import BUILDS, IN_SET  # scripts/coverage.py: the 15 actions
+from coverage import BUILDS, IN_SET  # scripts/coverage.py: the 20 actions
 
 ROOT = Path(__file__).resolve().parents[1]
 STORE = ROOT / "data" / "v0.35.0"
@@ -137,7 +137,7 @@ def play(_args):
         n = sum(c.values())
         inside = sum(v for k, v in c.items() if k in IN_SET or (k.startswith("build:") and k[6:] in BUILDS))
         out_of_set[m] = 1 - inside / n
-    rows.append(["outside the 15 actions", *(f"{out_of_set[m]:.2%}" for m in modes)])
+    rows.append(["outside the 20 actions", *(f"{out_of_set[m]:.2%}" for m in modes)])
     print("Commands per player-minute (players who used it at least once):\n" + table(rows, ["", *modes]))
     rows = [[f"gold: {g}", *(f"{acc[m]['gold'][i] / acc[m]['gold'].sum():.1%}" for m in modes)]
             for i, g in enumerate(GOLD)]

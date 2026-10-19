@@ -1,7 +1,8 @@
-"""Gate 3B's coverage (docs/PLAN.md, 3B): the share of human commands outside the 15 actions, over every held-out record
-of the scoring set. It replays the extractor's label stream (bridge/replay.ts RecordGame.labels: windows of STEP_TICKS
-turns, at most MAX_PENDING commands queued per seat, the server's disconnect notices skipped) without the simulation,
-so it reads all the records in seconds (test: trainer/test_env.py checks it against the extractor's labels):
+"""Gate 3B's coverage (docs/PLAN.md, 3B): the share of human commands outside the actions (15 until step 6, 20 with its
+diplomacy and warship moves), over every held-out record of the scoring set. It replays the extractor's label stream
+(bridge/replay.ts RecordGame.labels: windows of STEP_TICKS turns, at most MAX_PENDING commands queued per seat, the
+server's disconnect notices skipped) without the simulation, so it reads all the records in seconds (test:
+trainer/test_env.py checks it against the extractor's labels):
 
   .venv/Scripts/python scripts/coverage.py
 """
@@ -13,13 +14,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 STEP_TICKS, MAX_PENDING = 5, 3  # bridge/game.ts, bridge/replay.ts
-IN_SET = {"spawn", "attack", "boat", "upgrade_structure", "cancel_attack"}
+IN_SET = {"spawn", "attack", "boat", "upgrade_structure", "cancel_attack", "allianceRequest", "allianceExtension",
+          "breakAlliance", "donate_troops", "move_warship"}  # the 20 actions' intents, besides the builds
 BUILDS = {"City", "Defense Post", "Missile Silo", "Factory", "Port", "SAM Launcher", "Warship", "Atom Bomb",
           "Hydrogen Bomb"}  # bridge/actions.ts BUILDS
 
 
 def label_kinds(record):
-    """The kind of each command the extractor labels in a record, in order: "in" for the 15 actions, otherwise the
+    """The kind of each command the extractor labels in a record, in order: "in" for the 20 actions, otherwise the
     command's type (build_unit:<unit> for builds outside the set)."""
     seat = {p["clientID"]: s for s, p in enumerate(record["info"]["players"])}
     windows = collections.defaultdict(list)
@@ -50,7 +52,7 @@ def main():
     for p in paths:
         count.update(label_kinds(json.loads(gzip.decompress(p.read_bytes()))))
     n = sum(count.values())
-    print(f"{len(paths)} held-out records, {n:,} commands: {(n - count['in']) / n:.2%} outside the 15 actions "
+    print(f"{len(paths)} held-out records, {n:,} commands: {(n - count['in']) / n:.2%} outside the 20 actions "
           "(Gate 3B: < 0.5%)")
     for kind, k in count.most_common():
         if kind != "in":
