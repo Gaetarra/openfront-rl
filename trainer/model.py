@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, Distribution
 
-from trainer.env import BUILDING_TYPES, BUILDINGS, MAP_TYPES, MOVE, OWNER
+from trainer.env import BUILDING_TYPES, BUILDINGS, DST, MAP_TYPES, MOVE, OWNER
 
 ACT_NAMES = ["noop", "spawn", "attack", "boat", "build_city", "build_defense_post", "build_silo", "build_factory",
              "build_port", "build_sam", "build_warship", "atom_bomb", "hydrogen_bomb", "upgrade", "retreat",
@@ -24,6 +24,7 @@ MAP_NAMES = ("spawn", "boat", "city", "defense_post", "silo", "factory", "port",
 MAP_OF = torch.full((len(ACT_NAMES),), -1, dtype=torch.long)
 MAP_OF[list(MAP_TYPES)] = torch.arange(len(MAP_TYPES))  # each type's heat map; -1 for types without a cell
 MAP_TYPES_T = torch.tensor(MAP_TYPES)
+MOVE_MAP = int(MAP_OF[MOVE])  # the heat map of a warship move's source cell
 SIZES = (10, 25, 50, 75, 100)  # the troop sizes of the Phase 2 and 3A networks, in percent of current troops
 SHARES = 100  # the Phase 3B network's troop shares: 1-100% (PLAN 3B)
 # Each percent's nearest size in log scale, as the Phase 2-3A labels were made: 1-15% -> 10, 16-35 -> 25, 36-61 -> 50,
@@ -38,7 +39,7 @@ V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
 V4_CHANNELS, V4_FEATURES = 57, 25  # the v2-v4 networks' inputs: step 6 appends channels and features after these
 D = 128  # width of the player tokens
 ATTENDED = 64  # players the transformer attends to (the most relevant ones); every player keeps a token
-DS = 64  # hidden width of the troop-share head, per kind (attack, boat)
+DS = 64  # hidden width of the troop-share head, per kind (attack, boat; v5 adds donate)
 CORES = ("dense", "moe", "moe-swiglu")  # Policy cores: one 512 x 512 layer, 8 such experts, 8 SwiGLU experts
 
 
@@ -170,17 +171,26 @@ class Policy(nn.Module):
       100 shares; otherwise the 3A network's 5 sizes from the core alone.
     - full=True (arch v4, 3B step 3): V4_ACTS action types, V4_MAPS heat maps (the first of MAP_TYPES), the retreat
       pointer and every input; otherwise the 5 types, 3 heat maps, OLD_CHANNELS channels and OLD_SCALARS scalars of the networks before.
-    - Every network here reads V4_FEATURES player features (and v4 V4_CHANNELS channels), whatever the dims say: the
+    - v5=True (step 6) implies shares and full and reads every input the dims give (channels, player features,
+      scalars). It has all 20 action types and 13 heat maps, four pointers for the diplomatic types, and a third share
+      kind, the donation's. A warship move also takes a destination: out["move"](src) decodes one more map and an
+      alone-or-fleet choice from the decoder features at the source's block, FiLMed by the core.
+    - The older networks read V4_FEATURES player features (and v4 V4_CHANNELS channels), whatever the dims say: the
       inputs later steps append are ignored."""
 
-    def __init__(self, dims, widths=(64, 128, 192), core="moe", shares=False, full=False):
+    def __init__(self, dims, widths=(64, 128, 192), core="moe", shares=False, full=False, v5=False):
         super().__init__()
+        shares, full = shares or v5, full or v5
         n_scal = dims["scalars"]
         c_in, n_feat = V4_CHANNELS, V4_FEATURES  # later steps append inputs: these networks read only theirs
-        if not full:  # v2 and v3 networks were trained on the inputs before 3B step 3, part 2
+        if v5:
+            c_in, n_feat = dims["channels"], dims["playerFeatures"]
+        elif not full:  # v2 and v3 networks were trained on the inputs before 3B step 3, part 2
             c_in, n_scal = OLD_CHANNELS, OLD_SCALARS
         c1, c2, c3 = widths
-        self.full, self.n_maps, self.n_feat = full, V4_MAPS if full else OLD_MAPS, n_feat
+        self.full, self.v5, self.n_feat = full, v5, n_feat
+        self.n_maps = len(MAP_TYPES) if v5 else V4_MAPS if full else OLD_MAPS
+        self.kinds = 3 if v5 else 2  # the share head's kinds: attack, boat, (v5) donate
         self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
         self.s1 = nn.Sequential(Res(c1), Res(c1))
         self.d2, self.s2 = nn.Conv2d(c1, c2, 2, stride=2), nn.Sequential(Res(c2), Res(c2))
@@ -197,11 +207,11 @@ class Policy(nn.Module):
         self.u3, self.u2 = nn.Conv2d(c3, c2, 1), nn.Conv2d(c2, c1, 1)
         self.shuffle = nn.Conv2d(c1, self.n_maps * 16, 1)
         self.skip = nn.Conv2d(c_in, self.n_maps, 1)
-        self.type_head = nn.Linear(512, V4_ACTS if full else OLD_ACTS)
+        self.type_head = nn.Linear(512, len(ACT_NAMES) if v5 else V4_ACTS if full else OLD_ACTS)
         self.shares = shares
-        if shares:  # per kind (attack, boat): a hidden layer reading the core and one player's token, then the shares
-            self.share_h, self.share_t = nn.Linear(512, 2 * DS), nn.Linear(D, 2 * DS)
-            self.share_out = nn.ModuleList(nn.Linear(DS, SHARES) for _ in range(2))
+        if shares:  # per kind: a hidden layer reading the core and one player's token, then the shares
+            self.share_h, self.share_t = nn.Linear(512, self.kinds * DS), nn.Linear(D, self.kinds * DS)
+            self.share_out = nn.ModuleList(nn.Linear(DS, SHARES) for _ in range(self.kinds))
             troop_heads = tuple(self.share_out)
         else:
             self.bin_head = nn.Linear(512, 2 * len(SIZES))
@@ -209,9 +219,16 @@ class Policy(nn.Module):
         self.query, self.key = nn.Linear(512, D), nn.Linear(D, D)
         self.retreat_query = nn.Linear(512, D) if full else None  # the retreat pointer: which target's attack to cancel
         self.value_head = nn.Linear(512, 1)
+        new = []
+        if v5:  # the diplomatic pointers' queries and the warship move's destination and fleet heads
+            self.diplomacy_query = nn.Linear(512, len(DIPLOMACY) * D)
+            self.dst_film = nn.Linear(512 + c1, 2 * c1)
+            self.dst_shuffle, self.dst_skip = nn.Conv2d(c1, 16, 1), nn.Conv2d(c_in, 1, 1)
+            self.fleet_head = nn.Linear(512 + c1, 2)
+            new = [self.diplomacy_query, self.dst_film, self.dst_shuffle, self.dst_skip, self.fleet_head]
         # Policy outputs start at zero: a uniform policy over legal actions.
         for layer in (self.type_head, *troop_heads, self.shuffle, self.skip, self.query,
-                      *([self.retreat_query] if full else [])):
+                      *([self.retreat_query] if full else []), *new):
             nn.init.zeros_(layer.weight)
             nn.init.zeros_(layer.bias)
         # Built last, so for a given seed both cores start every other layer from the same weights (the A/B).
@@ -246,9 +263,16 @@ class Policy(nn.Module):
         h = F.relu(h)
         g = f2 + F.interpolate(self.u3(F.relu(f3)), scale_factor=2)
         g = f1 + F.interpolate(self.u2(F.relu(g)), scale_factor=2)
+        shared = g  # the decoder features before the core's FiLM: a warship move reads them at its source
         gamma, beta = self.film(h).chunk(2, 1)
         g = g * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]
-        maps = F.pixel_shuffle(self.shuffle(F.relu(g)), 4) + self.skip(x)
+        if self.v5:  # one pass over the input for the maps' skip and the destination's: they are 14 outputs of one conv
+            skips = F.conv2d(x, torch.cat([self.skip.weight, self.dst_skip.weight]),
+                             torch.cat([self.skip.bias, self.dst_skip.bias]))
+            skip, dst_skip = skips.split([self.n_maps, 1], 1)
+        else:
+            skip = self.skip(x)
+        maps = F.pixel_shuffle(self.shuffle(F.relu(g)), 4) + skip
         keys = self.key(tokens)
         ptr = torch.einsum("nd,npd->np", self.query(h), keys) / math.sqrt(D)
         out.update(type=self.type_head(h), maps=maps.flatten(2), ptr=ptr, value=self.value_head(h).squeeze(1))
@@ -256,11 +280,37 @@ class Policy(nn.Module):
             out["retreat"] = torch.einsum("nd,npd->np", self.retreat_query(h), keys) / math.sqrt(D)
         if self.shares:
             n, p = tokens.shape[:2]
-            z = F.relu(self.share_h(h).view(n, 1, 2, DS) + self.share_t(tokens).view(n, p, 2, DS))  # [N, P, kind, DS]
+            z = F.relu(self.share_h(h).view(n, 1, self.kinds, DS)
+                       + self.share_t(tokens).view(n, p, self.kinds, DS))  # [N, P, kind, DS]
             out["shares"] = torch.stack([head(z[:, :, k]) for k, head in enumerate(self.share_out)], 1)
         else:
             out["bins"] = self.bin_head(h).view(-1, 2, len(SIZES))
+        if self.v5:
+            queries = self.diplomacy_query(h).view(-1, len(DIPLOMACY), D)
+            out["diplomacy"] = torch.einsum("nkd,npd->nkp", queries, keys) / math.sqrt(D)
+            out["move"] = functools.partial(self._move, dst_skip, shared, h, torch.is_autocast_enabled("cuda"))
         return out
+
+    def _move(self, dst_skip, shared, h, cast, src):
+        """The destination logits [N, cells] and the alone-or-fleet logits [N, 2] of a warship move from the cells `src`
+        [N]. The decoder features at the source's 1/4-resolution block and the core's vector h FiLM the shared
+        features, which a map decode like `maps` turns into one map (`dst_skip`: the destination's skip connection from the
+        input, computed with the maps' in the forward). It runs outside the forward's autocast, so it
+        enters bf16 autocast when the forward ran under it (`cast`; the decoder's features are fp32 there, as
+        interpolate runs in fp32). Any index of src is valid: a row that is not a move has its
+        term masked out."""
+        n, c1, hq, wq = shared.shape
+        H, W = dst_skip.shape[-2:]
+        block = src // W // (H // hq) * wq + src % W // (W // wq)  # [N]: the source cell's block of the 1/4 grid
+        with torch.autocast("cuda", torch.bfloat16, enabled=cast):
+            if cast:  # bf16 halves what the film and the decode keep and receive in the backward pass
+                shared = shared.to(torch.bfloat16)
+            at = shared.permute(0, 2, 3, 1).reshape(n, hq * wq, c1).gather(1, block[:, None, None].expand(-1, 1, c1))[:, 0]
+            z = torch.cat([h, at.to(h.dtype)], 1)
+            gamma, beta = self.dst_film(z).chunk(2, 1)
+            d = shared * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]
+            dst = F.pixel_shuffle(self.dst_shuffle(F.relu(d)), 4) + dst_skip
+            return dst.flatten(1), self.fleet_head(z)
 
 
 class PolicyV1(nn.Module):
@@ -322,6 +372,16 @@ class RandomPolicy(nn.Module):
 
     def forward(self, obs):
         n, dev = obs["type_mask"].shape[0], obs["type_mask"].device
+        if "diplomacy_mask" in obs:  # step 6's observations: every type, heat map and pointer they hold masks for
+            hw = obs["cell_mask"].shape[-1]
+            return {"type": torch.zeros(obs["type_mask"].shape, device=dev),
+                    "maps": torch.zeros(n, obs["cell_mask"].shape[1] - 1, hw, device=dev),  # the last mask is the DST
+                    "shares": torch.zeros(n, 3, obs["attack_mask"].shape[1], SHARES, device=dev),
+                    "ptr": torch.zeros(obs["attack_mask"].shape, device=dev),
+                    "retreat": torch.zeros(obs["retreat_mask"].shape, device=dev),
+                    "diplomacy": torch.zeros(obs["diplomacy_mask"].shape, device=dev),
+                    "move": lambda src: (torch.zeros(n, hw, device=dev), torch.zeros(n, 2, device=dev)),
+                    "value": torch.zeros(n, device=dev)}
         return {"type": torch.zeros(n, V4_ACTS, device=dev),  # the 15 types every head can complete
                 "maps": torch.zeros(n, V4_MAPS, obs["cell_mask"].shape[-1], device=dev),
                 "bins": torch.zeros(n, 2, self.n_bins, device=dev),
@@ -357,7 +417,15 @@ class ActionDist:
     - A Phase 3B network ("shares" in its outputs, [N, 2, P, SHARES]) reads the share from a player's token: the
       attack's target, or the main owner of the boat's landing cell (obs "owners").
     - The Phase 2 and 3A networks ("bins", [N, 2, 5]) pick one of the five SIZES per kind, whatever the target: a
-      single token."""
+      single token.
+    A v5 network (step 6) also has "diplomacy" [N, 4, P] (a pointer per diplomatic type, REQUEST..DONATE), a third
+    share kind (a donation reads its recipient's token) and "move", a function of the source cell that gives the
+    destination map and the alone-or-fleet logits of a warship move. Its source comes from the source heat map, and
+    the destination and fleet read it (`src`: sampled in `complete`, the stored action's in `log_prob`; entropy and KL
+    use the `src` they are given, so they are one-sample estimates over sources). In place of "move", `out` may hold
+    "dst_logits" and "fleet_logits" computed at a known source (the KL reference).
+    The actions: [type, 0, row, 0] for request, renew and break; [DONATE, 0, row, share]; [MOVE, source cell,
+    destination cell, fleet] (fleet 1: every warship sharing the anchor's patrol point)."""
 
     def __init__(self, out, obs):
         n_types, n_maps = out["type"].shape[-1], out["maps"].shape[1]
@@ -366,55 +434,88 @@ class ActionDist:
         self.ptr = _masked(out["ptr"].float(), obs["attack_mask"])
         self.retreat = _masked(out["retreat"].float(), obs["retreat_mask"]) if "retreat" in out else None
         self.map_types = _on(MAP_TYPES_T, out["type"].device)[:n_maps]  # the action type of each heat map
+        self.diplo = _masked(out["diplomacy"].float(), obs["diplomacy_mask"]) if "diplomacy" in out else None  # [N, 4]
+        self.has_move = "move" in out or "dst_logits" in out
+        if self.has_move:
+            self._move_fn = out.get("move")
+            self._given = (out["dst_logits"], out["fleet_logits"]) if "dst_logits" in out else None
+            self._dst_mask = obs["cell_mask"][:, DST]
+        self.src = None  # every row's source cell from the last complete / sample
+        self._moved = None  # (key, src, (destination, fleet)): the last move head evaluation
         self.shares = "shares" in out
         if self.shares:
-            # batch [N, 2, P]: attack, boat x token. Checking the logits would wait for the GPU.
+            # batch [N, kinds, P]: attack, boat (v5: donate) x token. Checking the logits would wait for the GPU.
             self.troops = Categorical(logits=out["shares"].float(), validate_args=False)
             self.owner = obs["owners"][:, 0].long()  # [N, cells]: each cell's main owner
         else:
             self.troops = Categorical(logits=out["bins"].float()[:, :, None], validate_args=False)  # batch [N, 2, 1]
 
-    def _at(self, target, cell):
-        """The troop logits [N, 2, choices] of an attack on `target` and a boat to `cell`."""
+    def _at(self, target, cell, donee=None):
+        """The troop logits [N, kinds, choices] of an attack on `target`, a boat to `cell` and (v5) a donation to
+        `donee`, which is `target` when not given (a stored action keeps its recipient in the target slot)."""
         logits = self.troops.logits
         if not self.shares:
             return logits[:, :, 0]
-        who = torch.stack([target, self.owner.gather(1, cell[:, None])[:, 0]], 1)  # [N, 2]
+        who = [target, self.owner.gather(1, cell[:, None])[:, 0]]
+        if logits.shape[1] == 3:
+            who.append(target if donee is None else donee)
+        who = torch.stack(who, 1)  # [N, kinds]
         return logits.gather(2, who[:, :, None, None].expand(-1, -1, 1, SHARES))[:, :, 0]
 
     def _weights(self):
-        """[N, 2, tokens]: how likely an attack or a boat reads each token's troop head, given its type."""
+        """[N, kinds, tokens]: how likely an attack, a boat or a donation reads each token's troop head, given its type."""
         if not self.shares:
             return torch.ones_like(self.troops.logits[..., 0])
         boat = torch.zeros_like(self.ptr.probs).scatter_add_(1, self.owner, self.cells.probs[:, 1])
-        return torch.stack([self.ptr.probs, boat], 1)
+        kinds = [self.ptr.probs, boat]
+        if self.diplo is not None:
+            kinds.append(self.diplo.probs[:, DONATE - REQUEST])
+        return torch.stack(kinds, 1)
 
-    def troop_sample(self, target, cell):
-        """Percents [N, 2] sampled for an attack on `target` and a boat to `cell`."""
-        k = Categorical(logits=self._at(target, cell), validate_args=False).sample()
+    def troop_sample(self, target, cell, donee=None):
+        """Percents [N, kinds] sampled for an attack on `target`, a boat to `cell` and (v5) a donation to `donee`."""
+        k = Categorical(logits=self._at(target, cell, donee), validate_args=False).sample()
         return k + 1 if self.shares else _on(SIZE_PERCENT, k.device)[k]
 
     def size_log_probs(self, target, cell):
-        """Log-probabilities [N, 2, 5] of the five SIZES for an attack on `target` and a boat to `cell`. A 100-share
+        """Log-probabilities [N, kinds, 5] of the five SIZES for an attack on `target` and a boat to `cell`. A 100-share
         network's shares are summed over the percents each size stands for (SIZE_OF), for like-for-like scores."""
         lp = self._at(target, cell).log_softmax(-1)
         return (lp[..., None, :] + _on(SIZE_RANGES, lp.device)).logsumexp(-1) if self.shares else lp
 
     def troop_log_prob(self, target, cell, percent, smooth=0.0, sizes=False):
-        """[N, 2]: the log-probability that an attack on `target` or a boat to `cell` sends `percent`.
+        """[N, kinds]: the log-probability that an attack on `target`, a boat to `cell` or a donation to `target` sends
+        `percent`.
         - sizes: of the size `percent` falls in (SIZE_OF), for every network;
         - smooth (100-share networks): the label keeps 1 - smooth of its weight and puts smooth / 2 on each neighbouring
           percent (back on itself at 1% and 100%); the result is the expected log-probability."""
         if sizes or not self.shares:
             size = _on(SIZE_OF, percent.device)[percent.clamp(0, SHARES)]
-            return self.size_log_probs(target, cell).gather(2, size[:, None, None].expand(-1, 2, 1))[:, :, 0]
+            lp = self.size_log_probs(target, cell)
+            return lp.gather(2, size[:, None, None].expand(-1, lp.shape[1], 1))[:, :, 0]
         lp = self._at(target, cell).log_softmax(-1)
-        k = (percent - 1).clamp(0, SHARES - 1)[:, None, None].expand(-1, 2, 1)
+        k = (percent - 1).clamp(0, SHARES - 1)[:, None, None].expand(-1, lp.shape[1], 1)
         if not smooth:
             return lp.gather(2, k)[:, :, 0]
         near = (k + torch.tensor([-1, 0, 1], device=k.device)).clamp(0, SHARES - 1)  # [N, 2, 3]
         weight = torch.tensor([smooth / 2, 1 - smooth, smooth / 2], device=lp.device).expand(near.shape)
         return (torch.zeros_like(lp).scatter_add_(2, near, weight) * lp).sum(2)
+
+    def _move_at(self, src):
+        """The destination and fleet distributions of a warship move from the cells `src` [N]. One evaluation serves
+        every call with the same src tensor (log_prob, entropy and KL of a minibatch). Given logits ("dst_logits")
+        are for the source they were computed at: src is ignored."""
+        key = (src.data_ptr(), src.stride(), src.shape, src._version)
+        if self._moved is not None and self._moved[0] == key:
+            return self._moved[2]
+        dst, fleet = self._given if self._given is not None else self._move_fn(src)
+        moved = (_masked(dst.float(), self._dst_mask), Categorical(logits=fleet.float(), validate_args=False))
+        self._moved = (key, src, moved)  # src is kept alive, so its memory cannot be reused under the same key
+        return moved
+
+    def _likely_src(self):
+        """The source map's most likely cell of every row, the source of entropy and KL when none is given."""
+        return self.cells.logits[:, MOVE_MAP].argmax(-1)
 
     def complete(self, t):
         """Actions [N, 4] of types t, their arguments sampled from this policy."""
@@ -424,33 +525,63 @@ class ActionDist:
         zero = torch.zeros_like(t)
         cell = torch.where(m >= 0, c.gather(1, m.clamp(min=0)[:, None])[:, 0], zero)
         target = torch.where(t == ATTACK, p, torch.where(t == RETREAT, r, zero))
-        pct = self.troop_sample(p, c[:, 1])
+        donee = None
+        if self.diplo is not None:
+            d = self.diplo.sample()  # [N, 4]
+            donee = d[:, DONATE - REQUEST]
+            asks = (t >= REQUEST) & (t <= DONATE)
+            target = torch.where(asks, d.gather(1, (t - REQUEST).clamp(0, len(DIPLOMACY) - 1)[:, None])[:, 0], target)
+        pct = self.troop_sample(p, c[:, 1], donee)
         troops = torch.where(t == ATTACK, pct[:, 0], torch.where(t == BOAT, pct[:, 1], zero))
+        if self.diplo is not None:
+            troops = torch.where(t == DONATE, pct[:, 2], troops)
+        if self.has_move:
+            self.src = c[:, MOVE_MAP]
+            dst, fleet = self._move_at(self.src)
+            target = torch.where(t == MOVE, dst.sample(), target)
+            troops = torch.where(t == MOVE, fleet.sample(), troops)
         return torch.stack([t, cell, target, troops], 1)
 
     def sample(self):
         return self.complete(self.type.sample())
 
-    def log_prob(self, actions, smooth=0.0, sizes=False):
-        """log pi(actions) [N]; `smooth` and `sizes` as in troop_log_prob. Every type must be one this network has."""
+    def log_prob(self, actions, smooth=0.0, sizes=False, src=None):
+        """log pi(actions) [N]; `smooth` and `sizes` as in troop_log_prob. Every type must be one this network has. A
+        move's destination and fleet read the stored source (the action's cell). `src` may be the `src` of the sample
+        that made `actions` (equal to the cell on every move): the move head is then evaluated once for this call, the
+        entropy and the KL, which get the same tensor."""
         t, cell, target, troops = actions.unbind(1)
         m = _on(MAP_OF, t.device)[t]
+        zero_t = torch.zeros_like(t)
+        move = t == MOVE
+        who = torch.where(move, zero_t, target) if self.has_move else target  # a move's target is a cell, not a player
         lc = self.cells.log_prob(cell[:, None].expand(-1, self.cells.logits.shape[1]))  # [N, maps]
-        lt = self.troop_log_prob(target, cell, troops, smooth, sizes)
+        lt = self.troop_log_prob(who, cell, troops, smooth, sizes)
         zero = torch.zeros_like(lc[:, 0])
-        lr = self.retreat.log_prob(target) if self.retreat is not None else zero
-        return (self.type.log_prob(t)
-                + torch.where(m >= 0, lc.gather(1, m.clamp(min=0)[:, None])[:, 0], zero)
-                + torch.where(t == ATTACK, self.ptr.log_prob(target) + lt[:, 0], zero)
-                + torch.where(t == BOAT, lt[:, 1], zero)
-                + torch.where(t == RETREAT, lr, zero))
+        lr = self.retreat.log_prob(who) if self.retreat is not None else zero
+        lp = (self.type.log_prob(t)
+              + torch.where(m >= 0, lc.gather(1, m.clamp(min=0)[:, None])[:, 0], zero)
+              + torch.where(t == ATTACK, self.ptr.log_prob(who) + lt[:, 0], zero)
+              + torch.where(t == BOAT, lt[:, 1], zero)
+              + torch.where(t == RETREAT, lr, zero))
+        if self.diplo is not None:
+            k = (t - REQUEST).clamp(0, len(DIPLOMACY) - 1)[:, None]
+            ld = self.diplo.log_prob(who[:, None].expand(-1, len(DIPLOMACY))).gather(1, k)[:, 0]
+            lp = lp + torch.where((t >= REQUEST) & (t <= DONATE), ld, zero) + torch.where(t == DONATE, lt[:, 2], zero)
+        if self.has_move:
+            dst, fleet = self._move_at(cell if src is None else src)
+            lp = lp + torch.where(move, dst.log_prob(torch.where(move, target, zero_t))
+                                  + fleet.log_prob(torch.where(move, troops, zero_t)), zero)
+        return lp
 
-    def entropy(self):
+    def entropy(self, src=None):
         """Exact joint entropy, H(type) + sum_k p(k) H(args | k), with every head divided by the log of its size so
         the 4k-cell maps do not drown out the type head. A troop head's entropy is averaged over the tokens it reads,
         weighted by the pointer or the boat map. p(k) and those weights are detached: otherwise the bonus pushes the
         type head toward the types with the most arguments (attack, boat) and away from no-op, as it did in Phase 1,
-        and the pointer toward the targets with the least certain shares."""
+        and the pointer toward the targets with the least certain shares.
+        A warship move's destination and fleet terms are those of the source `src` [N] (PPO: the rollout's sampled
+        one), by default the source map's most likely cell: a one-sample estimate over sources."""
         hc = self.cells.entropy() / math.log(self.cells.logits.shape[-1])  # [N, maps]
         hp = self.ptr.entropy() / math.log(max(self.ptr.logits.shape[-1], 2))
         ht = (self._weights().detach() * self.troops.entropy()).sum(2) / math.log(self.troops.logits.shape[-1])
@@ -459,22 +590,37 @@ class ActionDist:
              + pt[:, ATTACK] * (hp + ht[:, 0]) + pt[:, BOAT] * ht[:, 1])
         if self.retreat is not None:
             h = h + pt[:, RETREAT] * self.retreat.entropy() / math.log(max(self.retreat.logits.shape[-1], 2))
+        if self.diplo is not None:
+            hd = self.diplo.entropy() / math.log(max(self.diplo.logits.shape[-1], 2))  # [N, 4]
+            h = h + (pt[:, REQUEST:DONATE + 1] * hd).sum(1) + pt[:, DONATE] * ht[:, 2]
+        if self.has_move:
+            dst, fleet = self._move_at(self._likely_src() if src is None else src)
+            h = h + pt[:, MOVE] * (dst.entropy() / math.log(dst.logits.shape[-1]) + fleet.entropy() / math.log(2))
         return h
 
-    def kl(self, ref):
+    def kl(self, ref, src=None):
         """Exact KL(self || ref) of the joint action, KL(type) + sum_k p(k) KL(args | k); a troop head's KL is averaged
         over the tokens it reads, weighted by this policy's pointer or boat map. The one-sample estimate from the taken
         action is not usable: it explodes when that action is one this policy all but rules out and ref does not,
-        which a spread-out 49k-cell map makes common."""
-        if self.shares != ref.shares or self.type.logits.shape != ref.type.logits.shape:
+        which a spread-out 49k-cell map makes common.
+        A warship move's destination and fleet terms are those of the source `src` [N], by default the source map's
+        most likely cell, for both policies; a `ref` made of "dst_logits" must have been computed at that source."""
+        if self.shares != ref.shares or self.type.logits.shape != ref.type.logits.shape \
+                or (self.diplo is None) != (ref.diplo is None) or self.has_move != ref.has_move:
             raise ValueError("the KL needs two networks with the same troop head and actions")
         kc = _kl(self.cells, ref.cells)  # [N, maps]
-        kt = (self._weights() * _kl(self.troops, ref.troops)).sum(2)  # [N, 2]
+        kt = (self._weights() * _kl(self.troops, ref.troops)).sum(2)  # [N, kinds]
         pt = self.type.probs
         k = (_kl(self.type, ref.type) + (pt[:, self.map_types] * kc).sum(1)
              + pt[:, ATTACK] * (_kl(self.ptr, ref.ptr) + kt[:, 0]) + pt[:, BOAT] * kt[:, 1])
         if self.retreat is not None:
             k = k + pt[:, RETREAT] * _kl(self.retreat, ref.retreat)
+        if self.diplo is not None:
+            k = k + (pt[:, REQUEST:DONATE + 1] * _kl(self.diplo, ref.diplo)).sum(1) + pt[:, DONATE] * kt[:, 2]
+        if self.has_move:
+            src = self._likely_src() if src is None else src
+            (dst, fleet), (ref_dst, ref_fleet) = self._move_at(src), ref._move_at(src)
+            k = k + pt[:, MOVE] * (_kl(dst, ref_dst) + _kl(fleet, ref_fleet))
         return k
 
 
@@ -486,8 +632,8 @@ def _kl(p, q):
 
 def arch_of(args):
     """The network a run's settings describe: arch v1 (Phase 2), v2 (Phase 3A, 5 troop sizes), v3 (Phase 3B, 100
-    troop shares) or v4 (Phase 3B step 3, 100 troop shares and 15 actions). Phase 2 checkpoints predate "arch": they
-    are PolicyV1."""
+    troop shares), v4 (Phase 3B step 3, 100 troop shares and 15 actions) or v5 (step 6, 20 actions). Phase 2
+    checkpoints predate "arch": they are PolicyV1."""
     return {"arch": args.get("arch", "v1"), "core": args.get("core", "dense"), "widths": args["widths"]}
 
 
@@ -497,7 +643,8 @@ def new_net(dims, args):
     widths = tuple(int(w) for w in spec["widths"].split(","))
     if spec["arch"] == "v1":
         return PolicyV1(dims, widths)
-    return Policy(dims, widths, spec["core"], shares=spec["arch"] in ("v3", "v4"), full=spec["arch"] == "v4")
+    return Policy(dims, widths, spec["core"], shares=spec["arch"] in ("v3", "v4", "v5"), full=spec["arch"] == "v4",
+                  v5=spec["arch"] == "v5")
 
 
 CORE_NAMES = {"dense": "dense core", "moe": "Soft-MoE core (8 experts)",
@@ -509,8 +656,8 @@ def describe(args):
     spec = arch_of(args)
     if spec["arch"] == "v1":
         return "the Phase 2 network"
-    troops = "100 troop shares" if spec["arch"] in ("v3", "v4") else "5 troop sizes"
-    actions = ", 15 actions" if spec["arch"] == "v4" else ""
+    troops = "100 troop shares" if spec["arch"] in ("v3", "v4", "v5") else "5 troop sizes"
+    actions = {"v4": ", 15 actions", "v5": ", 20 actions"}.get(spec["arch"], "")
     return f"player transformer, {CORE_NAMES[spec['core']]}, {troops}{actions}"
 
 

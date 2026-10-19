@@ -11,8 +11,8 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 from trainer.env import FFA, HVN, ONION, ROOT
 from trainer.model import PolicyV1
-from trainer.ppo import (MAY_CHANGE, HostRows, Outcomes, cap_binds, gae, main, mix_of, pack_bits, parse_args, parser,
-                         resume_args, run_info, seat_rows, unpack_bits)
+from trainer.ppo import (MAY_CHANGE, HostRows, Outcomes, cap_binds, gae, main, mix_of, network_args, pack_bits,
+                         parse_args, parser, resume_args, run_info, seat_rows, unpack_bits)
 
 
 class RunInfoTest(unittest.TestCase):
@@ -273,6 +273,12 @@ class GaeTest(unittest.TestCase):
         self.assertAlmostEqual(float(adv[1, 0]), 0.1, places=6)
 
 
+class NetworkArgsTest(unittest.TestCase):
+    def test_new_runs_are_v5(self):
+        argv = ["--run", "unittest-network-args"]
+        self.assertEqual(network_args(parser(), argv, parse_args(argv)).arch, "v5")
+
+
 class SmokeTest(unittest.TestCase):
     RUN = "unittest-smoke"
 
@@ -291,7 +297,7 @@ class SmokeTest(unittest.TestCase):
         main(common + ["--updates", "2"])
         first = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
         self.assertEqual(first["update"], 2)
-        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v4", "moe"), "a new run records its network")
+        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v5", "moe"), "a new run records its network")
         self.assertEqual(first["global_step"], 2 * 16 * 2)
         # 32 decisions do not finish a game: the unfinished games are skipped on resume, so no seed is played twice
         self.assertEqual(first["episodes"], [1, 1])

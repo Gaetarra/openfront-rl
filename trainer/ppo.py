@@ -147,7 +147,7 @@ def resume_args(p, argv, saved, may_change):
 
 def network_args(p, argv, a):
     """A new run's network settings. With --init they are the checkpoint's: its weights decide the network, and a
-    different --core or --widths given alongside is refused. Without it, a Phase 3B network (100 troop shares, 15
+    different --core or --widths given alongside is refused. Without it, a step 6 network (100 troop shares, 20
     actions) from --core and --widths. A new run never overwrites another: a folder that holds a run's checkpoint is
     refused."""
     if a.init:
@@ -159,7 +159,7 @@ def network_args(p, argv, a):
                              f"{spec['widths']}): drop {', '.join('--' + k for k in clash)}")
         vars(a).update(spec)
     else:
-        a.arch = "v4"
+        a.arch = "v5"
     if (ROOT / "checkpoints" / a.run / "latest.pt").exists():
         raise SystemExit(f"checkpoints/{a.run} already holds a run: add --resume to continue it, or start a new one "
                          f"with another --run name (or delete the folder)")

@@ -301,7 +301,7 @@ class MainTest(unittest.TestCase):
         self.run_main(self.common + ["--updates", "3"])
         first = self.latest()
         self.assertEqual((first["kind"], first["update"]), ("bc", 3))
-        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v4", "moe"))
+        self.assertEqual((first["args"]["arch"], first["args"]["core"]), ("v5", "moe"))
         self.assertEqual(first["global_step"], 3 * 2 * 2)  # 3 updates of 2 windows of 2 rows
         self.assertEqual(self.seeds[0], "bc-1-u0", "runs with one seed replay the same records in the same order")
         self.run_main(self.common + ["--updates", "4", "--resume"])

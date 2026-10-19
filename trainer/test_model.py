@@ -1,3 +1,4 @@
+import contextlib
 import math
 import tempfile
 import unittest
@@ -7,12 +8,14 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from trainer.env import BUILDINGS, N_CHANNELS, ROOT
-from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, MASK_VALUE, OLD_CHANNELS, OLD_SCALARS, RETREAT,
-                           SHARES, SIZE_OF, SIZES, SPAWN, V4_CHANNELS, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE,
-                           load_net, new_net, relevance, v1_spatial)
+from trainer.env import BUILDINGS, DST, N_CHANNELS, ROOT
+from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, DIPLOMACY, DONATE, MAP_OF, MASK_VALUE, MOVE, MOVE_MAP,
+                           OLD_CHANNELS, OLD_SCALARS, REQUEST, RETREAT, SHARES, SIZE_OF, SIZES, SPAWN, V4_CHANNELS,
+                           V4_FEATURES, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, describe, load_net, new_net,
+                           relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 26, "acts": 5}
+DIMS_V5 = {"channels": N_CHANNELS, "playerFeatures": 31, "scalars": 26}
 N, P, H, W = 6, 5, 32, 32
 
 
@@ -44,7 +47,14 @@ def fake_obs(device="cuda", seed=0):
     obs["retreat_mask"] = torch.zeros(N, P, dtype=torch.bool)
     obs["scalars"] = torch.cat([obs["scalars"], torch.rand(N, 10, generator=g)], 1)  # the 10 scalars of 3B part 2
     new = torch.randint(0, 65, (N, N_CHANNELS - OLD_CHANNELS, H, W), generator=g).to(torch.uint8)
-    obs["spatial"] = torch.cat([obs["spatial"], new], 1)  # the 8 channels of 3B part 2
+    obs["spatial"] = torch.cat([obs["spatial"], new], 1)  # the channels of 3B part 2 and step 6
+    # step 6's inputs and masks: 6 player features, 5 types (none legal), the warship source and destination maps, and
+    # who each diplomatic type could be aimed at
+    obs["players"] = torch.cat([obs["players"], torch.rand(N, P, 6, generator=g) * (obs["players"][..., :1] > 0)], 2)
+    obs["type_mask"] = F.pad(obs["type_mask"], (0, 5))
+    obs["cell_mask"] = torch.cat([obs["cell_mask"], torch.rand(N, 2, H * W, generator=g) < 0.1], 1)
+    obs["cell_mask"][0] = False
+    obs["diplomacy_mask"] = (torch.rand(N, 4, P, generator=g) < 0.5) & (obs["players"][:, None, :, 0] > 0)
     return {k: v.to(device) for k, v in obs.items()}
 
 
@@ -52,7 +62,7 @@ def nets(dims=DIMS):
     """One network of every kind."""
     return {"v1": PolicyV1(dims), "dense": Policy(dims, core="dense"), "moe": Policy(dims, core="moe"),
             "v3": Policy(dims, shares=True), "swiglu": Policy(dims, core="moe-swiglu", shares=True),
-            "v4": Policy(dims, shares=True, full=True)}
+            "v4": Policy(dims, shares=True, full=True), "v5": Policy(DIMS_V5, v5=True)}
 
 
 def randomized(net):
@@ -75,25 +85,52 @@ def exact_fp32(test):
                              setattr(torch.backends.cuda.matmul, "allow_tf32", flags[1])))
 
 
-def brute_kl(p_out, q_out, obs, troops):
-    """Per row, the sum over every joint action of p log(p / q); `troops` are the percents a troop head can send."""
-    hw, players = obs["cell_mask"].shape[-1], obs["attack_mask"].shape[-1]
+class FakeMove:
+    """A "move" head: the destination logits and the fleet logits of each row, plus the source cell's index on one
+    destination's logit and on the fleet's, so the destination depends on the source."""
+
+    def __init__(self, dst, fleet):
+        self.dst, self.fleet = dst, fleet
+        self.dst_bump = torch.zeros(dst.shape[-1])
+        self.dst_bump[5] = 0.3
+        self.fleet_bump = torch.tensor([0.0, 0.2])
+
+    def __call__(self, src):
+        return self.dst + src[:, None] * self.dst_bump, self.fleet + src[:, None] * self.fleet_bump
+
+    def row(self, i):
+        return FakeMove(self.dst[i:i + 1], self.fleet[i:i + 1])
+
+
+def joint_actions(n_types, hw, players, troops):
+    """Every joint action of a network with n_types types, a hw-cell grid and `players` player rows."""
     acts = [[0, 0, 0, 0]]
-    for t in range(1, p_out["type"].shape[-1]):
-        if t == ATTACK:
+    for t in range(1, n_types):
+        if t == ATTACK or t == DONATE:
             acts += [[t, 0, p, s] for p in range(players) for s in troops]
         elif t == BOAT:
             acts += [[t, c, 0, s] for c in range(hw) for s in troops]
-        elif t == RETREAT:
+        elif t == RETREAT or t in DIPLOMACY:
             acts += [[t, 0, p, 0] for p in range(players)]
+        elif t == MOVE:
+            acts += [[t, c, d, f] for c in range(hw) for d in range(hw) for f in (0, 1)]
         else:
             acts += [[t, c, 0, 0] for c in range(hw)]
-    acts = torch.tensor(acts)
+    return torch.tensor(acts)
+
+
+def repeated(d, i, n):
+    """Row i of an output or observation dict, repeated n times."""
+    return {k: v.row(i) if isinstance(v, FakeMove) else v[i:i + 1].expand(n, *v.shape[1:]) for k, v in d.items()}
+
+
+def brute_kl(p_out, q_out, obs, troops):
+    """Per row, the sum over every joint action of p log(p / q); `troops` are the percents a troop head can send."""
+    acts = joint_actions(p_out["type"].shape[-1], obs["cell_mask"].shape[-1], obs["attack_mask"].shape[-1], troops)
     rows = []
     for i in range(len(obs["type_mask"])):
-        one = lambda d: {k: v[i:i + 1].expand(len(acts), *v.shape[1:]) for k, v in d.items()}
-        lp = ActionDist(one(p_out), one(obs)).log_prob(acts)
-        lq = ActionDist(one(q_out), one(obs)).log_prob(acts)
+        lp = ActionDist(repeated(p_out, i, len(acts)), repeated(obs, i, len(acts))).log_prob(acts)
+        lq = ActionDist(repeated(q_out, i, len(acts)), repeated(obs, i, len(acts))).log_prob(acts)
         rows.append(float((lp.exp() * (lp - lq)).sum()))
     return rows
 
@@ -132,6 +169,33 @@ def full_out(seed=0):
     return out
 
 
+def v5_obs(seed=0):
+    """full_obs with step 6's masks: 20 types, 14 cell masks (the 13 heat maps, then the destinations) and which of
+    the 4 players each diplomatic type could be aimed at."""
+    g = torch.Generator().manual_seed(seed + 200)
+    obs = full_obs(seed)
+    obs.update(type_mask=torch.ones(3, 20, dtype=torch.bool), cell_mask=torch.rand(3, 14, 16, generator=g) < 0.6,
+               diplomacy_mask=torch.rand(3, 4, 4, generator=g) < 0.6)
+    return obs
+
+
+def v5_out(seed=0):
+    """Random outputs of a v5 network for v5_obs."""
+    g = torch.Generator().manual_seed(seed + 200)
+    out = full_out(seed)
+    out.update(type=torch.randn(3, 20, generator=g), maps=torch.randn(3, 13, 16, generator=g) * 3,
+               shares=torch.randn(3, 3, 4, SHARES, generator=g) * 2, diplomacy=torch.randn(3, 4, 4, generator=g),
+               move=FakeMove(torch.randn(3, 16, generator=g) * 2, torch.randn(3, 2, generator=g)))
+    return out
+
+
+def log_softmax(logits, mask):
+    """The masked log-probabilities ActionDist keeps (a row without a legal entry gets entry 0)."""
+    mask = mask.clone()
+    mask[..., 0] |= ~mask.any(-1)
+    return torch.where(mask, logits, MASK_VALUE).log_softmax(-1)
+
+
 class ModelTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
@@ -142,14 +206,19 @@ class ModelTest(unittest.TestCase):
             with self.subTest(name):
                 with torch.autocast("cuda", torch.bfloat16):
                     out = net.cuda()(self.obs)
-                full = name == "v4"
-                self.assertEqual(out["type"].shape, (N, 15 if full else 5))
-                self.assertEqual(out["maps"].shape, (N, 12 if full else 3, H * W))
-                if name in ("v3", "swiglu", "v4"):
-                    self.assertEqual(out["shares"].shape, (N, 2, P, SHARES))
+                full = name in ("v4", "v5")
+                self.assertEqual(out["type"].shape, (N, {"v4": 15, "v5": 20}.get(name, 5)))
+                self.assertEqual(out["maps"].shape, (N, {"v4": 12, "v5": 13}.get(name, 3), H * W))
+                if name in ("v3", "swiglu", "v4", "v5"):
+                    self.assertEqual(out["shares"].shape, (N, 3 if name == "v5" else 2, P, SHARES))
                 else:
                     self.assertEqual(out["bins"].shape, (N, 2, 5))
                 self.assertEqual("retreat" in out, full)
+                self.assertEqual("move" in out, name == "v5")
+                if name == "v5":
+                    self.assertEqual(out["diplomacy"].shape, (N, 4, P))
+                    dst, fleet = out["move"](torch.zeros(N, dtype=torch.long, device="cuda"))
+                    self.assertEqual((dst.shape, fleet.shape), ((N, H * W), (N, 2)))
                 self.assertEqual(out["ptr"].shape, (N, P))
                 self.assertEqual(out["value"].shape, (N,))
 
@@ -228,10 +297,11 @@ class ModelTest(unittest.TestCase):
     def test_five_size_networks_send_their_sizes_as_percents(self):
         self.assertEqual(SIZE_OF[list(SIZES)].tolist(), [0, 1, 2, 3, 4])
         self.assertEqual(SIZE_OF[[1, 15, 16, 35, 36, 61, 62, 86, 87, 100]].tolist(), [0, 0, 1, 1, 2, 2, 3, 3, 4, 4])
-        out = RandomPolicy(DIMS)(self.obs)
+        obs = {k: v for k, v in self.obs.items() if k != "diplomacy_mask"}  # an observation without step 6's masks
+        out = RandomPolicy(DIMS)(obs)
         out["type"][:, ATTACK] = 30.0  # rows 3-5 attack (their only target is player 2); rows 0-2 cannot
         out["bins"][:, 0, 1] = 30.0  # and send 25%
-        dist = ActionDist(out, self.obs)
+        dist = ActionDist(out, obs)
         self.assertEqual(dist.sample()[3:, [0, 2, 3]].tolist(), [[ATTACK, 2, 25]] * 3)
         lp = dist.log_prob(torch.tensor([[ATTACK, 0, 2, 20]] * N, device="cuda"))  # 20% lies in 25%'s range
         self.assertTrue(torch.allclose(lp[3:], torch.zeros(3, device="cuda"), atol=1e-4))
@@ -329,7 +399,7 @@ class AttentionTest(unittest.TestCase):
         exact_fp32(self)
         obs = fake_obs()
         extra = 70 - P  # bots beyond the 64 slots, each smaller than the last
-        bots = torch.zeros(N, extra, 25, device="cuda")
+        bots = torch.zeros(N, extra, obs["players"].shape[-1], device="cuda")
         bots[..., 0] = bots[..., 5] = 1
         bots[..., 7] = torch.linspace(0.05, 0.001, extra, device="cuda")
         obs["players"] = torch.cat([obs["players"], bots], 1)
@@ -519,6 +589,221 @@ class ShareDistTest(unittest.TestCase):
             ActionDist(out, obs).kl(ActionDist(sizes, obs))
 
 
+class V5Test(unittest.TestCase):
+    """Step 6: diplomacy pointers, donation shares and warship moves (a destination and a fleet choice that read the
+    source)."""
+
+    def setUp(self):
+        torch.manual_seed(0)
+
+    def test_v5_joint_probabilities_sum_to_one(self):
+        obs, out = v5_obs(), v5_out()
+        acts = joint_actions(20, 16, 4, range(1, SHARES + 1))
+        for i in range(3):
+            lp = ActionDist(repeated(out, i, len(acts)), repeated(obs, i, len(acts))).log_prob(acts)
+            self.assertAlmostEqual(float(lp.exp().sum()), 1.0, places=4, msg=i)
+
+    def test_v5_samples_are_legal_and_the_destination_reads_the_source(self):
+        obs, out = v5_obs(), v5_out()
+        obs["cell_mask"][:, DST] = True
+        legal = lambda mask, i, k, v: bool(mask[i, k, v]) or not mask[i, k].any()  # a row without any gets entry 0
+        for _ in range(30):
+            dist = ActionDist(out, obs)
+            a = dist.sample()
+            for i, (t, c, d, f) in enumerate(a.tolist()):
+                self.assertTrue(obs["type_mask"][i, t])
+                if t in (SPAWN, BOAT) or t >= BUILD and t < RETREAT or t == MOVE:
+                    self.assertTrue(legal(obs["cell_mask"], i, int(MAP_OF[t]), c), (t, c))
+                if t in DIPLOMACY:
+                    self.assertTrue(legal(obs["diplomacy_mask"], i, t - REQUEST, d), (t, d))
+                if t == DONATE:
+                    self.assertTrue(1 <= f <= SHARES)
+                if t == MOVE:
+                    self.assertTrue(legal(obs["cell_mask"], i, DST, d))
+                    self.assertIn(f, (0, 1))
+                    self.assertEqual(c, int(dist.src[i]))
+            self.assertTrue(torch.isfinite(dist.log_prob(a)).all())
+        # the same move from another source: only the source's, the destination's and the fleet's terms change
+        a = dist.complete(torch.full((3,), MOVE))
+        other = a.clone()
+        other[:, 1] = (a[:, 1] + 1) % 16
+        gap = dist.log_prob(other) - dist.log_prob(a)
+        for i in range(3):
+            lc = log_softmax(out["maps"][i, MOVE_MAP], obs["cell_mask"][i, MOVE_MAP])
+            ld = lambda src: log_softmax(out["move"].row(i)(torch.tensor([src]))[0][0], obs["cell_mask"][i, DST])[a[i, 2]]
+            lf = lambda src: log_softmax(out["move"].row(i)(torch.tensor([src]))[1][0], torch.ones(2, dtype=torch.bool))[a[i, 3]]
+            before, after = int(a[i, 1]), int(other[i, 1])
+            dst_gap = ld(after) - ld(before)
+            self.assertGreater(abs(float(dst_gap)), 1e-4, "the destination does not read the source")
+            want = lc[after] - lc[before] + dst_gap + lf(after) - lf(before)
+            self.assertAlmostEqual(float(gap[i]), float(want), places=4)
+
+    def test_v5_kl_is_exact_when_the_source_is_certain(self):
+        obs, p_out, q_out = v5_obs(), v5_out(1), v5_out(2)
+        only = torch.tensor([3, 7, 11])
+        obs["cell_mask"][:, MOVE_MAP] = False
+        obs["cell_mask"][torch.arange(3), MOVE_MAP, only] = True
+        kl = ActionDist(p_out, obs).kl(ActionDist(q_out, obs))
+        for i, want in enumerate(brute_kl(p_out, q_out, obs, range(1, SHARES + 1))):
+            self.assertAlmostEqual(float(kl[i]), want, delta=1e-4 * max(1.0, want))
+        self.assertTrue(torch.allclose(kl, ActionDist(p_out, obs).kl(ActionDist(q_out, obs), only), atol=1e-6))
+        self.assertTrue(torch.allclose(ActionDist(p_out, obs).kl(ActionDist(p_out, obs)), torch.zeros(3), atol=1e-6))
+
+    def test_the_kl_and_entropy_use_the_source_they_are_given(self):
+        obs, out, ref = v5_obs(), v5_out(1), v5_out(2)
+        dist, other = ActionDist(out, obs), ActionDist(ref, obs)
+        a, b = torch.tensor([0, 1, 2]), torch.tensor([9, 10, 15])
+        self.assertFalse(torch.allclose(dist.kl(other, a), dist.kl(other, b)))
+        self.assertFalse(torch.allclose(dist.entropy(a), dist.entropy(b)))
+        # logits computed at a known source stand in for the move head
+        given = {k: v for k, v in ref.items() if k != "move"} | dict(zip(("dst_logits", "fleet_logits"), ref["move"](a)))
+        self.assertTrue(torch.allclose(dist.kl(ActionDist(given, obs), a), dist.kl(other, a), atol=1e-6))
+        self.assertTrue(torch.isfinite(dist.entropy()).all())
+
+    def test_the_move_head_is_evaluated_once_for_the_stored_source(self):
+        obs, out = v5_obs(), v5_out()
+        calls = []
+        move = out["move"]
+        out["move"] = lambda src: calls.append(src) or move(src)
+        dist = ActionDist(out, obs)
+        a = dist.sample()
+        calls.clear()
+        dist = ActionDist(out, obs)
+        src = a[:, 1]
+        lp = dist.log_prob(a, src=src)
+        dist.entropy(src)
+        dist.kl(ActionDist(v5_out(1), obs), src)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(torch.allclose(lp, ActionDist(out, obs).log_prob(a)))
+
+    def test_a_donation_reads_its_recipients_share(self):
+        obs, out = v5_obs(), v5_out()
+        obs["diplomacy_mask"][:, DONATE - REQUEST] = True
+        out["shares"].zero_()
+        for who in range(4):
+            out["shares"][:, 2, who, 10 * who + 4] = 50.0  # a donation to player `who` sends 10 * who + 5 %
+            out["shares"][:, 0, who, 99] = 50.0  # an attack on anyone sends 100 %: the donation must not read this
+        dist = ActionDist(out, obs)
+        a = dist.complete(torch.full((3,), DONATE))
+        self.assertEqual(a[:, 3].tolist(), (10 * a[:, 2] + 5).tolist())
+        self.assertTrue(torch.allclose(dist.log_prob(a), dist.type.log_prob(a[:, 0]) + dist.diplo.log_prob(
+            a[:, 2, None].expand(-1, 4))[:, DONATE - REQUEST], atol=1e-4))
+
+    def test_the_moves_entropy_term_is_the_destinations_and_the_fleets(self):
+        obs, out = v5_obs(), v5_out()
+        src = torch.tensor([1, 6, 14])
+        with_move = ActionDist(out, obs).entropy(src)
+        no_move = ActionDist({k: v for k, v in out.items() if k != "move"}, obs).entropy()
+        dst, fleet = out["move"](src)
+        h = (Categorical(logits=log_softmax(dst, obs["cell_mask"][:, DST])).entropy() / math.log(16)
+             + Categorical(logits=fleet).entropy() / math.log(2))
+        pt = ActionDist(out, obs).type.probs
+        self.assertTrue(torch.allclose(with_move - no_move, pt[:, MOVE] * h, atol=1e-5))
+
+    def test_a_pointer_reaches_players_outside_the_attended_64(self):
+        exact_fp32(self)
+        obs = fake_obs()
+        extra = 80 - P  # bots beyond the 64 slots, each smaller than the last
+        bots = torch.zeros(N, extra, 31, device="cuda")
+        bots[..., 0] = bots[..., 5] = 1
+        bots[..., 7] = torch.linspace(0.05, 0.001, extra, device="cuda")
+        obs["players"] = torch.cat([obs["players"], bots], 1)
+        obs["attack_mask"] = torch.cat([obs["attack_mask"], torch.zeros(N, extra, dtype=torch.bool, device="cuda")], 1)
+        obs["retreat_mask"] = torch.cat([obs["retreat_mask"], torch.zeros(N, extra, dtype=torch.bool, device="cuda")], 1)
+        obs["diplomacy_mask"] = torch.zeros(N, 4, 80, dtype=torch.bool, device="cuda")
+        obs["diplomacy_mask"][:, DONATE - REQUEST, 79] = True  # the least relevant of all is the only legal recipient
+        obs["type_mask"] = torch.zeros_like(obs["type_mask"])
+        obs["type_mask"][:, DONATE] = True
+        net = randomized(Policy(DIMS_V5, v5=True)).cuda().eval()
+        with torch.no_grad():
+            out = net(obs)
+            self.assertEqual(tuple(out["diplomacy"].shape), (N, 4, 80))
+            for _ in range(10):
+                a = ActionDist(out, obs).sample()
+                self.assertEqual(a[:, [0, 1, 2]].tolist(), [[DONATE, 0, 79]] * N)
+                self.assertTrue(((a[:, 3] >= 1) & (a[:, 3] <= SHARES)).all())
+
+    def test_the_move_head_is_finite_with_and_without_autocast_and_without_warships(self):
+        net = randomized(Policy(DIMS_V5, v5=True)).cuda().eval()
+        obs = fake_obs()  # row 0 has no legal source cell
+        no_ships = dict(obs, spatial=torch.zeros_like(obs["spatial"]))
+        for cast in (True, False):
+            for o in (obs, no_ships):
+                with self.subTest(autocast=cast, ships=o is obs), torch.no_grad():
+                    with torch.autocast("cuda", torch.bfloat16) if cast else contextlib.nullcontext():
+                        out = net(o)
+                    dist = ActionDist(out, o)
+                    dist.complete(torch.full((N,), MOVE, device="cuda"))  # every row's source, row 0's included
+                    self.assertFalse(o["cell_mask"][0, MOVE_MAP].any())
+                    for src in (dist.src, torch.zeros_like(dist.src), torch.full_like(dist.src, H * W - 1)):
+                        dst, fleet = out["move"](src)
+                        self.assertEqual((tuple(dst.shape), tuple(fleet.shape)), ((N, H * W), (N, 2)))
+                        self.assertTrue(torch.isfinite(dst.float()).all() and torch.isfinite(fleet.float()).all())
+                    self.assertTrue(torch.isfinite(dist.entropy()).all())
+
+    def test_the_move_head_gives_gradients_to_its_layers_and_the_shared_features(self):
+        net = randomized(Policy(DIMS_V5, v5=True)).cuda()
+        obs = fake_obs()
+        with torch.autocast("cuda", torch.bfloat16):
+            out = net(obs)
+        dist = ActionDist(out, obs)
+        a = dist.complete(torch.full((N,), MOVE, device="cuda"))
+        (dist.log_prob(a) + dist.entropy(dist.src)).sum().backward()
+        for layer in (net.dst_film, net.dst_shuffle, net.dst_skip, net.fleet_head, net.s1[0].c1, net.core):
+            self.assertTrue(any(p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum() > 0
+                                for p in layer.parameters()), layer)
+
+    def test_v5_starts_uniform_over_legal_actions(self):
+        net = Policy(DIMS_V5, v5=True).cuda()
+        obs = fake_obs()
+        with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+            out = net(obs)
+        dist = ActionDist(out, obs)
+        src = torch.arange(N, device="cuda")
+        dst, fleet = out["move"](src)
+        for name, x in (("type", out["type"]), ("maps", out["maps"]), ("diplomacy", out["diplomacy"]),
+                        ("shares", out["shares"]), ("ptr", out["ptr"]), ("retreat", out["retreat"]), ("dst", dst),
+                        ("fleet", fleet)):
+            self.assertEqual(int(torch.count_nonzero(x)), 0, name)
+        legal = obs["diplomacy_mask"].float()
+        self.assertTrue(torch.allclose(dist.diplo.probs * (legal.sum(-1, keepdim=True) > 0), legal / legal.sum(-1, keepdim=True).clamp(min=1), atol=1e-6))
+        dist.complete(torch.full((N,), MOVE, device="cuda"))
+        self.assertTrue(torch.allclose(dist._move_at(dist.src)[1].probs, torch.full((N, 2), 0.5, device="cuda")))
+        want = obs["cell_mask"][:, DST].float()
+        self.assertTrue(torch.allclose(dist._move_at(dist.src)[0].probs[1:], (want / want.sum(-1, keepdim=True))[1:], atol=1e-6))
+
+    def test_a_v4_network_acts_the_same_on_a_v5_observation(self):
+        exact_fp32(self)
+        obs = fake_obs()
+        v4 = dict(obs, spatial=obs["spatial"][:, :V4_CHANNELS].contiguous(), players=obs["players"][..., :V4_FEATURES].contiguous(),
+                  type_mask=obs["type_mask"][:, :15].contiguous(), cell_mask=obs["cell_mask"][:, :12].contiguous())
+        del v4["diplomacy_mask"]
+        net = randomized(Policy(DIMS, shares=True, full=True)).cuda().eval()
+        with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+            a, b = net(obs), net(v4)
+        for k in a:
+            self.assertTrue(torch.equal(a[k], b[k]), k)
+        torch.manual_seed(7)
+        acts_a = ActionDist(a, obs).sample()
+        torch.manual_seed(7)
+        acts_b = ActionDist(b, v4).sample()
+        self.assertTrue(torch.equal(acts_a, acts_b))
+        self.assertTrue((acts_a[:, 0] < 15).all())
+
+    def test_random_policy_covers_a_v5_observation(self):
+        obs = fake_obs()
+        out = RandomPolicy(DIMS_V5)(obs)
+        self.assertEqual((tuple(out["type"].shape), tuple(out["maps"].shape), tuple(out["shares"].shape)),
+                         ((N, 20), (N, 13, H * W), (N, 3, P, SHARES)))
+        dist = ActionDist(out, dict(obs, type_mask=torch.ones_like(obs["type_mask"])))
+        a = dist.complete(torch.full((N,), MOVE, device="cuda"))
+        self.assertTrue(torch.isfinite(dist.log_prob(a)).all())
+        self.assertTrue(torch.isfinite(dist.entropy()).all())
+
+    def test_describe_says_20_actions(self):
+        self.assertIn("20 actions", describe({"arch": "v5", "core": "moe", "widths": "64,128,192"}))
+
+
 class InputsTest(unittest.TestCase):
     """Part 2 of 3B step 3 adds channels and scalars after the old ones. The v1-v3 networks keep reading theirs."""
 
@@ -549,6 +834,8 @@ class InputsTest(unittest.TestCase):
         wider = dict(obs, spatial=torch.cat([obs["spatial"], torch.full_like(obs["spatial"][:, :7], 40)], 1),
                      players=torch.cat([obs["players"], torch.rand(N, P, 6, device="cuda")], 2))
         for (name, net), twin in zip(nets().items(), nets(wide).values()):
+            if name == "v5":  # it reads every input the dims give: not an older network
+                continue
             net = randomized(net).cuda().eval()
             twin.load_state_dict(net.state_dict())
             twin = twin.cuda().eval()
@@ -585,14 +872,17 @@ class LoadTest(unittest.TestCase):
                                ({"arch": "v2", "core": "moe", "widths": "64,128,192"}, Policy),
                                ({"arch": "v3", "core": "moe", "widths": "64,128,192"}, Policy),
                                ({"arch": "v3", "core": "moe-swiglu", "widths": "64,128,192"}, Policy),
-                               ({"arch": "v4", "core": "moe", "widths": "64,128,192"}, Policy)):
+                               ({"arch": "v4", "core": "moe", "widths": "64,128,192"}, Policy),
+                               ({"arch": "v5", "core": "moe", "widths": "64,128,192"}, Policy)):
+                dims = DIMS_V5 if args.get("arch") == "v5" else DIMS
                 path = Path(d) / "net.pt"
-                torch.save({"model": new_net(DIMS, args).state_dict(), "args": args}, path)
-                net = load_net(path, DIMS)
+                torch.save({"model": new_net(dims, args).state_dict(), "args": args}, path)
+                net = load_net(path, dims)
                 self.assertIsInstance(net, kind)
                 self.assertEqual(getattr(net, "moe", False), args.get("core", "dense") != "dense")
-                self.assertEqual(getattr(net, "shares", False), args.get("arch") in ("v3", "v4"))
-                self.assertEqual(getattr(net, "full", False), args.get("arch") == "v4")
+                self.assertEqual(getattr(net, "shares", False), args.get("arch") in ("v3", "v4", "v5"))
+                self.assertEqual(getattr(net, "full", False), args.get("arch") in ("v4", "v5"))
+                self.assertEqual(getattr(net, "v5", False), args.get("arch") == "v5")
                 with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                     self.assertEqual(tuple(net(obs)["value"].shape), (N,))
 
