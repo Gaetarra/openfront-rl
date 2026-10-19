@@ -9,13 +9,16 @@ import { StampedIntent, Turn } from "../OpenFront_Source_Code/openfrontio/packag
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
 import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/SharedUtil";
 import { GameRecord, GameRecordSchema } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/WireSchemas";
-import { Act, BUILDS } from "./actions";
+import { Act, BUILDS, DIPLOMACY, seatMasks } from "./actions";
 import { EnvGame, seatClientID } from "./game";
 import { labelOf, OUT_OF_SET, readRecord, RecordGame, shareOf, UNMAPPED } from "./replay";
 import { gameConfigOf } from "./setups";
 import { landTile, ONION, script } from "./testkit";
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "testdata/ranked1v1.json.gz");
+// team.json.gz: public Team game cy6fkbw55W, 6 teams, Between Two Seas, Compact, v0.35.2, with donations on; usernames
+// and account IDs blanked.
+const TEAM = path.join(path.dirname(fileURLToPath(import.meta.url)), "testdata/team.json.gz");
 
 test("a label's troop share is the whole percent the player sent", () => {
   assert.equal(shareOf(20, 100), 20);
@@ -114,7 +117,7 @@ test("a recorded game passes the record schema and replays to the same state", a
   assert.deepEqual(rg.env.observe(true), env.observe(true), "a replay sees what the agent saw");
 });
 
-test("every command maps to an action, except diplomacy, chat and MIRVs", async () => {
+test("every command maps to an action, except gold donations, rejects, embargoes, chat and MIRVs", async () => {
   const env = await EnvGame.create(ONION, "labels");
   script(env, 260);
   const seat = env.seats[0];
@@ -142,7 +145,56 @@ test("every command maps to an action, except diplomacy, chat and MIRVs", async 
   const cancel = (attackID: string): StampedIntent => ({ type: "cancel_attack", attackID, clientID });
   assert.deepEqual(labelOf(env, seat, cancel(attack.id())), [Act.Retreat, 0, 0, 0]);
   assert.deepEqual(labelOf(env, seat, cancel("gone")), [UNMAPPED, 0, 0, 0], "an attack that already ended");
-  const enemy = env.game.players().find((p) => p !== seat)!;
-  const ally: StampedIntent = { type: "allianceRequest", recipient: enemy.id(), clientID };
-  assert.deepEqual(labelOf(env, seat, ally), [OUT_OF_SET, 0, 0, 0]);
+  const other = env.game.players().find((p) => p !== seat)!;
+  const to = (type: "allianceRequest" | "allianceExtension" | "breakAlliance", recipient = other.id()): StampedIntent =>
+    ({ type, recipient, clientID });
+  assert.deepEqual(labelOf(env, seat, to("allianceRequest")), [Act.AllianceRequest, 0, other.smallID(), 0]);
+  assert.deepEqual(labelOf(env, seat, to("allianceRequest", "nobody")), [UNMAPPED, 0, 0, 0], "a player that does not exist");
+  assert.deepEqual(labelOf(env, seat, to("allianceExtension")), [Act.RenewAlliance, 0, other.smallID(), 0]);
+  assert.deepEqual(labelOf(env, seat, to("breakAlliance")), [Act.BreakAlliance, 0, other.smallID(), 0]);
+  const donate = (troops: number | null): StampedIntent => ({ type: "donate_troops", recipient: other.id(), troops, clientID });
+  assert.deepEqual(labelOf(env, seat, donate(seat.troops() / 4)), [Act.DonateTroops, 0, other.smallID(), 25]);
+  const third = shareOf(env.game.config().defaultDonationAmount(seat), seat.troops());
+  assert.deepEqual(labelOf(env, seat, donate(null)), [Act.DonateTroops, 0, other.smallID(), third]);
+  const water: number[] = [];
+  env.game.forEachTile((t) => {
+    if (water.length < 2 && env.game.isOcean(t)) water.push(t);
+  });
+  const [w1, w2] = water.map((t) => seat.buildUnit(UnitType.Warship, t, { patrolTile: t }));
+  const move = (unitIds: number[]): StampedIntent => ({ type: "move_warship", unitIds, tile: water[1], clientID });
+  const dest = env.frame.cellOf(water[1]);
+  assert.deepEqual(labelOf(env, seat, move([w1.id(), w2.id()])), [Act.MoveWarships, env.frame.cellOf(w1.tile()), dest, 1]);
+  assert.deepEqual(labelOf(env, seat, move([w1.id()])), [Act.MoveWarships, env.frame.cellOf(w1.tile()), dest, 0]);
+  assert.deepEqual(labelOf(env, seat, move([999_999])), [UNMAPPED, 0, 0, 0], "a ship that does not exist");
+  for (const type of ["donate_gold", "allianceReject", "embargo"] as const) {
+    const intent = { donate_gold: { type, recipient: other.id(), gold: 5 }, allianceReject: { type, requestor: other.id() },
+      embargo: { type, targetID: other.id(), action: "start" } }[type] as unknown as StampedIntent;
+    assert.deepEqual(labelOf(env, seat, { ...intent, clientID }), [OUT_OF_SET, 0, 0, 0], type);
+  }
+});
+
+test("a blanked Team record replays in sync, and its diplomacy and warship labels are legal", async () => {
+  const rg = await RecordGame.create(readRecord(TEAM), 256, 160);
+  const seen = new Map<number, number>();
+  const legal = new Map<number, number>();
+  while (!rg.done) {
+    rg.env.observe(rg.window === 0);
+    const masks = rg.env.seats.map((s) => seatMasks(rg.env.game, s, rg.env.slots));
+    rg.labels().forEach(([t, cell, target, troops], i) => {
+      if (t < Act.AllianceRequest) return;
+      seen.set(t, (seen.get(t) ?? 0) + 1);
+      const k = DIPLOMACY.indexOf(t);
+      const ok = k >= 0
+        ? masks[i].diplomacy[k * rg.env.slots + target] === 1
+        : rg.env.seats[i].units(UnitType.Warship).some((u) => rg.env.frame.cellOf(u.tile()) === cell)
+          && rg.env.frame.tilesOf(target).some((tile) => rg.env.game.isWater(tile)) && troops <= 1;
+      if (ok) legal.set(t, (legal.get(t) ?? 0) + 1);
+    });
+    rg.advance();
+  }
+  assert.equal(rg.desync, false);
+  // The record's 20 requests, 1 renewal, 4 breaks, 21 donations and 1 move; one donation label is not legal under the masks.
+  const sorted = (m: Map<number, number>) => [...m].sort((a, b) => a[0] - b[0]);
+  assert.deepEqual(sorted(seen), [[Act.AllianceRequest, 20], [Act.RenewAlliance, 1], [Act.BreakAlliance, 4], [Act.DonateTroops, 21], [Act.MoveWarships, 1]]);
+  assert.deepEqual(sorted(legal), [[Act.AllianceRequest, 20], [Act.RenewAlliance, 1], [Act.BreakAlliance, 4], [Act.DonateTroops, 20], [Act.MoveWarships, 1]]);
 });

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import zlib from "node:zlib";
+import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
 import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
 import { Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 import {
@@ -11,7 +12,7 @@ import { Act, BUILDS } from "./actions";
 import { EnvGame, STEP_TICKS } from "./game";
 
 /** Label types of windows that stay out of the loss (PLAN Phase 2, b). */
-export const OUT_OF_SET = -1; // a command the actions cannot express: diplomacy, chat, warship moves, MIRVs
+export const OUT_OF_SET = -1; // a command the actions cannot express: gold donations, rejects, embargoes, chat, MIRVs, ...
 export const UNMAPPED = -2; // a command of an expressible type whose label could not be built
 /** Commands a seat may have queued; more are dropped and counted (humans rarely issue 2 in one window). */
 export const MAX_PENDING = 3;
@@ -61,6 +62,24 @@ export function labelOf(env: EnvGame, seat: Player, intent: StampedIntent): numb
       if (attack === undefined) return [UNMAPPED, 0, 0, 0];
       const target = attack.target();
       return [Act.Retreat, 0, target.isPlayer() ? target.smallID() : 0, 0];
+    }
+    case "allianceRequest":
+    case "allianceExtension":
+    case "breakAlliance":
+    case "donate_troops": {
+      if (!game.hasPlayer(intent.recipient)) return [UNMAPPED, 0, 0, 0];
+      const to = game.player(intent.recipient).smallID();
+      if (intent.type === "donate_troops") {
+        const sent = intent.troops ?? game.config().defaultDonationAmount(seat);
+        return [Act.DonateTroops, 0, to, shareOf(sent, seat.troops())];
+      }
+      const act = { allianceRequest: Act.AllianceRequest, allianceExtension: Act.RenewAlliance, breakAlliance: Act.BreakAlliance };
+      return [act[intent.type], 0, to, 0];
+    }
+    case "move_warship": {
+      const first = game.unit(intent.unitIds[0]);
+      if (first === undefined || first.type() !== UnitType.Warship || first.owner() !== seat) return [UNMAPPED, 0, 0, 0];
+      return [Act.MoveWarships, frame.cellOf(first.tile()), frame.cellOf(intent.tile), intent.unitIds.length > 1 ? 1 : 0];
     }
     default:
       return [OUT_OF_SET, 0, 0, 0];
