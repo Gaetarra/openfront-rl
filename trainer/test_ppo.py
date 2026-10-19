@@ -375,6 +375,37 @@ class SmokeTest(unittest.TestCase):
         self.assertTrue(np.isfinite(kl).all())
         self.assertLess(max(kl), 1e-4, "at lr 0 the learner is the reference, at the same sampled sources")
 
+    def test_a_fresh_v5_network_trains_on_every_setup_with_finite_losses(self):
+        """Step 6's smoke test: a few updates of a mixed run (ranked 1v1 with a league opponent, FFA and Humans vs
+        Nations) from a fresh v5 network, with a KL reference, learn from the rows of all three setups."""
+        init = ROOT / "checkpoints" / self.RUN / "init.pt"
+        init.parent.mkdir(parents=True, exist_ok=True)
+        args = {"arch": "v5", "core": "moe", "widths": "64,128,192"}
+        torch.manual_seed(0)
+        net = new_net({"channels": N_CHANNELS, "playerFeatures": 31, "scalars": 26}, args)
+        torch.save({"model": net.state_dict(), "args": args, "update": 0}, init)
+        playlists = {"ranked1v1": {**ONION, "seats": 2, "nations": 0, "timerMinutes": 1},
+                     "ffa": {**FFA, "timerMinutes": 1}, "hvn": {**HVN, "timerMinutes": 1}}
+        with mock.patch.dict("trainer.env.PLAYLISTS", playlists):
+            main(["--run", self.RUN, "--mix", "ranked1v1=1", "ffa=1", "hvn=1", "--games-per-worker", "1", "--steps", "32",
+                  "--minibatches", "2", "--epochs", "1", "--port", "0", "--init", str(init), "--league", str(init),
+                  "--kl-coef", "0.1", "--ent-coef", "0.01", "--updates", "2"])
+        state = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
+        self.assertEqual((state["update"], state["args"]["arch"], state["global_step"]), (2, "v5", 2 * 32 * 9))
+        logs = EventAccumulator(str(ROOT / "runs" / self.RUN))
+        logs.Reload()
+        losses = [t for t in logs.Tags()["scalars"] if t.startswith("loss/")]
+        self.assertIn("loss/kl_ref", losses)
+        for tag in losses:
+            self.assertEqual(len(logs.Scalars(tag)), 2, tag)
+            self.assertTrue(np.isfinite([e.value for e in logs.Scalars(tag)]).all(), tag)
+        # the drop share of each type taken, weighted by how often it was taken, adds up to the total drop share
+        last = lambda tag: logs.Scalars(tag)[-1].value
+        shares = {t[len("actions/invalid_rate/"):]: last(t) for t in logs.Tags()["scalars"] if t.startswith("actions/invalid_rate/")}
+        self.assertIn("noop", shares)
+        self.assertTrue(all(0 <= v <= 1 for v in shares.values()), shares)
+        self.assertAlmostEqual(sum(v * last(f"actions/{k}") for k, v in shares.items()), last("actions/invalid_rate"))
+
     def test_a_league_with_frozen_evaluations(self):
         """PLAN 4A: the opponents come from a pool the learner's weight averages join, and every average plays the
         panel, here with a snapshot every 2 updates and a pick every update. Games of 1 minute end within 3 updates of

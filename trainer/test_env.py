@@ -501,5 +501,44 @@ class ChannelTest(unittest.TestCase):
         self.assertGreater(self.ships[TRADE - HEALTH], 0, "a trade ship that pays a seat was seen")
 
 
+class TeamChannelTest(unittest.TestCase):
+    TEAM = ROOT / "bridge" / "testdata" / "team.json.gz"
+
+    def test_warship_and_trade_channels_follow_their_definitions_on_real_ships(self):
+        """The ranked fixture has no warships: the Team record has them from window ~80 on, and trade ships from the
+        start. Checks a window in 20 of the first 200, for all 18 seats."""
+        config = {"map": "Between Two Seas", "compact": True, "nations": 0, "bots": 100, "difficulty": "Medium",
+                  "timerMinutes": 0, "seats": 18}
+        env = VecEnv(config, workers=1, games_per_worker=1, seed="team", records=[self.TEAM])
+        error, ships, windows = 0, np.zeros(N_CHANNELS - HEALTH, int), []
+
+        def keep(args, obs):
+            nonlocal error, ships
+            players, rel, _, types, _, _, units, _ = args
+            windows.append(None)
+            if len(windows) % 20:
+                return
+            rec = np.concatenate([u for _, u in units])
+            side = round(float(env.area[0]) ** 0.5)
+            for seat in range(env.S):
+                want = new_channels(rec, rel[seat], env.dims["unitTypes"], side, env.H, env.W)
+                got = obs["spatial"][seat, LEVEL:].reshape(N_CHANNELS - LEVEL, -1).cpu().numpy().astype(np.int64)
+                error = max(error, int(np.abs(got - np.clip(np.round(want * 64), 0, 255)).max()))
+                ships += want[HEALTH - LEVEL:].any(1)
+
+        try:
+            watch_observations(env, keep)
+            while len(windows) < 200:
+                env.step()
+        finally:
+            env.close()
+        self.assertEqual(error, 0)
+        # no warship has a veteran level yet in these windows, so the veteran channels stay 0 here (the synthetic units of
+        # frame.test.ts cover them)
+        for channel, what in ((HEALTH, "an own warship"), (HEALTH + 1, "a hostile warship"), (PATROL, "an own patrol point"),
+                              (TRADE, "a trade ship that pays a seat"), (TRADE + 1, "a capturable trade ship")):
+            self.assertGreater(ships[channel - HEALTH], 0, f"{what} was seen: {ships}")
+
+
 if __name__ == "__main__":
     unittest.main()

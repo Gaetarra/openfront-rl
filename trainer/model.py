@@ -36,7 +36,7 @@ SIZE_PERCENT = torch.tensor(SIZES)
 SIZE_RANGES = torch.where(SIZE_OF[1:] == torch.arange(len(SIZES))[:, None], 0.0, -math.inf)
 MASK_VALUE = -1e8  # finite, so masked entries never make NaN gradients
 V1_CHANNELS, V1_FEATURES = 22, 17  # the Phase 2 network's inputs
-V4_CHANNELS, V4_FEATURES = 57, 25  # the v2-v4 networks' inputs: step 6 appends channels and features after these
+V4_CHANNELS, V4_FEATURES, V4_SCALARS = 57, 25, 26  # the v2-v4 networks' inputs: step 6 appends channels and features after these
 D = 128  # width of the player tokens
 ATTENDED = 64  # players the transformer attends to (the most relevant ones); every player keeps a token
 DS = 64  # hidden width of the troop-share head, per kind (attack, boat; v5 adds donate)
@@ -175,16 +175,15 @@ class Policy(nn.Module):
       scalars). It has all 20 action types and 13 heat maps, four pointers for the diplomatic types, and a third share
       kind, the donation's. A warship move also takes a destination: out["move"](src) decodes one more map and an
       alone-or-fleet choice from the decoder features at the source's block, FiLMed by the core.
-    - The older networks read V4_FEATURES player features (and v4 V4_CHANNELS channels), whatever the dims say: the
-      inputs later steps append are ignored."""
+    - The older networks read V4_FEATURES player features (and v4 V4_CHANNELS channels and V4_SCALARS scalars),
+      whatever the dims say: the inputs later steps append are ignored."""
 
     def __init__(self, dims, widths=(64, 128, 192), core="moe", shares=False, full=False, v5=False):
         super().__init__()
         shares, full = shares or v5, full or v5
-        n_scal = dims["scalars"]
-        c_in, n_feat = V4_CHANNELS, V4_FEATURES  # later steps append inputs: these networks read only theirs
+        c_in, n_feat, n_scal = V4_CHANNELS, V4_FEATURES, V4_SCALARS  # later steps append inputs: these networks read only theirs
         if v5:
-            c_in, n_feat = dims["channels"], dims["playerFeatures"]
+            c_in, n_feat, n_scal = dims["channels"], dims["playerFeatures"], dims["scalars"]
         elif not full:  # v2 and v3 networks were trained on the inputs before 3B step 3, part 2
             c_in, n_scal = OLD_CHANNELS, OLD_SCALARS
         c1, c2, c3 = widths

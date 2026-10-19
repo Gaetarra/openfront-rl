@@ -11,8 +11,8 @@ from torch.distributions import Categorical
 from trainer.env import BUILDINGS, DST, N_CHANNELS, ROOT
 from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, DIPLOMACY, DONATE, MAP_OF, MASK_VALUE, MOVE, MOVE_MAP,
                            OLD_CHANNELS, OLD_SCALARS, REQUEST, RETREAT, SHARES, SIZE_OF, SIZES, SPAWN, V4_CHANNELS,
-                           V4_FEATURES, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, describe, load_net, new_net,
-                           relevance, v1_spatial)
+                           V4_FEATURES, V4_SCALARS, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE, describe,
+                           load_net, new_net, relevance, v1_spatial)
 
 DIMS = {"channels": N_CHANNELS, "playerFeatures": 25, "scalars": 26, "acts": 5}
 DIMS_V5 = {"channels": N_CHANNELS, "playerFeatures": 31, "scalars": 26}
@@ -827,12 +827,14 @@ class InputsTest(unittest.TestCase):
                     self.assertTrue(torch.allclose(a[k], b[k], rtol=1e-5, atol=1e-6), k)
 
     def test_older_networks_read_only_their_own_inputs(self):
-        """v5 appends channels and player features: every older network loads into a model built for the wider inputs
-        and gives the same outputs on them."""
-        wide = {**DIMS, "channels": DIMS["channels"] + 7, "playerFeatures": DIMS["playerFeatures"] + 6}
+        """v5 appends channels, player features and scalars: every older network loads into a model built for the wider
+        inputs and gives the same outputs on them."""
+        wide = {**DIMS, "channels": DIMS["channels"] + 7, "playerFeatures": DIMS["playerFeatures"] + 6,
+                "scalars": DIMS["scalars"] + 4}
         obs = fake_obs()
         wider = dict(obs, spatial=torch.cat([obs["spatial"], torch.full_like(obs["spatial"][:, :7], 40)], 1),
-                     players=torch.cat([obs["players"], torch.rand(N, P, 6, device="cuda")], 2))
+                     players=torch.cat([obs["players"], torch.rand(N, P, 6, device="cuda")], 2),
+                     scalars=torch.cat([obs["scalars"], torch.rand(N, 4, device="cuda")], 1))
         for (name, net), twin in zip(nets().items(), nets(wide).values()):
             if name == "v5":  # it reads every input the dims give: not an older network
                 continue
@@ -847,7 +849,7 @@ class InputsTest(unittest.TestCase):
     def test_v4_networks_read_every_input(self):
         net = randomized(Policy(self.wide, shares=True, full=True)).cuda().eval()
         self.assertEqual((net.stem.in_channels, net.scalars[0].in_features),
-                         (V4_CHANNELS, self.wide["scalars"]))
+                         (V4_CHANNELS, V4_SCALARS))
         with torch.no_grad():
             a, b = net(self.more), net(dict(self.more, scalars=self.more["scalars"] * 0))
         self.assertFalse(torch.allclose(a["value"], b["value"]))

@@ -581,10 +581,11 @@ def main(argv=None):
     # binds, then those of a dead seat (past the spawn phase, not alive)
     tally = torch.zeros(len(names), envs.T + 2, device=device)
     invalid_count, env_time = 0, 0.0
+    dropped = np.zeros(envs.T, np.int64)  # per action type, the learner's actions the bridge dropped (CPU flags: no sync)
 
     def rollout():
         """Collects T steps from every game; False if a stop was requested meanwhile."""
-        nonlocal obs, global_step, invalid_count, env_time, teams
+        nonlocal obs, global_step, invalid_count, env_time, teams, dropped
         for step in range(T):
             if not control.wait():
                 return False
@@ -623,6 +624,7 @@ def main(argv=None):
                 league.finished(slotted)
                 teams = opponents()
             invalid_count += int(invalid[learner_np].sum())
+            dropped += np.bincount(acts[learner_np, 0][invalid[learner_np]], minlength=envs.T)
             global_step += L
             control.throttle(time.perf_counter() - t0)
         return True
@@ -713,6 +715,8 @@ def main(argv=None):
             tally.zero_()
             for i, act_name in enumerate(ACT_NAMES):
                 metrics[f"actions/{act_name}"] = float(counts[:, i].sum() / (T * L))
+                if counts[:, i].sum() > 0:  # the share of this type's decisions that dropped
+                    metrics[f"actions/invalid_rate/{act_name}"] = float(dropped[i] / counts[:, i].sum())
             for k, setup in enumerate(names):
                 n = T * rows_of[k]  # this setup's decisions
                 for i, act_name in enumerate(ACT_NAMES):
@@ -723,6 +727,7 @@ def main(argv=None):
                 metrics["league/pool"], metrics["league/opponents"] = len(league.pool), len(teams)
                 control.update(league=league.table())
             invalid_count, env_time = 0, 0.0
+            dropped[:] = 0
             for k, v in metrics.items():
                 writer.add_scalar(k, v, global_step)
             control.update(update=update, global_step=global_step, metrics=metrics)
