@@ -66,7 +66,7 @@ test("init returns dims and a full first frame per game", async () => {
   assert.equal(header.games.length, 2);
   const g = header.games[0];
   assert.equal(g.reset, true);
-  assert.deepEqual(g.blobs.map((b: [string, number]) => b[0]), ["terrain", "cells", "units", "players", "rel", "scalars", "types", "attack", "retreat"]);
+  assert.deepEqual(g.blobs.map((b: [string, number]) => b[0]), ["terrain", "cells", "units", "players", "rel", "scalars", "types", "attack", "retreat", "diplomacy"]);
   assert.equal(g.blobs[1][1], 64 * 64 * 11);
   const total = header.games.flatMap((x: any) => x.blobs).reduce((s: number, b: [string, number]) => s + b[1], 0);
   assert.equal(body.length, total);

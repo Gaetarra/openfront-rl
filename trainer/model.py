@@ -318,7 +318,7 @@ class RandomPolicy(nn.Module):
 
     def forward(self, obs):
         n, dev = obs["type_mask"].shape[0], obs["type_mask"].device
-        return {"type": torch.zeros(obs["type_mask"].shape, device=dev),
+        return {"type": torch.zeros(n, len(ACT_NAMES), device=dev),  # the 15 types every head can complete
                 "maps": torch.zeros(obs["cell_mask"].shape, device=dev),
                 "bins": torch.zeros(n, 2, self.n_bins, device=dev),
                 "ptr": torch.zeros(obs["attack_mask"].shape, device=dev),

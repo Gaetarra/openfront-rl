@@ -5,8 +5,9 @@ import { Attack, Game, Player, Unit } from "../OpenFront_Source_Code/openfrontio
 import { canBuildTransportShip } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/TransportShipUtils";
 import { CellFrame } from "./frame";
 
-/** Action types (PLAN 3B "Actions"): Phase 1's five, then every other command ranked 1v1 players give, except
- * diplomacy, chat, warship moves and MIRVs. */
+/** Action types (PLAN 3B "Actions"): Phase 1's five, then every other command ranked 1v1 players give, then step 6's
+ * diplomacy and warship moves. Outside the set: gold donations, rejects, embargoes, target marks, chat and emoji, MIRVs,
+ * cancelling boats and deleting units. */
 export enum Act {
   Noop = 0,
   Spawn = 1,
@@ -23,8 +24,15 @@ export enum Act {
   HydrogenBomb = 12,
   Upgrade = 13,
   Retreat = 14,
+  AllianceRequest = 15, // also accepts a request the target sent
+  RenewAlliance = 16,
+  BreakAlliance = 17,
+  DonateTroops = 18,
+  MoveWarships = 19,
 }
-export const N_ACTS = 15;
+export const N_ACTS = 20;
+/** The types aimed at a player (a row of the player table), in the order of Masks.diplomacy's rows. */
+export const DIPLOMACY: readonly Act[] = [Act.AllianceRequest, Act.RenewAlliance, Act.BreakAlliance, Act.DonateTroops];
 /** The unit each build action places: structures on own land, a port on own shore, a warship on water, a nuke on any
  * tile the game lets it hit. */
 export const BUILDS: ReadonlyMap<Act, UnitType> = new Map([
@@ -80,12 +88,44 @@ export function retreatMask(seat: Player, slots: number): Uint8Array {
   return mask;
 }
 
-/** Which action types are legal now (1 = allowed). `retreat`: retreatMask, or nothing to cancel. */
+/** Which table rows each diplomatic type can target now: DIPLOMACY.length rows of `slots` bytes, by the game's own checks. */
+export function diplomacyMask(game: Game, seat: Player, slots: number): Uint8Array {
+  const mask = new Uint8Array(DIPLOMACY.length * slots);
+  if (game.inSpawnPhase() || !seat.isAlive()) return mask;
+  for (const p of game.allPlayers()) {
+    const s = p.smallID();
+    if (p === seat || s >= slots) continue;
+    mask[s] = p.isAlive() && seat.canSendAllianceRequest(p) ? 1 : 0;
+    mask[slots + s] = seat.allianceInfo(p)?.canExtend === true ? 1 : 0;
+    mask[2 * slots + s] = seat.isAlliedWith(p) ? 1 : 0;
+    mask[3 * slots + s] =
+      seat.canDonateTroops(p) && game.config().maxTroops(p) - p.troops() >= 1 && seat.troops() >= 1 ? 1 : 0;
+  }
+  return mask;
+}
+
+/** What a seat's decision is masked by: the legal types, and the targets of attacks, retreats and diplomacy. */
+export interface Masks {
+  types: Uint8Array;
+  attack: Uint8Array;
+  retreat: Uint8Array;
+  diplomacy: Uint8Array;
+}
+
+export function seatMasks(game: Game, seat: Player, slots: number): Masks {
+  const attack = attackMask(game, seat, slots);
+  const retreat = retreatMask(seat, slots);
+  const diplomacy = diplomacyMask(game, seat, slots);
+  return { types: typeMask(game, seat, attack, retreat, diplomacy), attack, retreat, diplomacy };
+}
+
+/** Which action types are legal now (1 = allowed). `retreat`: retreatMask, or nothing to cancel. `diplomacy`: diplomacyMask. */
 export function typeMask(
   game: Game,
   seat: Player,
   attack: Uint8Array,
   retreat: Uint8Array = new Uint8Array(0),
+  diplomacy: Uint8Array = new Uint8Array(0),
 ): Uint8Array {
   const m = new Uint8Array(N_ACTS);
   if (game.inSpawnPhase()) {
@@ -109,6 +149,9 @@ export function typeMask(
   }
   m[Act.Upgrade] = seat.units().some((u) => u.isActive() && seat.canUpgradeUnit(u)) ? 1 : 0;
   m[Act.Retreat] = retreat.includes(1) ? 1 : 0;
+  const slots = diplomacy.length / DIPLOMACY.length;
+  DIPLOMACY.forEach((act, k) => (m[act] = diplomacy.subarray(k * slots, (k + 1) * slots).includes(1) ? 1 : 0));
+  m[Act.MoveWarships] = seat.units(UnitType.Warship).some((u) => u.isActive()) ? 1 : 0;
   return m;
 }
 
@@ -123,16 +166,9 @@ export interface Decoded {
 const DROP: Decoded = { intent: null, valid: false };
 
 /** Turns a sampled [type, cell, target, share] into a game intent (null intent = no-op). share: the percent of its
- * current troops an attack or boat sends. `retreat`: retreatMask, or nothing to cancel. */
-export function decodeAction(
-  game: Game,
-  seat: Player,
-  frame: CellFrame,
-  types: Uint8Array,
-  attack: Uint8Array,
-  action: number[],
-  retreat: Uint8Array = new Uint8Array(0),
-): Decoded {
+ * current troops an attack, boat or donation sends. `masks`: the seat's masks when it chose. */
+export function decodeAction(game: Game, seat: Player, frame: CellFrame, masks: Masks, action: number[]): Decoded {
+  const { types, attack, retreat, diplomacy } = masks;
   const [type, cell, target, share] = action;
   if (!Number.isInteger(type) || types[type] !== 1) return DROP;
   if (type === Act.Noop) return { intent: null, valid: true };
@@ -149,7 +185,19 @@ export function decodeAction(
       .reduce<Attack | null>((best, a) => (best === null || a.troops() > best.troops() ? a : best), null);
     return largest === null ? DROP : { intent: { type: "cancel_attack", attackID: largest.id() }, valid: true };
   }
+  const k = DIPLOMACY.indexOf(type);
+  if (k >= 0) {
+    const slots = diplomacy.length / DIPLOMACY.length;
+    if (!Number.isInteger(target) || target < 0 || target >= slots || diplomacy[k * slots + target] !== 1) return DROP;
+    const recipient = (game.playerBySmallID(target) as Player).id();
+    if (type === Act.AllianceRequest) return { intent: { type: "allianceRequest", recipient }, valid: true };
+    if (type === Act.RenewAlliance) return { intent: { type: "allianceExtension", recipient }, valid: true };
+    if (type === Act.BreakAlliance) return { intent: { type: "breakAlliance", recipient }, valid: true };
+    if (!isShare(share)) return DROP;
+    return { intent: { type: "donate_troops", recipient, troops: (share / 100) * seat.troops() }, valid: true };
+  }
   if (!Number.isInteger(cell) || cell < 0 || cell >= frame.n) return DROP;
+  if (type === Act.MoveWarships) return DROP; // Task 5
   if (type === Act.Spawn) {
     const tile = byCentre(game, frame, cell).find((t) => game.isLand(t) && !game.isImpassable(t) && !game.hasOwner(t));
     return tile === undefined ? DROP : { intent: { type: "spawn", tile }, valid: true };
