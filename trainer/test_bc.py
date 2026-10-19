@@ -15,12 +15,14 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 from trainer import bc, crawl
 from trainer.bc import (Meter, backward_windows, bc_loss, is_val, label_legal, lr_at, main, measure, one_pass, score,
                         table)
-from trainer.env import RANKED_1V1, ROOT, VecEnv
-from trainer.model import ACT_NAMES, ATTACK, BUILD, RETREAT, SHARES, ActionDist, Policy, PolicyV1, new_net
+from trainer.env import DST, MOVE, RANKED_1V1, ROOT, VecEnv
+from trainer.model import (ACT_NAMES, ATTACK, BREAK, BUILD, DIPLOMACY, DONATE, MAP_OF, RENEW, REQUEST, RETREAT, SHARES,
+                           ActionDist, Policy, PolicyV1, new_net)
 from trainer.test_model import DIMS, N as ROWS, exact_fp32, fake_obs, randomized
 
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
-FIXTURE_SIZE = json.loads(gzip.decompress(FIXTURE.read_bytes()))["info"]["config"]["gameMapSize"].lower()  # its bucket
+TEAM = ROOT / "bridge" / "testdata" / "team.json.gz"
+FIXTURE_SIZE =json.loads(gzip.decompress(FIXTURE.read_bytes()))["info"]["config"]["gameMapSize"].lower()  # its bucket
 
 
 class LabelTest(unittest.TestCase):
@@ -128,6 +130,50 @@ class CloneTest(unittest.TestCase):
         self.assertLess(losses[-1], losses[0] - 0.3)  # at least the no-op prior is learnt
 
 
+class TeamTest(unittest.TestCase):
+    def test_a_v5_network_learns_from_the_team_record(self):
+        config = {"map": "Between Two Seas", "compact": True, "nations": 0, "bots": 100, "difficulty": "Medium",
+                  "timerMinutes": 0, "seats": 18}
+        env = VecEnv(config, workers=1, games_per_worker=1, seed="team", records=[TEAM])
+        try:
+            windows = []
+            for _ in range(400):
+                if (env.labels[:, 0] >= REQUEST).any():
+                    windows.append(({k: v.clone() for k, v in env.obs.items()}, env.labels.clone()))
+                    if len(windows) == 8:
+                        break
+                env.step()
+            dims = env.dims
+        finally:
+            env.close()
+        obs = {k: torch.cat([w[0][k] for w in windows]) for k in windows[0][0]}
+        labels = torch.cat([w[1] for w in windows])
+        legal = label_legal(obs, labels)
+        self.assertTrue(bool((legal & (labels[:, 0] >= REQUEST)).any()), "a new-type label was seen and is legal")
+        torch.manual_seed(0)
+        model = Policy(dims, v5=True).cuda().to(memory_format=torch.channels_last)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        target = torch.zeros(len(labels), device="cuda")
+        losses = []
+        for _ in range(21):
+            loss, *_ = bc_loss(model, obs, labels, legal, target, vf_coef=0.0)
+            losses.append(loss.item())
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+        self.assertTrue(math.isfinite(losses[0]))
+        self.assertLess(losses[-1], losses[0])
+        # a v4 network cannot express the new types: it counts their labels in labels/beyond_net and scores the rest
+        v4 = Policy({**dims, "playerFeatures": DIMS["playerFeatures"]}, shares=True, full=True).cuda().eval()
+        m, zero = Meter(), torch.zeros(len(labels), device="cuda")
+        with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+            out = v4(obs)
+        measure(m, obs, labels, legal, ActionDist(out, obs), zero, zero)
+        s = m.means()
+        self.assertGreater(s["labels/beyond_net"], 0)
+        self.assertTrue(math.isfinite(s["bc/nll"]) and "bc/nll_donate_share" not in s)
+
+
 class RandomPolicy5(torch.nn.Module):
     """Uniform outputs of a network with the 5 types and 3 heat maps of before 3B step 3."""
 
@@ -162,6 +208,52 @@ class MeasureTest(unittest.TestCase):
         labels = torch.tensor([[6, 7, 0, 0], [6, 8, 0, 0], [RETREAT, 0, 3, 0], [RETREAT, 0, 2, 0], [13, 7, 0, 0],
                                [-1, 0, 0, 0]], device="cuda")
         self.assertEqual(label_legal(obs, labels).tolist(), [True, False, True, False, False, False])
+
+    def test_new_labels_need_their_target_or_destination(self):
+        n, p, hw = 10, 5, 16
+        obs = {"type_mask": torch.ones(n, len(ACT_NAMES), dtype=torch.bool, device="cuda"),
+               "cell_mask": torch.zeros(n, DST + 1, hw, dtype=torch.bool, device="cuda"),
+               "attack_mask": torch.zeros(n, p, dtype=torch.bool, device="cuda"),
+               "retreat_mask": torch.zeros(n, p, dtype=torch.bool, device="cuda"),
+               "diplomacy_mask": torch.zeros(n, len(DIPLOMACY), p, dtype=torch.bool, device="cuda")}
+        obs["diplomacy_mask"][:, 0, 2] = True  # a request, a donation and a break can go to player 2
+        obs["diplomacy_mask"][:, BREAK - REQUEST, 2] = True
+        obs["diplomacy_mask"][:, DONATE - REQUEST, 2] = True
+        obs["cell_mask"][:, MAP_OF[MOVE], 5] = True  # a warship stands in cell 5
+        obs["cell_mask"][:, DST, 9] = True  # and cell 9 is water
+        labels = torch.tensor([[REQUEST, 0, 2, 0], [REQUEST, 0, 3, 0],  # a legal row, a masked-out one
+                               [RENEW, 0, 2, 0],  # renewals are not allowed for player 2: the mask of its own type
+                               [BREAK, 0, 2, 0],
+                               [DONATE, 0, 2, 40], [DONATE, 0, 2, 0],  # a share of 40%, a share of 0
+                               [MOVE, 5, 9, 1], [MOVE, 5, 8, 1], [MOVE, 5, 9, 2], [MOVE, 6, 9, 0]], device="cuda")
+        self.assertEqual(label_legal(obs, labels).tolist(),
+                         [True, False, False, True, True, False, True, False, False, False])
+
+    def test_a_v5_networks_diplomacy_and_warship_heads_are_scored_per_head(self):
+        obs = fake_obs()
+        obs["type_mask"][:], obs["cell_mask"][:] = True, True
+        obs["diplomacy_mask"][:] = False
+        obs["diplomacy_mask"][:, :, 2] = True  # player 2 is the only recipient
+        hw, players = obs["cell_mask"].shape[-1], obs["attack_mask"].shape[-1]
+        out = {"type": torch.zeros(ROWS, len(ACT_NAMES), device="cuda"), "maps": torch.zeros(ROWS, DST, hw, device="cuda"),
+               "ptr": torch.zeros(ROWS, players, device="cuda"), "retreat": torch.zeros(ROWS, players, device="cuda"),
+               "shares": torch.zeros(ROWS, 3, players, SHARES, device="cuda"),
+               "diplomacy": torch.zeros(ROWS, len(DIPLOMACY), players, device="cuda"),
+               "move": lambda src: (torch.zeros(ROWS, hw, device="cuda"),
+                                    torch.tensor([[0.0, 5.0]] * ROWS, device="cuda"))}  # the fleet is the likelier
+        labels = torch.tensor([[DONATE, 0, 2, 40]] * 2 + [[REQUEST, 0, 2, 0]] + [[MOVE, 7, 9, 0]] * 2 + [[MOVE, 7, 9, 1]],
+                              device="cuda")
+        legal = label_legal(obs, labels)
+        self.assertTrue(bool(legal.all()))
+        m, zero = Meter(), torch.zeros(ROWS, device="cuda")
+        measure(m, obs, labels, legal, ActionDist(out, obs), zero, zero)
+        s = m.means()
+        self.assertEqual((s["bc/donate_troops_target_acc"], s["bc/nll_donate_troops_target"]), (1.0, 0.0))
+        self.assertEqual(s["bc/alliance_request_target_acc"], 1.0)
+        self.assertAlmostEqual(s["bc/nll_donate_share"], math.log(SHARES), places=4)
+        self.assertAlmostEqual(s["bc/nll_warship_dst"], math.log(hw), places=4)
+        self.assertAlmostEqual(s["bc/warship_fleet_acc"], 1 / 3)
+        self.assertNotIn("bc/nll_renew_alliance_target", s)  # no such rows
 
     def test_a_network_learns_and_is_scored_only_on_the_rows_its_actions_express(self):
         obs = fake_obs()

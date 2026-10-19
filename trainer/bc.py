@@ -23,10 +23,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 from trainer import crawl
 from trainer.control import Control, serve
-from trainer.env import MAP_TYPES, RANKED_1V1, ROOT, VecEnv, game_commit
+from trainer.env import DST, MAP_TYPES, MOVE, RANKED_1V1, ROOT, VecEnv, game_commit
 from trainer.eval import tag
-from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, MAP_NAMES, MAP_OF, RETREAT, SHARES, SIZE_OF, ActionDist, _on,
-                           describe, load_net, new_net)
+from trainer.model import (ACT_NAMES, ATTACK, BOAT, CORES, DIPLOMACY, DONATE, MAP_NAMES, MAP_OF, REQUEST, RETREAT,
+                           SHARES, SIZE_OF, ActionDist, _on, describe, load_net, new_net)
 from trainer.ppo import network_args, resume_args, save_checkpoint
 
 PHASES = ("spawn", "early", "mid", "late")
@@ -93,7 +93,9 @@ def run_info(a, train, val):
 
 def label_legal(obs, labels):
     """Rows whose label can enter the loss: an action type (not a command outside the set) that the observation's
-    masks allow, with a legal cell on its heat map, a legal attack target or an attack to cancel."""
+    masks allow, with a legal cell on its heat map, a legal attack target or an attack to cancel; a diplomatic action
+    needs its recipient in its row of the diplomacy mask (a donation also a share of 1-100%), a warship move a legal
+    destination cell (water) and a fleet of 0 or 1 besides its source cell."""
     t, cell, target = labels[:, 0], labels[:, 1], labels[:, 2]
     rows = torch.arange(len(t), device=t.device)
     ok = (t >= 0) & obs["type_mask"][rows, t.clamp(min=0)]
@@ -102,7 +104,15 @@ def label_legal(obs, labels):
     ok &= torch.where(m >= 0, cell_ok, True)
     target = target.clamp(0, obs["attack_mask"].shape[-1] - 1)
     ok &= torch.where(t == ATTACK, obs["attack_mask"][rows, target], True)
-    return ok & torch.where(t == RETREAT, obs["retreat_mask"][rows, target], True)
+    ok &= torch.where(t == RETREAT, obs["retreat_mask"][rows, target], True)
+    if "diplomacy_mask" in obs:  # step 6's observations
+        who = labels[:, 2].clamp(0, obs["diplomacy_mask"].shape[-1] - 1)
+        asks = (t >= REQUEST) & (t <= DONATE)
+        ok &= torch.where(asks, obs["diplomacy_mask"][rows, (t - REQUEST).clamp(0, len(DIPLOMACY) - 1), who], True)
+        ok &= torch.where(t == DONATE, (labels[:, 3] >= 1) & (labels[:, 3] <= SHARES), True)
+        dst = obs["cell_mask"][rows, DST, labels[:, 2].clamp(0, obs["cell_mask"].shape[-1] - 1)]
+        ok &= torch.where(t == MOVE, dst & ((labels[:, 3] == 0) | (labels[:, 3] == 1)), True)
+    return ok
 
 
 def value_targets(env, gamma, device):
@@ -150,6 +160,9 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     - accuracy and NLL per head. bc/nll and the troop heads' bc/*_bin are like for like for every network: a
       100-share network's shares are summed into the five sizes' ranges (SIZE_OF). Its own 100-share NLL is
       bc/nll_shares, with bc/nll_*_share per head;
+    - a v5 network's diplomacy pointers (bc/*_target_acc and bc/nll_*_target per diplomatic type), the donation's share
+      (bc/nll_donate_share) and a warship move's destination and fleet (bc/nll_warship_dst, bc/warship_fleet_acc), each
+      over the rows of its type;
     - for the cell heads, also how close the bot's cell lands to the human's, since a near miss is almost as good as a
       hit: the chance it falls within NEAR_TILES (bc/*_cell_near) and its expected distance in tiles (bc/*_cell_dist),
       and both for a uniform pick over the legal cells, their baseline (bc/*_uniform);
@@ -167,7 +180,8 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
     legal = legal & (t < n_types)  # rows this network's actions can express
     nl = legal.sum()
     safe = torch.where(legal[:, None], labels, torch.zeros_like(labels))  # rows outside the loss: a no-op
-    _, cell, tgt, b = safe.unbind(1)
+    _, cell, dst_cell, b = safe.unbind(1)
+    tgt = torch.where(t == MOVE, 0, dst_cell)  # a move's third entry is a cell, not a player
     logp = dist.log_prob(safe, sizes=True)
     m.add("labels/noop", ((t == 0) & legal).sum(), nl)
     m.add("bc/nll", -(logp * legal).sum(), nl)
@@ -206,6 +220,19 @@ def measure(m, obs, labels, legal, dist, value, target, gates=None):
         u = u / u.sum(1, keepdim=True).clamp(min=1)  # the baseline: a uniform pick over the legal cells
         m.add(f"bc/{name}_cell_near_uniform", ((u * (tiles <= NEAR_TILES)).sum(1) * rows).sum(), rows.sum())
         m.add(f"bc/{name}_cell_dist_uniform", ((u * tiles).sum(1) * rows).sum(), rows.sum())
+    if dist.diplo is not None:
+        for k, typ in enumerate(DIPLOMACY):
+            name, rows = ACT_NAMES[typ], legal & (t == typ)
+            m.add(f"bc/{name}_target_acc", ((dist.diplo.logits[:, k].argmax(1) == tgt) & rows).sum(), rows.sum())
+            lp = dist.diplo.log_prob(tgt[:, None].expand(-1, len(DIPLOMACY)))[:, k]
+            m.add(f"bc/nll_{name}_target", -(lp * rows).sum(), rows.sum())
+        rows = legal & (t == DONATE)
+        m.add("bc/nll_donate_share", -(lt[:, 2] * rows).sum(), rows.sum())
+    if dist.has_move:
+        rows = legal & (t == MOVE)
+        dst, fleet = dist._move_at(cell)  # the stored source, as the loss reads it
+        m.add("bc/nll_warship_dst", -(dst.log_prob(torch.where(rows, dst_cell, 0)) * rows).sum(), rows.sum())
+        m.add("bc/warship_fleet_acc", ((fleet.logits.argmax(1) == b) & rows).sum(), rows.sum())
     if dist.retreat is not None:
         rows = legal & (t == RETREAT)
         m.add("bc/retreat_target_acc", ((dist.retreat.logits.argmax(1) == tgt) & rows).sum(), rows.sum())
