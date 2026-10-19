@@ -8,12 +8,13 @@ import numpy as np
 import torch
 
 from trainer import env as env_module
-from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, FFA, HVN, LAND, LEVEL, MAP_TYPES, N_CHANNELS, OWN, OWNER,
-                         OWNER_FEATURES, RANKED_1V1, ROOT, UNIT, UPGRADABLE, VALID, WORKER_V4_FEATURES, ZONE_KINDS,
-                         VecEnv, disk_cells, frozen_eval_config, gate_config, quantize_)
+from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, DST, FFA, HEALTH, HVN, LAND, LEVEL, MAP_TYPES, MOVE,
+                         N_CHANNELS, OWN, OWNER, OWNER_FEATURES, PATROL, RANKED_1V1, ROOT, TRADE, UNIT, UPGRADABLE,
+                         VALID, VETERAN, WORKER_V4_FEATURES, ZONE_KINDS, VecEnv, disk_cells, frozen_eval_config,
+                         gate_config, quantize_)
 from scripts.coverage import label_kinds
 from trainer.eval import Scripted
-from trainer.model import v1_spatial
+from trainer.model import ACT_NAMES, v1_spatial
 
 ONION = {"map": "Onion", "compact": True, "nations": 3, "difficulty": "Easy", "bots": 0, "timerMinutes": 5, "seats": 1}
 FIXTURE = ROOT / "bridge" / "testdata" / "ranked1v1.json.gz"
@@ -94,13 +95,26 @@ def new_channels(units, rel, names, side, H, W):
     """One seat's channels from LEVEL on, from the unit records by their definitions in trainer/env.py."""
     want = np.zeros((N_CHANNELS - LEVEL, H * W))
     cy, cx = np.divmod(np.arange(H * W), W)
+    ours = lambda r: r in (1, 2)  # self or a friend
     for u in units:
         name, r = names[u["type"]], int(rel[u["owner"]])
+        if name == "Trade Ship":  # paying the seat or its friends; capturable: an enemy's, not safe, bound for a stranger
+            bound = int(rel[u["bound"]])
+            if ours(r) or ours(bound):
+                want[TRADE - LEVEL, u["cell"]] += 1 / 16
+            elif r == 3 and not ours(bound) and not u["flags"] & 1:
+                want[TRADE + 1 - LEVEL, u["cell"]] += 1 / 16
         if r == 0:
             continue
         if name in BUILDING_TYPES[:6]:  # structures, one per cell at most
             want[0, u["cell"]] += u["level"] / 16
             want[1, u["cell"]] += u["ready"] / 16
+        if name == "Warship":
+            theirs = int(r >= 3)
+            want[HEALTH + theirs - LEVEL, u["cell"]] += u["troops"] / 4
+            want[VETERAN + theirs - LEVEL, u["cell"]] += u["ready"] / 12
+            if r == 1:
+                want[PATROL - LEVEL, (int(u["zy"]) // side) * W + int(u["zx"]) // side] += 1 / 16
         kind = ZONE_KINDS.get(name)
         if kind is not None and u["zr"] > 0:
             x, y, radius = int(u["zx"]), int(u["zy"]), int(u["zr"])
@@ -119,7 +133,7 @@ class VecEnvTest(unittest.TestCase):
             self.assertEqual(obs["players"].shape, (2, 5, 31))
             self.assertEqual((obs["owners"].shape, obs["owners"].dtype), ((2, 2, 64 * 64), torch.int16))
             self.assertEqual(obs["owner_land"].dtype, torch.uint8)
-            self.assertEqual(obs["cell_mask"].shape, (2, len(MAP_TYPES), 64 * 64))
+            self.assertEqual(obs["cell_mask"].shape, (2, DST + 1, 64 * 64))
             self.assertTrue(obs["cell_mask"][:, 0].any(), "spawn cells exist at the start")
             rng = np.random.default_rng(0)
             for _ in range(80):
@@ -137,13 +151,29 @@ class VecEnvTest(unittest.TestCase):
             policy = Scripted()
             for _ in range(80):  # the spawn phase and some 25 s after it
                 obs = env.obs
-                self.assertEqual(obs["type_mask"].shape[1], 15)
-                self.assertEqual(obs["cell_mask"].shape[1], len(MAP_TYPES))
+                self.assertEqual(obs["type_mask"].shape[1], len(ACT_NAMES))
+                self.assertEqual(obs["cell_mask"].shape[1], DST + 1)
                 self.assertEqual(obs["retreat_mask"].shape, obs["attack_mask"].shape)
-                self.assertFalse((obs["type_mask"][:, list(MAP_TYPES)] & ~obs["cell_mask"].any(-1)).any())
+                self.assertFalse((obs["type_mask"][:, list(MAP_TYPES)] & ~obs["cell_mask"][:, :DST].any(-1)).any())
+                self.assertFalse((obs["type_mask"][:, MOVE] & ~obs["cell_mask"][:, DST].any(-1)).any())
                 env.step(policy(obs).cpu().numpy())
             own = obs["spatial"][:, OWN].flatten(1) > 0
             self.assertTrue((obs["cell_mask"][:, 9] & own).any(), "the atom map keeps own cells: self-nukes stay legal")
+        finally:
+            env.close()
+
+    def test_the_observation_carries_v5_masks_and_inputs(self):
+        env = VecEnv(ONION, workers=1, games_per_worker=1, seed="v5")
+        try:
+            obs, rng = env.obs, np.random.default_rng(2)
+            for _ in range(3):
+                obs = env.step(random_legal(obs, rng))[0]
+            self.assertEqual(obs["spatial"].shape, (1, 64, env.H, env.W))
+            self.assertEqual(obs["players"].shape, (1, env.P, 31))
+            self.assertEqual(obs["cell_mask"].shape, (1, 14, env.H * env.W))
+            self.assertEqual(obs["diplomacy_mask"].shape, (1, 4, env.P))
+            self.assertEqual(obs["diplomacy_mask"].dtype, torch.bool)
+            self.assertEqual(obs["type_mask"].shape, (1, 20))
         finally:
             env.close()
 
@@ -265,12 +295,38 @@ class VecEnvTest(unittest.TestCase):
             mixed.close()
             alone.close()
 
+    def test_warship_and_trade_channels_follow_their_definitions(self):
+        env = VecEnv.__new__(VecEnv)  # one game of 2 seats on a 4 x 4 grid, as in test_units_paint_every_seat...
+        env.device = torch.device("cpu")
+        env.E, env.N, env.P, env.H, env.W = 1, 2, 4, 4, 4
+        env.seats, env.first = np.array([2]), np.array([0])
+        env.building = torch.tensor([BUILDING_TYPES.index("Warship"), -1])
+        env.zone_kind, env.transport, env.trade = torch.tensor([-1, -1]), -1, 1
+        env.area = torch.full((1,), 64.0)
+        rel = torch.tensor([[0, 1, 3, 3], [0, 3, 1, 3]])  # row 0 is player 1, row 1 is player 2; player 3 an enemy of both
+        units = np.zeros(3, UNIT)
+        units["type"], units["owner"], units["cell"] = (0, 1, 1), (1, 2, 2), (5, 6, 7)
+        units["troops"][0], units["ready"][0], units["zx"][0], units["zy"][0] = 0.5, 2, 11, 19  # patrol tile in cell 9
+        units["bound"][1:] = 3, 1  # one ship bound for player 3's port, one for player 1's
+        x = torch.zeros(2, N_CHANNELS, 16)
+        env._add_units(x, [(0, units)], rel, torch.ones(2, UPGRADABLE, dtype=torch.bool))
+        near = lambda got, want: self.assertAlmostEqual(got.item(), want, places=6)
+        near(x[0, HEALTH, 5], 0.5 / 4)
+        near(x[0, VETERAN, 5], 2 / 12)
+        near(x[0, PATROL, 9], 1 / 16)
+        near(x[0, TRADE + 1, 6], 1 / 16)  # an enemy's ship bound for an enemy: capturable
+        near(x[0, TRADE, 7], 1 / 16)  # an enemy's ship bound for row 0's port: it pays row 0
+        near(x[1, HEALTH + 1, 5], 0.5 / 4)  # the same warship is the enemy's for row 1
+        near(x[1, PATROL].sum(), 0)  # and not its patrol
+        near(x[1, TRADE, 6] + x[1, TRADE, 7], 2 / 16)  # row 1's own ships
+
     def test_units_paint_every_seat_of_their_own_game(self):
         env = VecEnv.__new__(VecEnv)  # the attributes _add_units reads
         env.device = torch.device("cpu")
         env.E, env.N, env.P, env.H, env.W = 2, 6, 8, 4, 4
         env.seats, env.first = np.array([2, 4]), np.array([0, 2])
         env.building, env.zone_kind, env.transport = torch.tensor([0, -1]), torch.tensor([-1, -1]), 1
+        env.trade = -1  # no trade ships here
         env.area = torch.full((2,), 64.0)
         rel = torch.zeros(6, 8, dtype=torch.long)
         rel[4, 5], rel[[2, 3, 5], 5] = 1, 3  # player 5: Self for row 4, Enemy for the rest of game 1
@@ -332,11 +388,12 @@ class ChannelTest(unittest.TestCase):
         env = VecEnv(RANKED_1V1, workers=1, games_per_worker=1, seed="channels", records=[FIXTURE])
         cls.seen, cls.legacy_error = None, 0.0
         cls.upgrade = np.zeros(3, int)  # wrong cells, open cells, own buildings left shut
+        cls.ships = np.zeros(N_CHANNELS - HEALTH, int)  # observations with each warship and trade channel set
         cls.new_error, cls.zones = 0, np.zeros(3, int)  # worst error from LEVEL on; observations with each zone kind
         structures = [env.dims["unitTypes"].index(t) for t in BUILDING_TYPES[:6]]
 
         def keep(args, obs):
-            players, rel, _, types, _, _, units = args
+            players, rel, _, types, _, _, units, _ = args
             old = phase2_spatial(env, players, rel, units).to(torch.bfloat16).float()
             new = v1_spatial(obs["spatial"]).to(torch.bfloat16).float() / 64  # what PolicyV1 reads
             cls.legacy_error = max(cls.legacy_error, float((new - old).abs().max()))
@@ -362,7 +419,8 @@ class ChannelTest(unittest.TestCase):
                 want = new_channels(rec, rel[seat], env.dims["unitTypes"], side, env.H, env.W)
                 got = obs["spatial"][seat, LEVEL:].reshape(N_CHANNELS - LEVEL, -1).cpu().numpy().astype(np.int64)
                 cls.new_error = max(cls.new_error, int(np.abs(got - np.clip(np.round(want * 64), 0, 255)).max()))
-                cls.zones += want[2:].reshape(3, 2, -1).any((1, 2))
+                cls.zones += want[2:8].reshape(3, 2, -1).any((1, 2))
+                cls.ships += want[HEALTH - LEVEL:].any(1)
 
         try:
             watch_observations(env, keep)
@@ -408,6 +466,7 @@ class ChannelTest(unittest.TestCase):
         self.assertEqual(self.new_error, 0)  # 1/16 steps and whole counts are exact in 64ths
         self.assertGreater(self.zones[1], 0, "a defense post's zone was seen")
         self.assertGreater(self.zones[2], 0, "a nuke in flight was seen")
+        self.assertGreater(self.ships[TRADE - HEALTH], 0, "a trade ship that pays a seat was seen")
 
 
 if __name__ == "__main__":

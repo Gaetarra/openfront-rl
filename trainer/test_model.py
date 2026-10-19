@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from trainer.env import BUILDINGS, N_CHANNELS
+from trainer.env import BUILDINGS, N_CHANNELS, ROOT
 from trainer.model import (ATTACK, ATTENDED, BOAT, BUILD, CORES, MAP_OF, MASK_VALUE, OLD_CHANNELS, OLD_SCALARS, RETREAT,
                            SHARES, SIZE_OF, SIZES, SPAWN, V4_CHANNELS, ActionDist, Policy, PolicyV1, RandomPolicy, SoftMoE,
                            load_net, new_net, relevance, v1_spatial)
@@ -152,6 +152,18 @@ class ModelTest(unittest.TestCase):
                 self.assertEqual("retreat" in out, full)
                 self.assertEqual(out["ptr"].shape, (N, P))
                 self.assertEqual(out["value"].shape, (N,))
+
+    def test_v4_keeps_15_types_and_12_maps(self):
+        """Step 6 adds types and heat maps to the env, but a v4 network keeps its sizes, so v4 checkpoints still load."""
+        net = nets()["v4"].cuda()
+        with torch.autocast("cuda", torch.bfloat16):
+            out = net(self.obs)
+        self.assertEqual((out["type"].shape, out["maps"].shape), ((N, 15), (N, 12, H * W)))
+        path = ROOT / "checkpoints" / "league4a2" / "avg004000.pt"
+        if not path.exists():
+            self.skipTest(f"{path} is not on this machine")
+        net = load_net(path, DIMS)  # strict: the network its args describe
+        self.assertEqual((net.type_head.out_features, net.n_maps), (15, 12))
 
     def test_samples_respect_masks_and_log_probs_are_finite(self):
         for name, net in nets().items():

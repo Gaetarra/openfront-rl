@@ -42,12 +42,22 @@ LEVEL = BUILDINGS + 4 * len(BUILDING_TYPES)  # 49: the cell's structure's level 
 READY = LEVEL + 1  # 50: the missiles loaded in the cell's silo or SAM / 16
 ZONES = READY + 1  # 51..56: ZONES + 2 * kind + side (0 ours: self and friends; 1 theirs: enemies and bots)
 ZONE_KINDS = {"SAM Launcher": 0, "Defense Post": 1, "Atom Bomb": 2, "Hydrogen Bomb": 2, "MIRV Warhead": 2}
-N_CHANNELS = ZONES + 2 * 3  # a SAM's zone counts its loaded interceptors / 16, a post's or a nuke's 1
+HEALTH = ZONES + 2 * 3  # a SAM's zone counts its loaded interceptors / 16, a post's or a nuke's 1
+# 57..60: HEALTH + side, VETERAN + side, by the warship's owner's side as for ZONES: the summed health / max health / 4,
+# and the summed veteran levels / 12
+VETERAN = HEALTH + 2
+PATROL = VETERAN + 2  # 61: the seat's warships whose patrol tile lies in the cell / 16
+TRADE = PATROL + 1  # 62: trade ships that pay the seat or its friends / 16; 63: the ones the seat could capture / 16
+N_CHANNELS = TRADE + 2
 DENSITY_FEATURE = 16  # player feature: log troops per tile
 WORKER_V4_FEATURES = 17  # the worker's player features before step 6; the buildings follow them, then its later ones
 # The action type of each heat map (bridge/actions.ts Act): spawn, boat, the nine builds (city, defense post, silo,
-# factory, port, SAM, warship, atom bomb, hydrogen bomb) and upgrade. Networks before 3B step 3 have the first three.
-MAP_TYPES = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+# factory, port, SAM, warship, atom bomb, hydrogen bomb), upgrade and the warship moves' source. Networks before 3B step
+# 3 have the first three, v4 the first twelve. Warship moves also take a destination cell, mask DST after the heat maps.
+MAP_TYPES = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 19)
+DST = len(MAP_TYPES)
+MOVE = 19
+WARSHIP = BUILDING_TYPES.index("Warship")
 STRUCTURES = 6  # BUILDING_TYPES[:6] are structures, at most one per cell
 UPGRADABLE = 5  # BUILDING_TYPES[:5] (city, port, factory, silo, SAM) can be upgraded
 BUILD_OF = (4, 8, 7, 6, 9)  # their build actions: an upgrade needs the gold to build another one (canUpgradeUnit)
@@ -220,6 +230,7 @@ class VecEnv:
         self.building = torch.tensor([BUILDING_TYPES.index(t) if t in BUILDING_TYPES else -1 for t in d["unitTypes"]],
                                      device=dev)
         self.transport = d["unitTypes"].index("Transport")
+        self.trade = d["unitTypes"].index("Trade Ship")
         self.zone_kind = torch.tensor([ZONE_KINDS.get(t, -1) for t in d["unitTypes"]], device=dev)
         self.terrain = torch.zeros(self.E, 5, hw, device=dev)  # land, shore, ocean, height, inside the map
         self.area = torch.full((self.E,), 64.0, device=dev)  # tiles per cell of each game
@@ -272,6 +283,7 @@ class VecEnv:
         rel = np.empty((N, P), np.uint8)
         scalars = np.empty((N, K), np.float32)
         types = np.empty((N, T), bool)
+        diplomacy = np.empty((N, 4, P), bool)
         attack = np.empty((N, P), bool)
         retreat = np.empty((N, P), bool)
         labels = np.zeros((N, 4), np.int64)
@@ -310,13 +322,14 @@ class VecEnv:
                 rel[seats] = np.frombuffer(b["rel"], np.uint8).reshape(n, P)
                 scalars[seats] = np.frombuffer(b["scalars"], np.float32).reshape(n, K)
                 types[seats] = np.frombuffer(b["types"], np.uint8).reshape(n, T)
+                diplomacy[seats] = np.frombuffer(b["diplomacy"], np.uint8).reshape(n, 4, P)
                 attack[seats] = np.frombuffer(b["attack"], np.uint8).reshape(n, P)
                 retreat[seats] = np.frombuffer(b["retreat"], np.uint8).reshape(n, P)
                 e += 1
         if self.replay:
             self.labels = torch.from_numpy(labels).to(self.device)
         self._apply_cells(resets, cells)
-        obs = self._observe(players, rel, scalars, types, attack, retreat, units)
+        obs = self._observe(players, rel, scalars, types, attack, retreat, units, diplomacy)
         return obs, rewards, dones, infos, invalid
 
     def _apply_cells(self, resets, cells):
@@ -332,7 +345,7 @@ class VecEnv:
         for name, t in (("o1", self.o1), ("o2", self.o2), ("n1", self.n1), ("n2", self.n2), ("fo", self.fo)):
             t[idx] = torch.from_numpy(rec[name].astype(np.int64 if name[0] == "o" else np.float32)).to(dev)
 
-    def _observe(self, players, rel, scalars, types, attack, retreat, units):
+    def _observe(self, players, rel, scalars, types, attack, retreat, units, diplomacy):
         """The model's inputs, one row per seat:
         - "spatial": uint8 [N, N_CHANNELS, H, W], in 64ths;
         - "players": [N, P, F + len(BUILDING_TYPES)], the worker's first WORKER_V4_FEATURES features, the player's
@@ -340,7 +353,9 @@ class VecEnv:
           that read only a prefix keep their inputs;
         - "owners" (int16) and "owner_land" (uint8) [N, 2, H * W]: each cell's two largest owners and their shares of
           it in 64ths, for the model's per-player map features;
-        - the scalars and the masks: 15 action types, 12 heat maps (MAP_TYPES), the attack and retreat pointers."""
+        - the scalars and the masks: the action types, "cell_mask" [N, DST + 1, H * W] (a heat map per MAP_TYPES entry,
+          then the warship moves' destinations), the attack and retreat pointers, and "diplomacy_mask" [N, 4, P]: the
+          targets of an alliance request, a renewal, a break and a donation (bridge/actions.ts DIPLOMACY)."""
         N, P, hw, dev, row_env = self.N, self.P, self.H * self.W, self.device, self.row_env
         area = self.area[row_env][:, None]  # [N, 1]
         rel_t = torch.from_numpy(rel.reshape(N, P).astype(np.int64)).to(dev)
@@ -376,8 +391,11 @@ class VecEnv:
             x[:, UNOWNED] > 0, shore & (x[:, LAND] - x[:, OWN] > 1e-6),  # spawn, boat
             mine, mine, mine, mine, mine & shore, mine,  # city, defense post, silo, factory, port, SAM
             x[:, OCEAN] > 0, nukable, nukable, upgradable,  # warship, atom and hydrogen bombs, upgrade
+            x[:, BUILDINGS + 4 * WARSHIP] > 0,  # warship moves: the seat's own warships
+            x[:, OCEAN] > 0,  # and the water they go to
         ], 1) & valid[:, None]
-        type_mask[:, list(MAP_TYPES)] &= cell_mask.any(-1)  # a cell action needs a legal cell on its heat map
+        type_mask[:, list(MAP_TYPES)] &= cell_mask[:, :DST].any(-1)  # a cell action needs a legal cell on its heat map
+        type_mask[:, MOVE] &= cell_mask[:, DST].any(-1)
         return {
             "spatial": quantize_(x).view(N, N_CHANNELS, self.H, self.W),
             "scalars": torch.from_numpy(scalars.reshape(N, self.K)).to(dev),
@@ -389,6 +407,7 @@ class VecEnv:
             "attack_mask": torch.from_numpy(attack.reshape(N, P)).to(dev),
             "retreat_mask": torch.from_numpy(retreat.reshape(N, P)).to(dev),
             "cell_mask": cell_mask,
+            "diplomacy_mask": torch.from_numpy(diplomacy.reshape(N, 4, P)).to(dev),
         }
 
     def _add_units(self, x, units, rel_t, afford):
@@ -397,6 +416,11 @@ class VecEnv:
         - By type and relation, a structure counts its level (under construction: 1), a transport its log troops / 10,
           a warship 1.
         - LEVEL and READY hold each structure's level (0 under construction) and its loaded missiles, / 16.
+        - HEALTH and VETERAN hold the warships' summed health / 4 and veteran levels / 12 by their owner's side (ours:
+          self and friends, theirs: enemies and bots); PATROL the seat's own warships by patrol tile / 16.
+        - TRADE holds the trade ships that pay the seat (their owner or destination port is its own or a friend's), and
+          TRADE + 1 the ones it could capture (an enemy's, bound for a port that is neither its nor a friend's, not safe
+          from pirates), / 16.
         - ZONES hold each zone (bridge/frame.ts) by kind and by its owner's side. A SAM's zone counts its loaded
           interceptors / 16, a post's or a nuke's 1.
         Also returns the upgrade map [N, H·W]: each seat's finished buildings of the types it can afford (afford
@@ -415,11 +439,15 @@ class VecEnv:
         troops = torch.from_numpy(rec["troops"].astype(np.float32)).to(dev)
         ready = torch.from_numpy(rec["ready"].astype(np.float32)).to(dev)
         zr = torch.from_numpy(rec["zr"].astype(np.int64)).to(dev)
+        flags = torch.from_numpy(rec["flags"].astype(np.int64)).to(dev)
+        bound = torch.from_numpy(rec["bound"].astype(np.int64)).to(dev)
+        side = self.area[env].sqrt().round().long()  # tiles per cell side of each record's game
+        patrol = (torch.from_numpy(rec["zy"].astype(np.int64)).to(dev) // side * self.W
+                  + torch.from_numpy(rec["zx"].astype(np.int64)).to(dev) // side)  # a warship's patrol cell
         zk = self.zone_kind[typ]
         zone = ((zk >= 0) & (zr > 0)).nonzero().squeeze(1)  # the records with a zone
         zx, zy = (torch.from_numpy(rec[f].astype(np.int64)).to(dev)[zone] for f in ("zx", "zy"))
-        side = self.area[env[zone]].sqrt().round().long()  # tiles per cell side of each zone's game
-        disk, zcell = disk_cells(zx, zy, zr[zone], side, self.H, self.W)
+        disk, zcell = disk_cells(zx, zy, zr[zone], side[zone], self.H, self.W)
         zi = zone[disk]  # the record behind each covered cell
         zvalue = torch.where(zk[zi] == 0, ready[zi] / 16, 1.0)
         kind = self.building[typ]
@@ -427,6 +455,8 @@ class VecEnv:
         keep = kind >= 0
         buildings.index_put_((env[keep], owner[keep], kind[keep]), value[keep], accumulate=True)
         first, seats = (torch.as_tensor(a, dtype=torch.long, device=dev)[env] for a in (self.first, self.seats))
+        friend = lambda rel: (rel == 1) | (rel == 2)  # the seat or its friends
+        one = x.new_tensor(1 / 16)
         for s in range(int(self.seats.max())):
             row = (first + s).clamp(max=self.N - 1)  # a game with fewer seats has no seat s: r = 0 drops its records
             r = torch.where(seats > s, rel_t[row, owner], 0)
@@ -439,6 +469,17 @@ class VecEnv:
             on = rz > 0
             x.index_put_((row[zi][on], ZONES + 2 * zk[zi][on] + (rz[on] >= 3).long(), zcell[on]), zvalue[on],
                          accumulate=True)
+            rb = torch.where(seats > s, rel_t[row, bound], 0)  # the relation of a trade ship's destination port's owner
+            ship = (kind == WARSHIP) & (r > 0)
+            x.index_put_((row[ship], HEALTH + (r[ship] >= 3).long(), cell[ship]), troops[ship] / 4, accumulate=True)
+            x.index_put_((row[ship], VETERAN + (r[ship] >= 3).long(), cell[ship]), ready[ship] / 12, accumulate=True)
+            own = ship & (r == 1)
+            x[:, PATROL].index_put_((row[own], patrol[own]), one, accumulate=True)
+            trade = typ == self.trade
+            pays = trade & (friend(r) | friend(rb))
+            capture = trade & (r == 3) & ~friend(rb) & (flags & 1 == 0)
+            x[:, TRADE].index_put_((row[pays], cell[pays]), one, accumulate=True)
+            x[:, TRADE + 1].index_put_((row[capture], cell[capture]), one, accumulate=True)
             up = keep & (r == 1) & (kind < UPGRADABLE) & (level > 0)  # own, finished, upgradable
             up &= afford[row, kind.clamp(0, UPGRADABLE - 1)]  # and the gold to build another of its type
             upgradable[row[up], cell[up]] = True

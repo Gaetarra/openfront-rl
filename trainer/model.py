@@ -8,15 +8,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, Distribution
 
-from trainer.env import BUILDING_TYPES, BUILDINGS, MAP_TYPES, OWNER
+from trainer.env import BUILDING_TYPES, BUILDINGS, MAP_TYPES, MOVE, OWNER
 
 ACT_NAMES = ["noop", "spawn", "attack", "boat", "build_city", "build_defense_post", "build_silo", "build_factory",
-             "build_port", "build_sam", "build_warship", "atom_bomb", "hydrogen_bomb", "upgrade", "retreat"]
+             "build_port", "build_sam", "build_warship", "atom_bomb", "hydrogen_bomb", "upgrade", "retreat",
+             "alliance_request", "renew_alliance", "break_alliance", "donate_troops", "move_warships"]
 SPAWN, ATTACK, BOAT, BUILD, RETREAT = 1, 2, 3, 4, 14
+REQUEST, RENEW, BREAK, DONATE = 15, 16, 17, 18  # and MOVE (19), from trainer/env.py
+DIPLOMACY = (REQUEST, RENEW, BREAK, DONATE)  # the types aimed at a player; obs "diplomacy_mask" has a row for each
 OLD_ACTS, OLD_MAPS = 5, 3  # the action types and heat maps of the networks before 3B step 3 (v1-v3)
+V4_ACTS, V4_MAPS = 15, 12  # v4's: step 6 appends types and heat maps after these
 OLD_CHANNELS, OLD_SCALARS = BUILDINGS + 4 * len(BUILDING_TYPES), 16  # the inputs before 3B step 3, part 2 (v1-v3)
 MAP_NAMES = ("spawn", "boat", "city", "defense_post", "silo", "factory", "port", "sam", "warship", "atom", "hydrogen",
-             "upgrade")  # one per MAP_TYPES entry
+             "upgrade", "warship_src")  # one per MAP_TYPES entry
 MAP_OF = torch.full((len(ACT_NAMES),), -1, dtype=torch.long)
 MAP_OF[list(MAP_TYPES)] = torch.arange(len(MAP_TYPES))  # each type's heat map; -1 for types without a cell
 MAP_TYPES_T = torch.tensor(MAP_TYPES)
@@ -164,8 +168,8 @@ class Policy(nn.Module):
       SwiGLU experts, 512 -> 1024 -> 512).
     - troops: with shares=True (arch v3, PLAN 3B), per kind a hidden layer reads the core and one player's token, then
       100 shares; otherwise the 3A network's 5 sizes from the core alone.
-    - full=True (arch v4, 3B step 3): 15 action types, 12 heat maps (MAP_TYPES), the retreat pointer and every input;
-      otherwise the 5 types, 3 heat maps, OLD_CHANNELS channels and OLD_SCALARS scalars of the networks before.
+    - full=True (arch v4, 3B step 3): V4_ACTS action types, V4_MAPS heat maps (the first of MAP_TYPES), the retreat
+      pointer and every input; otherwise the 5 types, 3 heat maps, OLD_CHANNELS channels and OLD_SCALARS scalars of the networks before.
     - Every network here reads V4_FEATURES player features (and v4 V4_CHANNELS channels), whatever the dims say: the
       inputs later steps append are ignored."""
 
@@ -176,7 +180,7 @@ class Policy(nn.Module):
         if not full:  # v2 and v3 networks were trained on the inputs before 3B step 3, part 2
             c_in, n_scal = OLD_CHANNELS, OLD_SCALARS
         c1, c2, c3 = widths
-        self.full, self.n_maps, self.n_feat = full, len(MAP_TYPES) if full else OLD_MAPS, n_feat
+        self.full, self.n_maps, self.n_feat = full, V4_MAPS if full else OLD_MAPS, n_feat
         self.stem = nn.Conv2d(c_in, c1, 4, stride=4)
         self.s1 = nn.Sequential(Res(c1), Res(c1))
         self.d2, self.s2 = nn.Conv2d(c1, c2, 2, stride=2), nn.Sequential(Res(c2), Res(c2))
@@ -193,7 +197,7 @@ class Policy(nn.Module):
         self.u3, self.u2 = nn.Conv2d(c3, c2, 1), nn.Conv2d(c2, c1, 1)
         self.shuffle = nn.Conv2d(c1, self.n_maps * 16, 1)
         self.skip = nn.Conv2d(c_in, self.n_maps, 1)
-        self.type_head = nn.Linear(512, len(ACT_NAMES) if full else OLD_ACTS)
+        self.type_head = nn.Linear(512, V4_ACTS if full else OLD_ACTS)
         self.shares = shares
         if shares:  # per kind (attack, boat): a hidden layer reading the core and one player's token, then the shares
             self.share_h, self.share_t = nn.Linear(512, 2 * DS), nn.Linear(D, 2 * DS)
@@ -318,8 +322,8 @@ class RandomPolicy(nn.Module):
 
     def forward(self, obs):
         n, dev = obs["type_mask"].shape[0], obs["type_mask"].device
-        return {"type": torch.zeros(n, len(ACT_NAMES), device=dev),  # the 15 types every head can complete
-                "maps": torch.zeros(obs["cell_mask"].shape, device=dev),
+        return {"type": torch.zeros(n, V4_ACTS, device=dev),  # the 15 types every head can complete
+                "maps": torch.zeros(n, V4_MAPS, obs["cell_mask"].shape[-1], device=dev),
                 "bins": torch.zeros(n, 2, self.n_bins, device=dev),
                 "ptr": torch.zeros(obs["attack_mask"].shape, device=dev),
                 "retreat": torch.zeros(obs["retreat_mask"].shape, device=dev),
