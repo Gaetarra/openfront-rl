@@ -9,8 +9,8 @@ import torch
 
 from trainer import env as env_module
 from trainer.env import (BUILD_OF, BUILDING_TYPES, BUILDINGS, FFA, HVN, LAND, LEVEL, MAP_TYPES, N_CHANNELS, OWN, OWNER,
-                         OWNER_FEATURES, RANKED_1V1, ROOT, UNIT, UPGRADABLE, VALID, ZONE_KINDS, VecEnv, disk_cells,
-                         frozen_eval_config, gate_config, quantize_)
+                         OWNER_FEATURES, RANKED_1V1, ROOT, UNIT, UPGRADABLE, VALID, WORKER_V4_FEATURES, ZONE_KINDS,
+                         VecEnv, disk_cells, frozen_eval_config, gate_config, quantize_)
 from scripts.coverage import label_kinds
 from trainer.eval import Scripted
 from trainer.model import v1_spatial
@@ -116,7 +116,7 @@ class VecEnvTest(unittest.TestCase):
             obs = env.obs
             self.assertEqual(obs["spatial"].shape, (2, N_CHANNELS, 64, 64))
             self.assertEqual(obs["spatial"].dtype, torch.uint8)
-            self.assertEqual(obs["players"].shape, (2, 5, 25))
+            self.assertEqual(obs["players"].shape, (2, 5, 31))
             self.assertEqual((obs["owners"].shape, obs["owners"].dtype), ((2, 2, 64 * 64), torch.int16))
             self.assertEqual(obs["owner_land"].dtype, torch.uint8)
             self.assertEqual(obs["cell_mask"].shape, (2, len(MAP_TYPES), 64 * 64))
@@ -354,7 +354,7 @@ class ChannelTest(unittest.TestCase):
             if cls.seen is None or n >= cls.seen["structures"]:  # keep the observation with the most structures
                 cls.seen = {"structures": n, "players": players.copy(), "rel": rel.copy(), "units": rec.copy(),
                             "spatial": obs["spatial"].cpu().numpy(),
-                            "features": obs["players"][:, :, 17:].cpu().numpy(),
+                            "features": obs["players"][:, :, WORKER_V4_FEATURES:WORKER_V4_FEATURES + len(BUILDING_TYPES)].cpu().numpy(),
                             "cells": [t[:env.H * env.W].cpu().numpy() for t in (env.o1, env.n1, env.o2, env.n2)],
                             "area": float(env.area[0])}
             side = round(float(env.area[0]) ** 0.5)

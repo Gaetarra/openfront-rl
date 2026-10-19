@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
+import { Intent, StampedIntent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
 import { attackMask, BUILDS } from "./actions";
-import { EnvGame } from "./game";
+import { EnvGame, seatClientID } from "./game";
 import { encodeSeat, PLAYER_FEATURES, Rel, SCALARS } from "./obs";
-import { ONION, script } from "./testkit";
+import { FFA, LONE, ONION, quickGame, script, spawnSeats } from "./testkit";
 
 test("seat view: self, enemies, unowned land row and bounded scalars", async () => {
   const env = await EnvGame.create(ONION, "obs");
@@ -46,4 +47,30 @@ test("scalars hold the gold against each build's current cost and the seat's loa
   });
   assert.ok(scalars[16] > scalars[24], "a city costs less than a hydrogen bomb");
   assert.equal(scalars[25], 1 / 16);
+});
+
+test("diplomacy features: ally, pending requests, the alliance's time left and who asked to renew", async () => {
+  const env = await quickGame(FFA, 5, { ...LONE, customAllianceDuration: 1 });
+  spawnSeats(env);
+  const g = env.game;
+  const [a, b] = env.seats;
+  const send = (i: number, intent: Intent) => { env.tickWith([{ ...intent, clientID: seatClientID(i) } as StampedIntent]); env.tickWith([]); };
+  const view = () => {
+    const players = new Float32Array(env.slots * PLAYER_FEATURES);
+    encodeSeat(g, a, env.horizonMinutes, env.frame.cs, attackMask(g, a, env.slots), players, new Uint8Array(env.slots),
+      new Float32Array(SCALARS));
+    return [17, 18, 19, 20, 21, 22].map((f) => players[b.smallID() * PLAYER_FEATURES + f]);
+  };
+  send(1, { type: "allianceRequest", recipient: a.id() });
+  assert.deepEqual(view(), [0, 1, 0, 0, 0, 0], "b asked a");
+  send(0, { type: "allianceRequest", recipient: b.id() });
+  const fresh = view();
+  assert.deepEqual([fresh[0], fresh[1], fresh[2]], [1, 0, 0], "allied, nothing pending");
+  assert.ok(fresh[3] > 0.99, "a new alliance");
+  const alliance = a.allianceWith(b)!;
+  while (g.ticks() < alliance.expiresAt() - g.config().allianceExtensionPromptOffset()) env.tickWith([]);
+  send(1, { type: "allianceExtension", recipient: a.id() });
+  const late = view();
+  assert.deepEqual([late[4], late[5]], [1, 0], "b asked to renew, a not yet");
+  assert.ok(late[3] < 0.5);
 });

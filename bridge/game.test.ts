@@ -7,15 +7,15 @@ import {
   UnitType,
 } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
 import { GameMapType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/Maps.gen";
-import { GameConfig } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
 import { PseudoRandom } from "../OpenFront_Source_Code/openfrontio/packages/engine-lib/src/PseudoRandom";
 import { Act, N_ACTS } from "./actions";
 import { CellFrame } from "./frame";
-import { EnvConfig, EnvGame, seatPlayers } from "./game";
+import { EnvGame } from "./game";
 import { nationCount } from "./maps";
 import { rewardOf } from "./ranking";
-import { gameIdOf, publicConfig, shapeOf, slotsFor } from "./setups";
-import { FFA, HVN, landTile, ONION, RANKED, script, spawnCell } from "./testkit";
+import { PLAYER_FEATURES } from "./obs";
+import { shapeOf } from "./setups";
+import { FFA, HVN, landTile, LONE, ONION, publicGame, quickGame, RANKED, script, spawnCell } from "./testkit";
 
 const blob = (blobs: [string, Uint8Array][], name: string) => blobs.find(([n]) => n === name)![1];
 
@@ -112,7 +112,7 @@ test("observe returns the blobs in protocol order with consistent sizes", async 
   const blobs = env.observe(true);
   assert.deepEqual(blobs.map(([n]) => n), ["cells", "units", "players", "rel", "scalars", "types", "attack", "retreat"]);
   assert.equal(blob(blobs, "cells").byteLength, env.frame.n * 11);
-  assert.equal(blob(blobs, "players").byteLength, env.slots * 17 * 4);
+  assert.equal(blob(blobs, "players").byteLength, env.slots * PLAYER_FEATURES * 4);
   assert.equal(env.terrain().byteLength, 5 * env.frame.n);
   env.step([[Act.Noop, 0, 0, 0]]);
   assert.ok(env.observe(false)[0][1].byteLength < env.frame.n * 11);
@@ -150,19 +150,6 @@ test("ranked games draw from the playlist and share the ranked grid", async () =
   assert.match(env.start.gameID, /^[A-Za-z0-9]{8}$/);
 });
 
-/** A public game on a fixed map and size, started as EnvGame.create starts it; `patch` overrides config fields. */
-function publicGame(
-  cfg: EnvConfig,
-  gameMap: GameMapType,
-  gameMapSize: GameMapSize,
-  patch: Partial<GameConfig> = {},
-): Promise<EnvGame> {
-  const bots = gameMapSize === GameMapSize.Compact ? 100 : 400;
-  const config = { ...publicConfig(cfg, new PseudoRandom(1)), gameMap, gameMapSize, bots, ...patch };
-  const start = { gameID: gameIdOf("nations"), lobbyCreatedAt: 0, config, players: seatPlayers(cfg.seats) };
-  return EnvGame.fromStart(start, shapeOf([cfg]).grid[1], slotsFor(cfg), "nations:latency");
-}
-
 const nationsOf = (env: EnvGame) => env.game.allPlayers().filter((p) => p.type() === PlayerType.Nation);
 
 test("public games get the game's own nations, and the tribes fit the player table", async () => {
@@ -181,10 +168,6 @@ test("public games get the game's own nations, and the tribes fit the player tab
   assert.equal(Math.max(...players.map((p) => p.smallID())), ffa.slots - 1); // 4 seats, 72 nations, 400 tribes: a full table
   ffa.observe(true);
 });
-
-/** A quick public game: Onion, Compact, with a 1-minute timer unless `timerMinutes` says otherwise. */
-const quickGame = (cfg: EnvConfig, timerMinutes = 1, patch: Partial<GameConfig> = {}) =>
-  publicGame({ ...cfg, timerMinutes }, GameMapType.Onion, GameMapSize.Compact, patch);
 
 /** Random legal play for every seat until the game ends or `maxSteps` pass. */
 function playRandom(env: EnvGame, rnd: PseudoRandom, maxSteps: number): void {
@@ -279,9 +262,8 @@ test("a game without a timer is observed with a 30-minute horizon", async () => 
 
 test("the backstop marks a game cut only when nobody won and a seat is still in", async () => {
   // One seat alone on the map: nothing kills it and it never expands, so only the clock can end the game.
-  const alone = { nations: "disabled", bots: 0 } as const;
   for (const [timerMinutes, cut, minutes] of [[0, true, 61], [1, false, 1]] as const) {
-    const env = await quickGame(FFA, timerMinutes, alone);
+    const env = await quickGame(FFA, timerMinutes, LONE);
     const spawn = spawnCell(env);
     let steps = 0;
     while (!env.done && steps < 8000) {

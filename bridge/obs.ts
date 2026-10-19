@@ -3,7 +3,7 @@ import { Game, Player } from "../OpenFront_Source_Code/openfrontio/packages/engi
 import { BUILDS } from "./actions";
 import { loaded } from "./frame";
 
-export const PLAYER_FEATURES = 17;
+export const PLAYER_FEATURES = 23;
 export const SCALARS = 26;
 
 /** How a player-table row relates to the seat; the trainer maps cells and units through it. */
@@ -23,7 +23,9 @@ const logScale = (v: number, div: number) => Math.log1p(Math.max(0, v)) / div;
  *
  * Player features: 0 exists, 1 alive, 2 self, 3 friendly, 4 enemy, 5 bot, 6 nation, 7 tiles / land, 8 log troops,
  * 9 troops / max troops, 10 log gold, 11 traitor, 12 attackable by the seat, 13 log troops attacking the seat,
- * 14 log troops the seat sends at it, 15 spawned, 16 log troops per tile.
+ * 14 log troops the seat sends at it, 15 spawned, 16 log troops per tile, 17 allied with the seat (a teammate is not an
+ * ally), 18 its alliance request to the seat is pending, 19 the seat's request to it is pending, 20 the alliance's time
+ * left / its duration, 21 it agreed to renew the alliance, 22 the seat agreed to renew it.
  * Scalars: 0 game progress, 1 spawn phase, 2 spawn-phase progress, 3 spawned, 4 alive, 5 log troops, 6 troops / max,
  * 7 log gold, 8 gold / city cost, 9 tiles / land, 10 boats / max boats, 11 alive players share, 12 time left,
  * 13 spawn immunity, 14 tiles per cell / 64, 15 share of players ahead in tiles, 16-24 gold / the current cost of
@@ -48,6 +50,8 @@ export function encodeSeat(
   const outgoing = new Float64Array(slots);
   for (const a of seat.incomingAttacks()) incoming[a.attacker().smallID()] += a.troops();
   for (const a of seat.outgoingAttacks()) outgoing[a.target().smallID()] += a.troops();
+  const asked = new Set(seat.incomingAllianceRequests().map((r) => r.requestor().smallID()));
+  const askedBy = new Set(seat.outgoingAllianceRequests().map((r) => r.recipient().smallID()));
 
   let owned = 0;
   for (const p of game.allPlayers()) {
@@ -78,6 +82,15 @@ export function encodeSeat(
     players[o + 14] = logScale(outgoing[s], 15);
     players[o + 15] = p.hasSpawned() ? 1 : 0;
     players[o + 16] = logScale(troops / Math.max(tiles, 1), 5);
+    const alliance = seat.allianceWith(p);
+    players[o + 17] = alliance ? 1 : 0;
+    players[o + 18] = asked.has(s) ? 1 : 0;
+    players[o + 19] = askedBy.has(s) ? 1 : 0;
+    if (alliance) {
+      players[o + 20] = Math.min(Math.max((alliance.expiresAt() - game.ticks()) / config.allianceDuration(), 0), 1);
+      players[o + 21] = alliance.agreedToExtend(p) ? 1 : 0;
+      players[o + 22] = alliance.agreedToExtend(seat) ? 1 : 0;
+    }
   }
   rel[0] = Rel.None;
   players[0] = 1;

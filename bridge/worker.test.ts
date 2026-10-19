@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Act } from "./actions";
 import { EnvGame } from "./game";
 import { GAME_ROOT } from "./maps";
+import { PLAYER_FEATURES } from "./obs";
 import { ONION, RANKED, spawnCell } from "./testkit";
 
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), "worker.ts");
@@ -79,7 +80,7 @@ test("a worker in a mixed run uses the run's grid and player table", async () =>
   assert.equal(header.dims.slots, 403);
   assert.equal(header.dims.seats, 1);
   const players = header.games[0].blobs.find((b: [string, number]) => b[0] === "players");
-  assert.equal(players[1], 403 * 17 * 4);
+  assert.equal(players[1], 403 * PLAYER_FEATURES * 4);
 });
 
 test("same seed and actions give the same hash in a fresh worker and after other games", async () => {
