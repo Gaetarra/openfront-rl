@@ -197,7 +197,24 @@ export function decodeAction(game: Game, seat: Player, frame: CellFrame, masks: 
     return { intent: { type: "donate_troops", recipient, troops: (share / 100) * seat.troops() }, valid: true };
   }
   if (!Number.isInteger(cell) || cell < 0 || cell >= frame.n) return DROP;
-  if (type === Act.MoveWarships) return DROP; // Task 5
+  if (type === Act.MoveWarships) {
+    // [type, source cell, destination cell, fleet]: the anchor is the seat's warship in the source cell nearest its centre
+    if (!Number.isInteger(target) || target < 0 || target >= frame.n || (share !== 0 && share !== 1)) return DROP;
+    const [cx, cy] = frame.center(cell);
+    const d = (u: Unit) => (game.x(u.tile()) - cx) ** 2 + (game.y(u.tile()) - cy) ** 2;
+    const ships = seat.units(UnitType.Warship).filter((u) => u.isActive());
+    const anchor = ships
+      .filter((u) => frame.cellOf(u.tile()) === cell)
+      .reduce<Unit | null>((best, u) => (best === null || d(u) < d(best) ? u : best), null);
+    const sea = anchor === null ? null : game.getWaterComponent(anchor.tile());
+    if (anchor === null || sea === null) return DROP;
+    const tile = byCentre(game, frame, target).find((t) => game.isWater(t) && game.hasWaterComponent(t, sea));
+    if (tile === undefined) return DROP;
+    const patrol = anchor.warshipState().patrolTile;
+    const unitIds = (share === 0 ? [anchor] : ships.filter((u) => u.warshipState().patrolTile === patrol && game.hasWaterComponent(u.tile(), sea)))
+      .map((u) => u.id());
+    return { intent: { type: "move_warship", unitIds, tile }, valid: true };
+  }
   if (type === Act.Spawn) {
     const tile = byCentre(game, frame, cell).find((t) => game.isLand(t) && !game.isImpassable(t) && !game.hasOwner(t));
     return tile === undefined ? DROP : { intent: { type: "spawn", tile }, valid: true };

@@ -179,3 +179,55 @@ test("a retreat cancels the seat's largest attack on that target", async () => {
   assert.deepEqual(decode(env, seat, [Act.Retreat, 0, 0, 0]).intent, { type: "cancel_attack", attackID: biggest.id() });
   assert.equal(decode(env, seat, [Act.Retreat, 0, 3, 0]).valid, false, "no attack on row 3");
 });
+
+/** The cells holding ocean tiles of the water body of the first ocean tile found, each [cell, one such tile]. */
+const oceanCells = (env: EnvGame): [number, TileRef][] => {
+  const g = env.game;
+  let body: number | null = null;
+  const cells = new Map<number, TileRef>();
+  g.forEachTile((t) => {
+    if (!g.isOcean(t)) return;
+    body ??= g.getWaterComponent(t);
+    if (g.hasWaterComponent(t, body!) && !cells.has(env.frame.cellOf(t))) cells.set(env.frame.cellOf(t), t);
+  });
+  return [...cells].sort((a, b) => a[0] - b[0]);
+};
+
+test("a warship move sends the anchor alone or with its fleet to the water nearest the cell's centre", async () => {
+  const env = await EnvGame.create(ONION, "moves");
+  script(env, 260);
+  const seat = env.seats[0];
+  const [home, near, far] = oceanCells(env); // [cell, a water tile in it]
+  const s1 = seat.buildUnit(UnitType.Warship, home[1], { patrolTile: home[1] });
+  const s2 = seat.buildUnit(UnitType.Warship, home[1], { patrolTile: home[1] });
+  const lone = seat.buildUnit(UnitType.Warship, near[1], { patrolTile: near[1] });
+  assert.equal(masksOf(env, seat).types[Act.MoveWarships], 1);
+  const fleet = decode(env, seat, [Act.MoveWarships, home[0], far[0], 1]).intent;
+  assert.ok(fleet?.type === "move_warship");
+  assert.deepEqual(new Set(fleet.unitIds), new Set([s1.id(), s2.id()]));
+  assert.equal(env.frame.cellOf(fleet.tile), far[0]);
+  assert.ok(env.game.isWater(fleet.tile));
+  const alone = decode(env, seat, [Act.MoveWarships, home[0], far[0], 0]).intent;
+  assert.ok(alone?.type === "move_warship" && alone.unitIds.length === 1);
+  run(env, fleet);
+  env.tickWith([]);
+  assert.deepEqual([s1, s2, lone].map((s) => s.warshipState().patrolTile), [fleet.tile, fleet.tile, near[1]]);
+});
+
+test("a move drops without a warship in the source cell or water of its sea in the destination cell", async () => {
+  const env = await EnvGame.create(ONION, "moves");
+  script(env, 260);
+  const seat = env.seats[0];
+  const [home, , far] = oceanCells(env);
+  seat.buildUnit(UnitType.Warship, home[1], { patrolTile: home[1] });
+  const landOnly = [...Array(env.frame.n).keys()].find((c) => {
+    const tiles = [...env.frame.tilesOf(c)];
+    return tiles.length > 0 && tiles.every((t) => !env.game.isWater(t));
+  })!;
+  assert.notEqual(landOnly, undefined, "the map has a cell with no water");
+  assert.ok(decode(env, seat, [Act.MoveWarships, home[0], far[0], 0]).valid);
+  for (const a of [[Act.MoveWarships, landOnly, far[0], 0], [Act.MoveWarships, home[0], landOnly, 0],
+    [Act.MoveWarships, home[0], far[0], 2], [Act.MoveWarships, home[0], 1e9, 0]]) {
+    assert.equal(decode(env, seat, a).valid, false, `${a}`);
+  }
+});
