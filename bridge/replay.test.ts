@@ -11,7 +11,7 @@ import { decompressGameRecord } from "../OpenFront_Source_Code/openfrontio/packa
 import { GameRecord, GameRecordSchema } from "../OpenFront_Source_Code/openfrontio/packages/shared/src/WireSchemas";
 import { Act, BUILDS, decodeAction, DIPLOMACY, seatMasks } from "./actions";
 import { EnvGame, seatClientID } from "./game";
-import { labelOf, OUT_OF_SET, readRecord, RecordGame, shareOf, UNMAPPED } from "./replay";
+import { labelOf, OUT_OF_SET, pickSeats, readRecord, RecordGame, shareOf, UNMAPPED } from "./replay";
 import { gameConfigOf } from "./setups";
 import { landTile, ONION, script } from "./testkit";
 
@@ -221,4 +221,68 @@ test("a blanked Team record replays in sync, and its diplomacy and warship label
   assert.deepEqual(sorted(seen), [[Act.AllianceRequest, 20], [Act.RenewAlliance, 1], [Act.BreakAlliance, 4], [Act.DonateTroops, 21], [Act.MoveWarships, 1]]);
   assert.deepEqual(sorted(legal), [[Act.AllianceRequest, 20], [Act.RenewAlliance, 1], [Act.BreakAlliance, 4], [Act.DonateTroops, 20], [Act.MoveWarships, 1]]);
   assert.equal(mismatches, 0, "legal labels that do not decode back to the human's command");
+});
+
+const ids = (rg: RecordGame) => rg.env.seats.map((p) => p.clientID());
+
+test("two players a game: the best of the winning team and the best of the other teams", async () => {
+  const rg = await RecordGame.create(readRecord(TEAM), 256, 160, 2);
+  assert.deepEqual(ids(rg), ["6jEni9S5", "EgHrXRwr"]);
+  assert.deepEqual(rg.outcome, [1, -1]);
+});
+
+test("the winning side comes first even when another side placed better", async () => {
+  const record = readRecord(TEAM);
+  record.info.winner = ["team", "Orange"];
+  const rg = await RecordGame.create(record, 256, 160, 2);
+  assert.deepEqual(ids(rg), ["QoxpLfYC", "6jEni9S5"]);
+  assert.deepEqual(rg.outcome, [1, -1]);
+});
+
+test("a nation's win: both players by placement, both -1", async () => {
+  const record = readRecord(TEAM);
+  record.info.winner = ["nation", "Somewhere"];
+  const rg = await RecordGame.create(record, 256, 160, 2);
+  assert.deepEqual(ids(rg), ["6jEni9S5", "EgHrXRwr"]);
+  assert.deepEqual(rg.outcome, [-1, -1]);
+});
+
+test("ranked 1v1 keeps both players in record order", async () => {
+  const rg = await RecordGame.create(readRecord(FIXTURE), 256, 403, 2);
+  assert.deepEqual(ids(rg), ["TP8tutXW", "crPmaJR7"]);
+  assert.deepEqual(rg.outcome, [-1, 1]); // crPmaJR7 won
+});
+
+test("a team's win gives +1 to every player of the winning team", async () => {
+  const rg = await RecordGame.create(readRecord(TEAM), 256, 160);
+  assert.equal(rg.env.seats.length, 18);
+  const won = rg.env.seats.filter((_, i) => rg.outcome[i] === 1).map((p) => p.clientID());
+  assert.deepEqual(won.sort(), ["6jEni9S5", "7cQT5VuR", "vsvieAD6"]);
+});
+
+test("a disconnected player's window labels UNMAPPED", async () => {
+  const rg = await RecordGame.create(readRecord(FIXTURE), 256, 403);
+  const disconnected: number[] = [];
+  while (!rg.done) {
+    const label = rg.labels()[0];
+    if (rg.env.seats[0].isDisconnected()) {
+      disconnected.push(rg.window);
+      assert.deepEqual(label, [UNMAPPED, 0, 0, 0]);
+    } else assert.notEqual(label[0], UNMAPPED);
+    rg.advance();
+  }
+  assert.deepEqual(disconnected, [516]);
+});
+
+test("a record without two eligible players is rejected", async () => {
+  const record = readRecord(TEAM);
+  for (const p of record.info.players) p.stats = {};
+  await assert.rejects(RecordGame.create(record, 256, 160, 2), /eligible/);
+});
+
+test("a picked player missing from the game is skipped", async () => {
+  const record = readRecord(TEAM);
+  const game = (await RecordGame.create(record, 256, 160)).env.game;
+  const without = { playerByClientID: (id: string) => (id === "6jEni9S5" ? null : game.playerByClientID(id)) };
+  assert.deepEqual(pickSeats(record.info, without, 2), ["vsvieAD6", "EgHrXRwr"]);
 });

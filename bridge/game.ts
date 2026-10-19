@@ -130,9 +130,16 @@ export class EnvGame {
 
   /**
    * Builds a game from its start info the way the game's client does (tests/replay/ReplayGame.ts): the RNG is seeded
-   * from the game ID and the seats are the start info's players, in order. `stride`: the trainer's grid width in cells.
+   * from the game ID and the seats are the start info's players, in order, or the players `choose` names (their
+   * clientIDs, in order) once the game exists. `stride`: the trainer's grid width in cells.
    */
-  static async fromStart(start: GameStartInfo, stride: number, slots: number, latencySeed: string): Promise<EnvGame> {
+  static async fromStart(
+    start: GameStartInfo,
+    stride: number,
+    slots: number,
+    latencySeed: string,
+    choose?: (game: Game) => string[],
+  ): Promise<EnvGame> {
     const config = start.config;
     const terrain = await loadFreshTerrain(config.gameMap, config.gameMapSize);
     const random = new PseudoRandom(simpleHash(start.gameID));
@@ -174,7 +181,7 @@ export class EnvGame {
       sim.conquests.push(...(gu.updates[GameUpdateType.ConquestEvent] as ConquestUpdate[]));
     });
     runner.init();
-    const seats = humans.map((h) => game.player(h.id));
+    const seats = choose === undefined ? humans.map((h) => game.player(h.id)) : choose(game).map((id) => game.playerByClientID(id)!);
     const latency = new LatencyQueue(new PseudoRandom(simpleHash(latencySeed)));
     return new EnvGame(start, game, seats, frame, slots, runner, sim, latency);
   }

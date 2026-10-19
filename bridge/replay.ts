@@ -2,7 +2,7 @@ import fs from "node:fs";
 import zlib from "node:zlib";
 import { UnitType } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/game/GameTypes";
 import { StampedIntent } from "../OpenFront_Source_Code/openfrontio/packages/engine-api/src/Schemas";
-import { Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
+import { Game, Player } from "../OpenFront_Source_Code/openfrontio/packages/engine/src/game/Game";
 import {
   decompressGameRecord,
   toWireGameStartInfo,
@@ -86,11 +86,52 @@ export function labelOf(env: EnvGame, seat: Player, intent: StampedIntent): numb
   }
 }
 
+/** The side of a player: its team, or itself without teams. */
+type Sides = { playerByClientID(id: string): { team(): string | null } | null };
+const sideOf = (game: Sides, id: string): string => game.playerByClientID(id)?.team() ?? id;
+
+/** The winning side of a record: the winner's team or itself, the winning team, or null for a nations' win. */
+function winningSide(info: GameRecord["info"], game: Sides): string | null {
+  const w = info.winner;
+  return w?.[0] === "player" ? sideOf(game, w[1]) : w?.[0] === "team" ? w[1] : null;
+}
+
+/**
+ * The clientIDs of the `count` players a replay imitates: the best-placed human of each of the best-placed sides. The
+ * winning side comes first, then players alive at the end before the dead (the later death first), then more peak
+ * tiles, then record order. Players missing from the game or without land are not eligible. With `count` equal to the
+ * record's players, all of them in record order.
+ */
+export function pickSeats(info: GameRecord["info"], game: Sides, count: number): string[] {
+  if (count === info.players.length) return info.players.map((p) => p.clientID);
+  const winning = winningSide(info, game);
+  const stat = (p: GameRecord["info"]["players"][number]) => ({
+    peak: Number(p.stats?.tiles?.[0] ?? 0),
+    killed: p.stats?.killedAt === undefined ? Infinity : Number(p.stats.killedAt),
+    won: sideOf(game, p.clientID) === winning,
+  });
+  const order = info.players
+    .map((p, i) => ({ id: p.clientID, i, ...stat(p), here: game.playerByClientID(p.clientID) !== null }))
+    .filter((p) => p.here && p.peak > 0)
+    .sort((a, b) => +b.won - +a.won || b.killed - a.killed || b.peak - a.peak || a.i - b.i);
+  if (order.length < count) throw new Error(`only ${order.length} eligible players`);
+  const picked: string[] = [];
+  const sides = new Set<string>();
+  for (const p of order) {
+    if (picked.length < count && !sides.has(sideOf(game, p.id))) {
+      picked.push(p.id);
+      sides.add(sideOf(game, p.id));
+    }
+  }
+  for (const p of order) if (picked.length < count && !picked.includes(p.id)) picked.push(p.id);
+  return picked;
+}
+
 /**
  * Replays a game record window by window (STEP_TICKS turns) for behaviour cloning. The seats are the record's players
- * and the observations come from the same EnvGame code as training games. A seat's label for a window is the oldest of
- * its queued commands; the commands of the turns about to execute are queued first, so a command labels the
- * observation its player saw just before it executed.
+ * (or the best-placed few, pickSeats) and the observations come from the same EnvGame code as training games. A seat's
+ * label for a window is the oldest of its queued commands; the commands of the turns about to execute are queued
+ * first, so a command labels the observation its player saw just before it executed.
  */
 export class RecordGame {
   window = 0;
@@ -107,14 +148,15 @@ export class RecordGame {
   private constructor(
     readonly env: EnvGame,
     readonly record: GameRecord,
-    /** Per seat: +1 for the winner, -1 otherwise. */
+    /** Per seat: +1 on the winning side (the winner, or its team), -1 otherwise. */
     readonly outcome: number[],
   ) {
     this.pending = env.seats.map(() => []);
-    this.seatOf = new Map(env.start.players.map((p, i) => [p.clientID, i]));
+    this.seatOf = new Map(env.seats.map((p, i) => [p.clientID()!, i]));
   }
 
-  static async create(record: GameRecord, stride: number, slots: number): Promise<RecordGame> {
+  /** `seats`: how many players to imitate (pickSeats; throws when the record has too few eligible), 0 for all. */
+  static async create(record: GameRecord, stride: number, slots: number, seats = 0): Promise<RecordGame> {
     const info = record.info;
     const start = toWireGameStartInfo({
       gameID: info.gameID,
@@ -123,9 +165,10 @@ export class RecordGame {
       players: info.players,
       tribes: info.tribes,
     });
-    const env = await EnvGame.fromStart(start, stride, slots, info.gameID);
-    const winner = info.winner?.[0] === "player" ? info.winner[1] : null;
-    return new RecordGame(env, record, info.players.map((p) => (p.clientID === winner ? 1 : -1)));
+    const choose = seats === 0 ? undefined : (game: Game) => pickSeats(info, game, seats);
+    const env = await EnvGame.fromStart(start, stride, slots, info.gameID, choose);
+    const winning = winningSide(info, env.game);
+    return new RecordGame(env, record, env.seats.map((p) => (sideOf(env.game, p.clientID()!) === winning ? 1 : -1)));
   }
 
   /** Windows until the record ends. */
@@ -147,6 +190,7 @@ export class RecordGame {
     this.chosen = this.env.seats.map((_, s) => this.pending[s].shift());
     return this.env.seats.map((seat, s) => {
       const intent = this.chosen[s];
+      if (seat.isDisconnected()) return [UNMAPPED, 0, 0, 0]; // a gone player's window stays out of the loss
       return intent === undefined ? [Act.Noop, 0, 0, 0] : labelOf(this.env, seat, intent);
     });
   }

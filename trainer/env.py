@@ -186,15 +186,20 @@ class VecEnv:
     """E = workers x games_per_worker games; N = their seats in all, one observation row each. Rows are game-major: game
     e owns rows first[e] .. first[e] + seats[e] - 1. `config`: one setup for every worker, or a list with one per
     worker (the workers then share the grid and player table that fit all of them). S is the seats per game when
-    every game has the same number, else None."""
+    every game has the same number, else None. Replay mode: `records` is a list of paths shared out among the workers,
+    or a list with one list of paths per worker; a replay imitates config["seats"] players a record; `slots` sets the
+    player table's rows (default: the config's)."""
 
     def __init__(self, config, workers, games_per_worker, seed, device="cuda", episodes=None, log_dir=None,
-                 full_frames=False, records=None, record=None):
+                 full_frames=False, records=None, record=None, slots=None):
         self.device = torch.device(device)
         self.G = games_per_worker
         self.E = workers * games_per_worker
         self.full_frames = full_frames
         self.replay = records is not None
+        per_worker = self.replay and bool(records) and all(isinstance(r, (list, tuple)) for r in records)
+        if per_worker and len(records) != workers:
+            raise ValueError(f"{len(records)} record lists for {workers} workers")
         if self.replay and len(records) < workers:
             raise ValueError(f"{len(records)} records cannot feed {workers} workers")
         configs = list(config) if isinstance(config, list) else [config] * workers
@@ -210,8 +215,11 @@ class VecEnv:
                         for w in range(workers)]
         for w, wk in enumerate(self.workers):
             msg = {"cmd": "init", "config": configs[w], "mix": mix, "games": self.G, "seed": seed, "worker": w}
+            if slots is not None:
+                msg["slots"] = slots
             if self.replay:
-                msg["replay"] = {"records": [str(r) for r in records[w::workers]]}
+                mine = records[w] if per_worker else records[w::workers]
+                msg["replay"] = {"records": [str(r) for r in mine]}
             else:
                 msg["episodes"] = self.episodes[w * self.G:(w + 1) * self.G]
                 if record is not None:  # {"dir", "gitCommit", "games"}: save each worker's first games as records

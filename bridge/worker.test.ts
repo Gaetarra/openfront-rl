@@ -154,3 +154,28 @@ test("replay mode streams observations with labels and moves on to the next reco
     c.close(); // a failed assertion must not leave the worker, and the test run, hanging
   }
 });
+
+test("replay mode picks config.seats players a record and sizes the player table by slots", async () => {
+  const team = path.join(path.dirname(WORKER), "testdata/team.json.gz");
+  const c = new Client();
+  try {
+    const init = await c.request({
+      cmd: "init",
+      config: { ...ONION, seats: 2, playlist: "ranked1v1" },
+      replay: { records: [team] },
+      slots: 512,
+      games: 1,
+      seed: "pick",
+      worker: 0,
+    });
+    assert.equal(init.header.dims.slots, 512);
+    assert.equal(init.header.dims.seats, 2);
+    const g0 = init.header.games[0];
+    assert.deepEqual(g0.seats, ["6jEni9S5", "EgHrXRwr"]);
+    assert.deepEqual(g0.outcome, [1, -1]);
+    assert.deepEqual(g0.blobs.find((b: [string, number]) => b[0] === "players"), ["players", 2 * 512 * PLAYER_FEATURES * 4]);
+    assert.deepEqual(g0.blobs.at(-1), ["labels", 2 * 4 * 4]);
+  } finally {
+    c.close();
+  }
+});

@@ -4,8 +4,9 @@
  * In:  u32 length + JSON: {cmd:"init", config, mix?, games, seed, worker, episodes?} starts K training games of
  *      `config`; `mix` lists every config of the run (this one included), and the grid and player table of the games
  *      and of the reply's `dims` fit all of them (bridge/setups.ts shapeOf), while `dims.seats` stays this config's;
- *      {cmd:"init", config, replay:{records}, games, seed, worker} replays game records instead (behaviour cloning:
- *      every reply carries the seats' observations and labels, bridge/replay.ts); {cmd:"step", actions?, full?};
+ *      {cmd:"init", config, replay:{records}, games, seed, worker, slots?} replays game records instead (behaviour
+ *      cloning: every reply carries the seats' observations and labels, bridge/replay.ts); it imitates `config.seats`
+ *      players a record (pickSeats) and `slots` sets the player table's rows (default: the config's); {cmd:"step", actions?, full?};
  *      {cmd:"close"}. "init" may be sent again to restart.
  * Out: u32 size + u32 header length + header JSON + blobs. The header lists each game's blobs as [name, byteLength]
  *      in the order they follow. A finished game is replaced at once by the next episode: its reply has done and
@@ -37,6 +38,7 @@ interface Init {
   seed: string;
   worker: number;
   episodes?: number[];
+  slots?: number;
   replay?: { records: string[] };
   record?: { dir: string; gitCommit: string; games: number };
 }
@@ -84,8 +86,7 @@ async function nextRecord(skip: boolean): Promise<RecordGame> {
     }
     const file = files[order[next++]];
     try {
-      const rg = await RecordGame.create(readRecord(file), shape.grid[1], shape.slots);
-      if (rg.env.seats.length !== init!.config.seats) throw new Error(`${rg.env.seats.length} players`);
+      const rg = await RecordGame.create(readRecord(file), shape.grid[1], shape.slots, init!.config.seats);
       const skipped = skip ? pick.nextInt(0, Math.max(1, Math.floor(rg.left / 2))) : 0;
       for (let i = 0; i < skipped && !rg.done; i++) rg.advance();
       if (!rg.done) return rg;
@@ -111,7 +112,7 @@ function replayPart(rg: RecordGame, reset: boolean, extra: Record<string, unknow
     hash: rg.env.hash,
     invalid: rg.env.seats.map(() => false),
     record: rg.record.info.gameID,
-    seats: rg.env.start.players.map((p) => p.clientID),
+    seats: rg.env.seats.map((p) => p.clientID()),
     outcome: rg.outcome,
     left: rg.left,
     ...(reset ? { cellSize: rg.env.frame.cs } : {}),
@@ -196,6 +197,7 @@ async function handle(msg: Init | Step): Promise<Buffer> {
   if (msg.cmd === "init") {
     init = msg;
     shape = shapeOf(msg.mix ?? [msg.config]);
+    if (msg.slots !== undefined) shape.slots = msg.slots;
     if (msg.replay !== undefined) {
       if (msg.replay.records.length === 0) throw new Error("replay mode needs records");
       pick = new PseudoRandom(simpleHash(`${msg.seed}-w${msg.worker}`));

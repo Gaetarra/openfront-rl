@@ -283,6 +283,20 @@ class VecEnvTest(unittest.TestCase):
         finally:
             env.close()
 
+    def test_replay_workers_take_their_own_records_and_two_players_each(self):
+        team = ROOT / "bridge" / "testdata" / "team.json.gz"
+        env = VecEnv(RANKED_1V1, workers=2, games_per_worker=1, seed="mix", records=[[FIXTURE], [team]], slots=512)
+        try:
+            self.assertEqual(env.P, 512)
+            self.assertEqual(env.seats_of, [["TP8tutXW", "crPmaJR7"], ["6jEni9S5", "EgHrXRwr"]])
+            self.assertEqual(env.outcome.tolist(), [[-1, 1], [1, -1]])
+            self.assertEqual(tuple(env.labels.shape), (4, 4))
+            self.assertEqual(tuple(env.obs["players"].shape[:2]), (4, 512))
+            with self.assertRaises(ValueError):
+                VecEnv(RANKED_1V1, workers=2, games_per_worker=1, seed="bad", records=[[FIXTURE]])
+        finally:
+            env.close()
+
     def test_the_coverage_script_counts_the_commands_the_extractor_labels(self):
         kinds = label_kinds(json.loads(gzip.decompress(FIXTURE.read_bytes())))
         env = VecEnv(RANKED_1V1, workers=1, games_per_worker=1, seed="coverage", records=[FIXTURE])
@@ -291,7 +305,7 @@ class VecEnvTest(unittest.TestCase):
             while passes < 2:  # a slot's first record starts at a random window, the next one at window 0
                 if passes == 1:
                     t = env.labels[:, 0]
-                    commands += int((t != 0).sum())
+                    commands += int(((t != 0) & (t != -2)).sum())  # not the disconnected seat's window (-2, no command)
                     outside += int((t == -1).sum())
                 passes += sum("record" in i for i in env.step()[3])
         finally:
