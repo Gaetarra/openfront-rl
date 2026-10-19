@@ -9,8 +9,8 @@ import psutil
 import torch
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from trainer.env import FFA, HVN, ONION, ROOT
-from trainer.model import PolicyV1
+from trainer.env import FFA, HVN, N_CHANNELS, ONION, ROOT
+from trainer.model import ActionDist, PolicyV1, _kl, new_net
 from trainer.ppo import (MAY_CHANGE, HostRows, Outcomes, cap_binds, gae, main, mix_of, network_args, pack_bits,
                          parse_args, parser, resume_args, run_info, seat_rows, unpack_bits)
 
@@ -252,7 +252,7 @@ class HostRowsTest(unittest.TestCase):
             for o in host.batches(torch.randperm(40).split(8), "cuda"):
                 pass
             threads.append(psutil.Process().num_threads())
-        self.assertEqual(threads[-1], threads[0])
+        self.assertLessEqual(threads[-1], threads[0])  # the whole process's count: earlier tests' threads may end meanwhile
 
 
 class GaeTest(unittest.TestCase):
@@ -333,6 +333,47 @@ class SmokeTest(unittest.TestCase):
         kl = [e.value for e in logs.Scalars("loss/kl_ref")]
         self.assertEqual(len(kl), 2)
         self.assertLess(max(kl), 1e-4)  # 2e-7 here; reference rows shifted by one gave 4e-3 and 1.3e-2
+
+    def test_a_v5_network_trains_against_itself_with_kl(self):
+        """The same run with a v5 network: it stores each row's sampled source and the reference's destination and
+        fleet logits at it, so the move terms of the entropy, the KL and the log-probability read the same source."""
+        init = ROOT / "checkpoints" / self.RUN / "init.pt"
+        init.parent.mkdir(parents=True, exist_ok=True)
+        args = {"arch": "v5", "core": "moe", "widths": "64,128,192"}
+        dims = {"channels": N_CHANNELS, "playerFeatures": 31, "scalars": 26}
+        torch.manual_seed(0)
+        net = new_net(dims, args)
+        for layer in (net.type_head, net.shuffle, net.skip, net.query, net.diplomacy_query, net.dst_film, net.dst_shuffle,
+                      net.dst_skip, net.fleet_head):  # random heads: each row's move distribution is its own
+            torch.nn.init.normal_(layer.weight, std=1.0)
+        torch.save({"model": net.state_dict(), "args": args, "update": 0}, init)
+        moves, kl_of, complete_of = [], ActionDist.kl, ActionDist.complete
+
+        def spy(dist, ref, src=None):  # the KL of the move heads alone: no warship exists in these games, so the type
+            moves.append(float(_kl(dist._move_at(src)[0], ref._move_at(src)[0]).mean()))  # KL weights it by 0
+            return kl_of(dist, ref, src)
+
+        def anywhere(dist, t):  # and the source map is empty, so every sample is cell 0: scatter the sources instead
+            act = complete_of(dist, t)
+            dist.src = torch.randint(0, dist.cells.logits.shape[-1], dist.src.shape, device=dist.src.device)
+            return act
+
+        with mock.patch.object(ActionDist, "kl", spy), mock.patch.object(ActionDist, "complete", anywhere):
+            main(["--run", self.RUN, "--workers", "1", "--games-per-worker", "2", "--steps", "32", "--minibatches", "2",
+                  "--epochs", "2", "--port", "0", "--timer", "1", "--nations", "0", "--seats", "2", "--lr", "0",
+                  "--init", str(init), "--opponent", str(init), "--kl-coef", "0.1", "--ent-coef", "0.01",
+                  "--updates", "2"])
+        self.assertEqual(len(moves), 8, "2 updates x 2 epochs x 2 minibatches")
+        # bf16 noise is 7e-4; the reference's move head shifted by a row reads ~1
+        self.assertLess(max(moves), 1e-2, "the reference's stored destinations are those of the sampled sources")
+        state = torch.load(ROOT / "checkpoints" / self.RUN / "latest.pt", weights_only=False)
+        self.assertEqual((state["update"], state["args"]["arch"]), (2, "v5"))
+        logs = EventAccumulator(str(ROOT / "runs" / self.RUN))
+        logs.Reload()
+        kl = [e.value for e in logs.Scalars("loss/kl_ref")]
+        self.assertEqual(len(kl), 2)
+        self.assertTrue(np.isfinite(kl).all())
+        self.assertLess(max(kl), 1e-4, "at lr 0 the learner is the reference, at the same sampled sources")
 
     def test_a_league_with_frozen_evaluations(self):
         """PLAN 4A: the opponents come from a pool the learner's weight averages join, and every average plays the

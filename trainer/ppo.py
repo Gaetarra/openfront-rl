@@ -31,7 +31,9 @@ from trainer.model import ACT_NAMES, ATTENDED, CORES, ActionDist, arch_of, load_
 SESSION = ("port", "duty", "gpu_temp_limit")  # settings of this sitting, not of the run: a resume takes them as given
 MAY_CHANGE = ("updates", "kl_coef", "eval_games", "eval_every", "eval_games_public")  # a resume may give new values
 WHOLE = ("ffa", "hvn")  # setups where every seat is the learner's: the opponents are the game's own nations (4N)
-REF_OUTPUTS = ("type", "maps", "ptr", "retreat", "shares", "bins")  # what ActionDist reads of the KL reference
+# What ActionDist reads of the KL reference. A v5 reference also keeps its move head at the rollout's sampled sources,
+# as ref_dst_logits and ref_fleet_logits.
+REF_OUTPUTS = ("type", "maps", "ptr", "retreat", "shares", "bins", "diplomacy")
 SNAPSHOT = 250  # updates between kept checkpoints
 AVERAGED = 5  # kept checkpoints in each weight average, --init counting as update 0: the last 1,000 updates. Averages
 # join the league's pool and play the panel: PPO's snapshots scatter around a stronger mean policy (lr4a's five scored
@@ -552,16 +554,24 @@ def main(argv=None):
 
     T, L = a.steps, len(learner)
     obs = envs.obs
-    def stored(o):
+    def stored(o, src):
         """A seat's rows as the rollout keeps them: the cell masks as bits and, with a KL penalty, the reference's
-        outputs, computed once here instead of in every epoch of learning (PLAN 4A, "Speed work")."""
+        outputs, computed once here instead of in every epoch of learning (PLAN 4A, "Speed work"). A v5 network's
+        rows (src: the sampled source cell of each, else None) also keep that source, which the move terms of the
+        entropy and the KL read in learning, and the reference's destination and fleet logits at it."""
         kept = {**o, "cell_mask": pack_bits(o["cell_mask"])}
+        if src is not None:
+            kept["dst_src"] = src
         if ref is not None:
             with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
-                kept.update({"ref_" + k: v for k, v in ref(o).items() if k in REF_OUTPUTS})
+                out_ref = ref(o)
+                kept.update({"ref_" + k: v for k, v in out_ref.items() if k in REF_OUTPUTS})
+                if src is not None and "move" in out_ref:  # without it, learning's KL raises: the heads differ
+                    kept["ref_dst_logits"], kept["ref_fleet_logits"] = out_ref["move"](src)
         return kept
 
-    host = HostRows(stored(rows(obs, learner)), T * L, T * L // a.minibatches)
+    src0 = torch.zeros(L, dtype=torch.long, device=device) if getattr(model, "v5", False) else None  # for the shapes
+    host = HostRows(stored(rows(obs, learner), src0), T * L, T * L // a.minibatches)
     actions = torch.zeros(T, L, 4, dtype=torch.long, device=device)
     logps, values, rewards, dones = (torch.zeros(T, L, device=device) for _ in range(4))
     outcomes = Outcomes(L)
@@ -580,14 +590,14 @@ def main(argv=None):
                 return False
             t0 = time.perf_counter()
             mine = rows(obs, learner)
-            host.put(step, stored(mine))
             full = torch.zeros(envs.N, 4, dtype=torch.long, device=device)
             with torch.no_grad():
                 with torch.autocast("cuda", torch.bfloat16):
                     out = model(mine)
                 dist = ActionDist(out, mine)
                 act = dist.sample()
-                actions[step], logps[step], values[step] = act, dist.log_prob(act), out["value"].float()
+                host.put(step, stored(mine, dist.src))
+                actions[step], logps[step], values[step] = act, dist.log_prob(act, src=dist.src), out["value"].float()
                 full[learner] = act
                 dead = (mine["scalars"][:, 1] == 0) & (mine["scalars"][:, 4] == 0)
                 tally.index_add_(0, setup_row, torch.cat([nn.functional.one_hot(act[:, 0], envs.T).float(),
@@ -631,11 +641,12 @@ def main(argv=None):
             with torch.autocast("cuda", torch.bfloat16):
                 out = model(o)
             dist = ActionDist(out, o)
-            logp = dist.log_prob(b_act[mb])
+            src = o.get("dst_src")  # a v5 network's sampled sources: its move head runs once for all three terms
+            logp = dist.log_prob(b_act[mb], src=src)
             # The entropy enters the graph only with a weight: 12 heat maps of it. At 0 it is logged after the
             # backward pass, since torch's Categorical caches each head's probabilities, and caching them without a
             # graph before the KL would cut the KL's gradients.
-            ent = dist.entropy() if a.ent_coef else None
+            ent = dist.entropy(src) if a.ent_coef else None
             log_ratio = logp - b_logp[mb]
             ratio = log_ratio.exp()
             mb_adv = (b_adv[mb] - b_adv[mb].mean()) / (b_adv[mb].std() + 1e-8)
@@ -644,7 +655,9 @@ def main(argv=None):
             loss = pg_loss + a.vf_coef * v_loss - (a.ent_coef * ent.mean() if ent is not None else 0)
             if ref is not None:
                 out_r = {k: o["ref_" + k] for k in REF_OUTPUTS if "ref_" + k in o}  # computed in the rollout
-                kl = dist.kl(ActionDist(out_r, o)).mean()  # exact: the one-sample estimate spiked into the hundreds
+                if "ref_dst_logits" in o:
+                    out_r.update(dst_logits=o["ref_dst_logits"], fleet_logits=o["ref_fleet_logits"])
+                kl = dist.kl(ActionDist(out_r, o), src).mean()  # exact: the one-sample estimate spiked into the hundreds
                 loss = loss + a.kl_coef * kl
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -658,7 +671,7 @@ def main(argv=None):
                 stats["loss/policy"].append(pg_loss.item())
                 stats["loss/value"].append(v_loss.item())
                 if ent is not None or i == 0:  # only for the log at ent_coef 0: once per update
-                    stats["loss/entropy"].append((dist.entropy() if ent is None else ent).mean().item())
+                    stats["loss/entropy"].append((dist.entropy(src) if ent is None else ent).mean().item())
                 stats["loss/approx_kl"].append(((ratio - 1) - log_ratio).mean().item())
                 stats["loss/clip_frac"].append(((ratio - 1).abs() > a.clip).float().mean().item())
         metrics = {k: float(np.mean(v)) for k, v in stats.items()}
